@@ -302,7 +302,7 @@ describe("文档阅读：链接与资源", () => {
     expect(documentRemoteImage).not.toHaveBeenCalled();
     await screen.findByText("远程图片尚未加载");
     await fireEvent.click(screen.getByRole("button", { name: "加载图片" }));
-    await waitFor(() => expect(documentRemoteImage).toHaveBeenCalledWith("https://example.com/a.png", expect.any(Number)));
+    await waitFor(() => expect(documentRemoteImage).toHaveBeenCalledWith("https://example.com/a.png", expect.any(Number), expect.any(String)));
   });
 
   it("资源缺失与危险路径就地说明，不写出图片元素", async () => {

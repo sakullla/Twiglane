@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -233,6 +233,54 @@ fn open(agent: &mut Agent, repo: &str) -> Value {
     agent.ok("open-1", "open", json!({ "path": repo }))
 }
 
+fn pty_fixture_profile(response: &Value) -> String {
+    let profiles = response["profiles"].as_array().unwrap();
+    let profile = if cfg!(windows) {
+        profiles.iter().find(|profile| profile["id"] == "cmd")
+    } else {
+        profiles.first()
+    };
+    profile.expect("可用的测试终端")["id"].as_str().unwrap().into()
+}
+
+fn pty_fixture_echo(marker: &str) -> String {
+    // Split the marker in the command so an input echo cannot satisfy the test.
+    let (first, rest) = marker.split_at(1);
+    if cfg!(windows) {
+        format!("echo {first}^{rest}\r")
+    } else {
+        format!("printf '%s%s\\n' {first} {rest}\n")
+    }
+}
+
+fn pty_fixture_ready(agent: &mut Agent, repo: &str, session: &str) {
+    if !cfg!(windows) {
+        return;
+    }
+    // A WebView answers ConPTY cursor position queries through xterm. The
+    // headless protocol fixture must answer before waiting for the cmd prompt.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut answered = 0;
+    loop {
+        let snapshot = agent.ok(
+            "pty-ready-attach", "terminalAttach", json!({ "repo": repo, "sessionId": session }),
+        );
+        let output = snapshot["terminal"]["output"].as_str().unwrap();
+        let queries = output.matches("\u{1b}[6n").count();
+        while answered < queries {
+            agent.ok("pty-ready-cursor", "terminalInput", json!({
+                "repo": repo, "sessionId": session, "data": "\u{1b}[1;1R",
+            }));
+            answered += 1;
+        }
+        if output.contains('>') {
+            return;
+        }
+        assert!(Instant::now() < deadline, "ConPTY 没有显示 cmd 提示符：{output:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[test]
 fn handshake_reports_v2_capabilities_and_rejects_v1_frames() {
     let fixture = Fixture::new("handshake");
@@ -243,6 +291,7 @@ fn handshake_reports_v2_capabilities_and_rejects_v1_frames() {
     assert_eq!(hello["agent"], json!("twiglane-agent/2"));
     assert_eq!(hello["generation"], json!("numeric"));
     assert_eq!(hello["stateToken"], json!("opaque"));
+    assert_eq!(hello["journalIdentity"].as_str().unwrap().len(), 64);
     let capabilities = hello["capabilities"].as_array().unwrap();
     for expected in [
         "open",
@@ -253,7 +302,6 @@ fn handshake_reports_v2_capabilities_and_rejects_v1_frames() {
         "patch",
         "commit",
         "receipt",
-        "journalIdentity",
         "taskReview",
         "reviewIdentity",
     ] {
@@ -996,7 +1044,9 @@ fn token_of(result: &Value) -> String {
 }
 
 fn base_of(fixture: &Fixture) -> PathBuf {
-    std::fs::canonicalize(fixture.root.path()).unwrap()
+    // Git parses worktree and remote arguments as paths or URLs. Avoid the
+    // Win32 verbatim prefix, which Git for Windows reads as a URL authority.
+    dunce::canonicalize(fixture.root.path()).unwrap()
 }
 
 #[test]
@@ -2668,7 +2718,7 @@ fn cancel_stops_an_in_flight_fetch_and_leaves_the_result_unknown() {
     let marker = base.join("remote-started");
     let body = format!(
         "#!/bin/sh\ntouch \"{}\"\nsleep 30\n",
-        marker.display()
+        marker.to_string_lossy().replace('\\', "/")
     );
     std::fs::write(&script, body).unwrap();
     git(
@@ -2676,7 +2726,8 @@ fn cancel_stops_an_in_flight_fetch_and_leaves_the_result_unknown() {
         &fixture.config,
         &["config", "protocol.ext.allow", "always"],
     );
-    let url = format!("ext::sh {}", script.to_string_lossy());
+    let script = script.to_string_lossy().replace('\\', "/").replace('%', "%%").replace(' ', "% ");
+    let url = format!("ext::sh {script}");
     git(&fixture.repo, &fixture.config, &["remote", "add", "origin", &url]);
 
     let mut agent = fixture.agent();
@@ -3113,7 +3164,7 @@ fn shared_parity_scenarios_drive_the_remote_agent() {
     open(&mut agent, &repo);
     let profiles = agent.ok("parity-pty-profiles", "terminalProfiles", json!({ "repo": repo }));
     assert!(!profiles["profiles"].as_array().unwrap().is_empty());
-    let profile = profiles["profiles"][0]["id"].as_str().unwrap().to_string();
+    let profile = pty_fixture_profile(&profiles);
     let created = agent.ok(
         "parity-pty-create",
         "terminalCreate",
@@ -3123,10 +3174,11 @@ fn shared_parity_scenarios_drive_the_remote_agent() {
         .as_str()
         .unwrap()
         .to_string();
+    pty_fixture_ready(&mut agent, &repo, &session);
     agent.ok(
         "parity-pty-input",
         "terminalInput",
-        json!({ "repo": repo, "sessionId": session, "data": format!("echo {echoed}\n") }),
+        json!({ "repo": repo, "sessionId": session, "data": pty_fixture_echo(&echoed) }),
     );
     let mut replayed = false;
     for _ in 0..100 {
@@ -3360,6 +3412,39 @@ fn previews_and_markdown_sources_reuse_the_local_dtos() {
 /// 保存必须带预期内容版本：版本不符时一个字都不写；吻合时留 completed 回执，
 /// 同一 operationId 重放只回原回执。
 #[test]
+fn a_large_file_preview_requires_the_file_reply_budget() {
+    let fixture = Fixture::new("io-large-bitmap");
+    fixture.init();
+    let width = 1024_u32;
+    let height = 1024_u32;
+    let pixels = width * height * 3;
+    let size = 54 + pixels;
+    let mut bmp = vec![0; size as usize];
+    bmp[..2].copy_from_slice(b"BM");
+    bmp[2..6].copy_from_slice(&size.to_le_bytes());
+    bmp[10..14].copy_from_slice(&54_u32.to_le_bytes());
+    bmp[14..18].copy_from_slice(&40_u32.to_le_bytes());
+    bmp[18..22].copy_from_slice(&width.to_le_bytes());
+    bmp[22..26].copy_from_slice(&height.to_le_bytes());
+    bmp[26..28].copy_from_slice(&1_u16.to_le_bytes());
+    bmp[28..30].copy_from_slice(&24_u16.to_le_bytes());
+    bmp[34..38].copy_from_slice(&pixels.to_le_bytes());
+    std::fs::write(fixture.repo.join("large.bmp"), bmp).unwrap();
+
+    let mut agent = fixture.agent();
+    let repo = fixture.repo_str();
+    open(&mut agent, &repo);
+    let mut fields = json!({ "repo": repo, "source": { "revision": "worktree", "path": "large.bmp" } });
+    assert_eq!(agent.error_code("large-old", "filePreview", fields.clone()), "result_too_large");
+    fields["largeFileResponse"] = json!(true);
+    let result = agent.ok("large-new", "filePreview", fields);
+    assert_eq!(result["preview"]["kind"], json!("image"));
+    let data = result["preview"]["dataUrl"].as_str().unwrap();
+    assert!(data.starts_with("data:image/bmp;base64,"));
+    assert!(data.len() > 4 * 1024 * 1024);
+}
+
+#[test]
 fn saving_a_file_requires_the_expected_content_version() {
     let fixture = Fixture::new("io-save");
     fixture.init();
@@ -3411,6 +3496,7 @@ fn saving_a_file_requires_the_expected_content_version() {
         }),
     );
     assert_eq!(saved["receipt"]["state"], json!("completed"));
+    assert_eq!(saved["receipt"]["branch"], opened["snapshot"]["branch"]["name"]);
     assert_eq!(
         std::fs::read_to_string(fixture.repo.join("notes/a.txt")).unwrap(),
         "alpha\nsaved\n"
@@ -3450,14 +3536,18 @@ fn saving_a_file_requires_the_expected_content_version() {
 /// 目录与文件的创建、复制、移动、删除都走同一套写入顺序，并各自留下回执。
 #[test]
 fn folder_writes_create_copy_move_and_delete_leave_receipts() {
-    let fixture = Fixture::new("io-folder");
+    let mut fixture = Fixture::new("io-folder");
+    let named_repo = fixture.repo.with_file_name("repo 中文");
+    std::fs::rename(&fixture.repo, &named_repo).unwrap();
+    fixture.repo = named_repo;
     fixture.init();
     fixture.write("a.txt", "a\n");
     fixture.commit_all("init");
 
     let mut agent = fixture.agent();
-    open(&mut agent, &fixture.repo_str());
     let repo = fixture.repo_str();
+    let incoming = if cfg!(windows) { repo.replace('\\', "/") } else { repo.clone() };
+    open(&mut agent, &incoming);
     let token = agent.ok("io-folder-open", "status", json!({ "repo": repo }))["stateToken"]
         .as_str()
         .unwrap()
@@ -3681,10 +3771,7 @@ fn remote_pty_supports_create_attach_input_resize_restart_and_close() {
     let repo = fixture.repo_str();
 
     let profiles = agent.ok("pty-profiles", "terminalProfiles", json!({ "repo": repo }));
-    let profile = profiles["profiles"][0]["id"]
-        .as_str()
-        .expect("远端必须探测到至少一个终端类型")
-        .to_string();
+    let profile = pty_fixture_profile(&profiles);
     let created = agent.ok(
         "pty-create",
         "terminalCreate",
@@ -3696,12 +3783,13 @@ fn remote_pty_supports_create_attach_input_resize_restart_and_close() {
         .to_string();
     assert_eq!(created["terminal"]["running"], json!(true));
     assert_eq!(created["terminal"]["repoPath"], json!(repo));
+    pty_fixture_ready(&mut agent, &repo, &session);
 
     // 输入后读输出帧：每帧都带仓库、会话与单调序号，并且有大小上限。
     agent.send(
         "pty-input",
         "terminalInput",
-        json!({ "repo": repo, "sessionId": session, "data": "echo parity-pty\n" }),
+        json!({ "repo": repo, "sessionId": session, "data": pty_fixture_echo("parity-pty") }),
     );
     let mut seen = String::new();
     let mut largest = 0;
@@ -3748,13 +3836,18 @@ fn remote_pty_supports_create_attach_input_resize_restart_and_close() {
     assert_eq!(resized["rows"], json!(30));
 
     // 大量输出：帧仍然有界，且一个字节都不丢。
+    let bulk_command = if cfg!(windows) {
+        "for /l %i in (0,1,2999) do @echo line%i\r"
+    } else {
+        "i=0; while [ $i -lt 3000 ]; do echo line$i; i=$((i+1)); done\n"
+    };
     agent.send(
         "pty-bulk",
         "terminalInput",
         json!({
             "repo": repo,
             "sessionId": session,
-            "data": "i=0; while [ $i -lt 3000 ]; do echo line$i; i=$((i+1)); done; echo __PARITY_DONE__\n",
+            "data": bulk_command,
         }),
     );
     let mut bulk = String::new();
@@ -3766,7 +3859,7 @@ fn remote_pty_supports_create_attach_input_resize_restart_and_close() {
             let data = value["data"].as_str().unwrap_or_default();
             largest = largest.max(data.len());
             bulk.push_str(data);
-            // 只在最后一行真的到达时才收尾：命令本身的回显里也有这个标记。
+            // 命令本身不含最后一行的字面内容。
             if bulk.contains("line2999") {
                 break;
             }
@@ -3781,7 +3874,7 @@ fn remote_pty_supports_create_attach_input_resize_restart_and_close() {
     agent.send(
         "pty-exit",
         "terminalInput",
-        json!({ "repo": repo, "sessionId": session, "data": "exit\n" }),
+        json!({ "repo": repo, "sessionId": session, "data": if cfg!(windows) { "exit\r" } else { "exit\n" } }),
     );
     let mut exited = false;
     for _ in 0..100 {
@@ -4013,7 +4106,7 @@ fn terminal_close_cannot_reach_a_session_from_another_repository() {
     fixture.commit_all("init");
 
     let repo_a = fixture.repo_str();
-    let base = std::fs::canonicalize(fixture.root.path()).unwrap();
+    let base = base_of(&fixture);
     let other = base.join("repo-b");
     std::fs::create_dir_all(&other).unwrap();
     git(&other, &fixture.config, &["init", "-b", "main"]);

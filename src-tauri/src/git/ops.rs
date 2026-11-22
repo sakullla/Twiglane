@@ -328,6 +328,7 @@ pub async fn refresh_status(
 #[serde(rename_all = "camelCase")]
 pub struct RepoState {
     pub head: Option<String>,
+    pub branch: Option<String>,
     pub index_digest: String,
     pub worktree_digest: String,
     pub token: String,
@@ -403,6 +404,7 @@ pub async fn state_token(
     hasher.update(worktree_digest.as_bytes());
     Ok(RepoState {
         head: head_oid,
+        branch: snapshot.branch.name,
         index_digest,
         worktree_digest,
         token: hex_digest(hasher),

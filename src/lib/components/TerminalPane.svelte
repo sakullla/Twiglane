@@ -110,6 +110,8 @@
   interface Props {
     sessionId: string;
     router: TerminalRouter;
+    remote?: boolean;
+    connectionLost?: boolean;
     /** 所在标签页是否正在显示（面板展开且标签页激活）。隐藏时不测量尺寸。 */
     visible: boolean;
     /** 是否是当前聚焦的终端；变为 true 且可见时把键盘焦点给它。 */
@@ -135,6 +137,8 @@
   let {
     sessionId,
     router,
+    remote = false,
+    connectionLost = false,
     visible,
     focused,
     theme,
@@ -165,6 +169,15 @@
   let attached = false;
   let lastSeq = 0;
   let pending: ({ kind: "output" } & TerminalOutputEvent | { kind: "exit" } & TerminalExitEvent)[] = [];
+  let pendingBytes = 0;
+  let replaying = false;
+  let needsReplay = false;
+  let replayTruncated = $state(false);
+  let ptyWindows = IS_WINDOWS;
+  const inputEncoder = new TextEncoder();
+  let inputTail = Promise.resolve();
+  let inputBytes = 0;
+  const IO_BUFFER_LIMIT = 1024 * 1024;
   let lastSize = "";
   let pendingSize: { rows: number; cols: number } | null = null;
   let resizing = false;
@@ -176,6 +189,12 @@
   let signalName = $state<string | null>(null);
   let attachError = $state<string | null>(null);
   let writeError = $state<string | null>(null);
+  $effect(() => {
+    if (!connectionLost) return;
+    running = false;
+    starting = false;
+    writeError = "SSH 连接已断开，终端已失效。";
+  });
   let notice = $state<string | null>(null);
   let linkHint = $state<{ x: number; y: number } | null>(null);
   let restarting = $state(false);
@@ -259,11 +278,12 @@
       // 先接收事件，再并行加载 xterm 与读取快照；加载期间的输出按序号补齐。
       stopEvents = router.subscribe(sessionId, {
         output: (event) => {
-          if (!attached && starting) pending.push({ kind: "output", ...event });
+          if (event.replay) return needReplay();
+          if (replaying || (!attached && starting)) bufferEvent({ kind: "output", ...event });
           else if (attached) applyOutput(event);
         },
         exit: (event) => {
-          if (!attached && starting) pending.push({ kind: "exit", ...event });
+          if (replaying || (!attached && starting)) bufferEvent({ kind: "exit", ...event });
           else if (attached) applyExit(event);
         },
       });
@@ -411,14 +431,18 @@
   }
 
   function attach(snapshot: TerminalSnapshot) {
-    running = snapshot.running;
+    running = snapshot.running && !connectionLost;
     exitCode = snapshot.exitCode;
     signalName = snapshot.signal;
     lastSeq = snapshot.seq;
+    replayTruncated = snapshot.replayTruncated === true;
+    if (remote) ptyWindows = /^[a-zA-Z]:[\\/]/.test(snapshot.cwd) || snapshot.cwd.startsWith("\\\\");
     attached = true;
     if (snapshot.output) term?.write(snapshot.output);
     const buffered = pending;
     pending = [];
+    pendingBytes = 0;
+    starting = false;
     for (const event of buffered) {
       if (event.kind === "output") applyOutput(event);
       else applyExit(event);
@@ -427,17 +451,53 @@
     lastSize = "";
     fitNow();
     if (term) sendSize(term.rows, term.cols);
-    starting = false;
+    if (needsReplay) needReplay();
+  }
+
+  function bufferEvent(event: (typeof pending)[number]) {
+    const size = event.kind === "output" ? event.data.length : 0;
+    if (remote && (pending.length >= 512 || pendingBytes + size > IO_BUFFER_LIMIT)) {
+      pending = [];
+      pendingBytes = 0;
+      needsReplay = true;
+    }
+    pending.push(event);
+    pendingBytes += size;
+  }
+
+  function needReplay() {
+    needsReplay = true;
+    if (!attached || replaying || connectionLost || disposed) return;
+    void replayTerminal();
+  }
+
+  async function replayTerminal() {
+    replaying = true;
+    needsReplay = false;
+    try {
+      const snapshot = await api.terminalAttach(sessionId);
+      if (disposed || connectionLost || !term) return;
+      term.reset();
+      attach(snapshot);
+    } catch (error) {
+      if (!disposed && !connectionLost) writeError = normalizeError(error).message;
+      return;
+    } finally {
+      replaying = false;
+    }
+    if (needsReplay) needReplay();
   }
 
   function applyOutput(event: TerminalOutputEvent) {
     if (!terminalEventApplies(sessionId, event.sessionId, event.seq, lastSeq)) return;
+    if (remote && event.seq !== lastSeq + 1) return needReplay();
     lastSeq = event.seq;
     term?.write(event.data);
   }
 
   function applyExit(event: TerminalExitEvent) {
     if (!terminalEventApplies(sessionId, event.sessionId, event.seq, lastSeq)) return;
+    if (remote && event.seq !== lastSeq + 1) return needReplay();
     lastSeq = event.seq;
     running = false;
     exitCode = event.exitCode;
@@ -445,21 +505,33 @@
   }
 
   async function sendInput(data: string) {
-    if (!attached) return;
+    if (!attached || connectionLost) return;
     if (!running) {
       writeError = "终端已退出，无法继续输入；请重新启动这个会话。";
       return;
     }
-    const payload = IS_WINDOWS ? stripWindowsTerminalReplies(data) : data;
+    const payload = ptyWindows ? stripWindowsTerminalReplies(data) : data;
     if (!payload) return;
-    try {
-      await api.terminalWrite(sessionId, payload);
-      writeError = null;
-    } catch (error) {
-      const failure = normalizeError(error);
-      writeError = failure.message;
-      if (failure.code === "terminal_closed") running = false;
+    const size = inputEncoder.encode(payload).length;
+    if (size + inputBytes > IO_BUFFER_LIMIT) {
+      writeError = "终端输入队列已满，这段输入未发送。";
+      return;
     }
+    inputBytes += size;
+    inputTail = inputTail.then(async () => {
+      try {
+        if (!running || disposed || connectionLost) return;
+        await api.terminalWrite(sessionId, payload);
+        if (!connectionLost) writeError = null;
+      } catch (error) {
+        const failure = normalizeError(error);
+        writeError = failure.message;
+        if (failure.code === "terminal_closed") running = false;
+      } finally {
+        inputBytes -= size;
+      }
+    });
+    await inputTail;
   }
 
   /** 行列变化才发给后端；失败只影响尺寸，不改变会话状态，下一次变化还会再同步。 */
@@ -639,6 +711,9 @@
       <span>{writeError}</span>
     </div>
   {/if}
+  {#if replayTruncated}
+    <div class="terminal-notice warn" role="status">终端输出过长，仅恢复最近的内容。</div>
+  {/if}
   {#if notice}
     <div class="terminal-notice warn" role="status">
       <Icon name="info" size={14} />
@@ -657,7 +732,7 @@
       <Icon name="terminal" size={16} />松开以插入路径
     </div>
   {/if}
-  {#if exited}
+  {#if exited && !connectionLost}
     <div class="terminal-exit" data-terminal-exit role="status">
       <span class="terminal-exit-text">{exitText}</span>
       <span class="terminal-exit-note">输出已保留</span>

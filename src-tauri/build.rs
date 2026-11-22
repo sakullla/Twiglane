@@ -68,6 +68,8 @@ fn main() {
             "remote_worktree_write",
             "remote_worktree_recover",
             "remote_worktree_call",
+            "remote_worktree_events",
+            "remote_worktree_cancel_reads",
             "remote_ssh_settings",
             "set_remote_ssh_enabled",
             "remote_ssh_save_target",

@@ -23,16 +23,16 @@ use windows::Win32::UI::Shell::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Identity(u32, u32, u32);
+pub(super) struct Identity(u32, u32, u32);
 
-fn info(file: &fs::File) -> Result<BY_HANDLE_FILE_INFORMATION, AppError> {
+pub(super) fn info(file: &fs::File) -> Result<BY_HANDLE_FILE_INFORMATION, AppError> {
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
     unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }
         .map_err(|_| changed())?;
     Ok(info)
 }
 
-fn identity(file: &fs::File) -> Result<Identity, AppError> {
+pub(super) fn identity(file: &fs::File) -> Result<Identity, AppError> {
     let info = info(file)?;
     Ok(Identity(
         info.dwVolumeSerialNumber,
@@ -69,7 +69,7 @@ fn open(path: &Path, allow_delete: bool) -> Result<fs::File, AppError> {
     Ok(file)
 }
 
-fn final_path(file: &fs::File) -> Result<PathBuf, AppError> {
+pub(super) fn final_path(file: &fs::File) -> Result<PathBuf, AppError> {
     use std::os::windows::ffi::OsStringExt;
     let mut buffer = vec![0; 32768];
     let length = unsafe {
@@ -145,7 +145,7 @@ fn scan(
     Ok(())
 }
 
-fn bind(boundary: &EditBoundary, relative: &Path) -> Result<BoundTrashTarget, AppError> {
+pub(super) fn pin_parents(boundary: &EditBoundary, relative: &Path) -> Result<Vec<Arc<fs::File>>, AppError> {
     let path = boundary.root.join(relative);
     let mut parents = Vec::new();
     // Pin from the volume root down, including ancestors outside the repository.
@@ -158,19 +158,31 @@ fn bind(boundary: &EditBoundary, relative: &Path) -> Result<BoundTrashTarget, Ap
         }
         parents.push(Arc::new(file));
     }
-    let git_ids = boundary
-        .git_dirs
-        .iter()
-        .map(|path| identity(&open(path, true)?))
-        .collect::<Result<Vec<_>, _>>()?;
     let mut current = boundary.root.clone();
     for component in relative.parent().unwrap_or(Path::new("")).components() {
         current.push(component);
         ensure_editable_location(boundary, &final_path(&open(&current, false)?)?)?;
-        if current.join(".git").symlink_metadata().is_ok() {
-            return Err(nested_repository_error());
+        match current.join(".git").symlink_metadata() {
+            Ok(_) => return Err(nested_repository_error()),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(entry_io_error(error, "无法确认嵌套仓库边界。")),
         }
     }
+    Ok(parents)
+}
+
+fn git_identities(boundary: &EditBoundary) -> Result<Vec<Identity>, AppError> {
+    boundary.git_dirs.iter().map(|path| identity(&open(path, true)?)).collect()
+}
+
+pub(super) fn verify_tree(boundary: &EditBoundary, path: &Path) -> Result<(), AppError> {
+    scan(boundary, path, &git_identities(boundary)?, &mut Vec::new())
+}
+
+fn bind(boundary: &EditBoundary, relative: &Path) -> Result<BoundTrashTarget, AppError> {
+    let parents = pin_parents(boundary, relative)?;
+    let git_ids = git_identities(boundary)?;
+    let path = boundary.root.join(relative);
     let file = Arc::new(open(&path, true)?);
     let path = final_path(&file)?;
     let mut entries = Vec::new();

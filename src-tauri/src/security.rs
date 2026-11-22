@@ -45,6 +45,8 @@ fn capabilities_grant_only_explicit_terminal_ipc_not_a_generic_shell() {
         "allow-remote-worktree-recover",
         // 通用远端桥接只开放 op 白名单内的 Git 能力：没有 shell、程序、工作目录或环境变量。
         "allow-remote-worktree-call",
+        "allow-remote-worktree-events",
+        "allow-remote-worktree-cancel-reads",
         "allow-remote-ssh-settings",
         "allow-set-remote-ssh-enabled",
         "allow-remote-ssh-save-target",
@@ -325,7 +327,14 @@ fn assert_source_has_no_shell(dir: &Path) {
     let cmd_exe = format!("Command::new({}cmd.exe{})", '"', '"');
     let powershell = format!("Command::new({}powershell{})", '"', '"');
     for path in rust_files(dir) {
-        let text = fs::read_to_string(&path).unwrap();
+        let source = fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
+        // This trailing test module launches the fixed Windows transport via
+        // cmd to exercise OpenSSH's Windows command-line decoding.
+        let text = if path.ends_with(Path::new("remote_ssh/transport.rs")) {
+            source.split_once("#[cfg(test)]\nmod tests {").map_or(source.as_str(), |(code, _)| code)
+        } else {
+            source.as_str()
+        };
         assert!(!text.contains(&shell), "{}", path.display());
         assert!(!text.contains(&bash), "{}", path.display());
         assert!(!text.contains(&cmd), "{}", path.display());
@@ -440,10 +449,9 @@ fn command_registration_is_identical_in_handler_manifest_and_capabilities() {
 
     assert_eq!(handler, manifest, "generate_handler 与 build.rs 不一致");
     assert_eq!(handler, allowed, "capabilities 与命令注册不一致");
-    assert!(
-        handler.iter().any(|name| name == "remote_worktree_call"),
-        "通用远端桥接命令必须在三处同时登记"
-    );
+    for command in ["remote_worktree_call", "remote_worktree_events", "remote_worktree_cancel_reads"] {
+        assert!(handler.iter().any(|name| name == command), "{command} 必须在三处同时登记");
+    }
 }
 
 /// 从注册片段里取出命令名：`module::command` 与 `"command"` 两种写法都取最后一段。

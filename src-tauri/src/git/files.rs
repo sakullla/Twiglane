@@ -2594,6 +2594,10 @@ fn mutation_path(path: &str) -> Result<PathBuf, AppError> {
             "文件或目录路径不能为空，未修改仓库。",
         ));
     }
+    #[cfg(windows)]
+    for part in normalized.components() {
+        windows_entry::validate_name(part.as_os_str())?;
+    }
     Ok(normalized)
 }
 
@@ -2638,7 +2642,7 @@ enum EntryTargetState {
     Unknown,
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn platform_entry_unsupported() -> AppError {
     AppError::new(
         "entry_platform_unsupported",
@@ -2654,6 +2658,9 @@ use secure_entry_ops::BoundTrashTarget;
 mod windows_trash;
 #[cfg(windows)]
 use windows_trash::BoundTrashTarget;
+#[cfg(windows)]
+#[path = "windows_entry.rs"]
+mod windows_entry;
 
 /// 没有回收站适配器的平台不存在可绑定的回收站目标：命令在校验前就失败关闭，
 /// 适配器永远不会被调用。保留该类型只为让 `repository_delete_entry` 的适配器签名跨平台一致。
@@ -4520,7 +4527,16 @@ fn create_entry(
     secure_entry_ops::create(boundary, relative, kind)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+fn create_entry(
+    boundary: &EditBoundary,
+    relative: &Path,
+    kind: RepositoryCreateEntryKind,
+) -> Result<(), AppError> {
+    windows_entry::create(boundary, relative, kind)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn create_entry(
     _boundary: &EditBoundary,
     _relative: &Path,
@@ -4539,7 +4555,17 @@ fn copy_entry(
     secure_entry_ops::copy(boundary, source, target, wrote)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+fn copy_entry(
+    boundary: &EditBoundary,
+    source: &Path,
+    target: &Path,
+    wrote: &mut bool,
+) -> Result<(), AppError> {
+    windows_entry::copy(boundary, source, target, wrote)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn copy_entry(
     _boundary: &EditBoundary,
     _source: &Path,
@@ -4554,7 +4580,12 @@ fn move_entry(boundary: &EditBoundary, source: &Path, target: &Path) -> Result<(
     secure_entry_ops::move_entry(boundary, source, target)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+fn move_entry(boundary: &EditBoundary, source: &Path, target: &Path) -> Result<(), AppError> {
+    windows_entry::move_entry(boundary, source, target)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn move_entry(_boundary: &EditBoundary, _source: &Path, _target: &Path) -> Result<(), AppError> {
     Err(platform_entry_unsupported())
 }

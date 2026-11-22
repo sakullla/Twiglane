@@ -1,7 +1,7 @@
 //! v2 协议边界：有界 JSON Lines、请求标识、版本握手与响应帧。
 //!
 //! 与 v1 的差别只在版本号、能力面和请求上限：一条请求一行、UTF-8、请求最多
-//! 8 MiB（`MAX_REQUEST_BYTES`）、单条响应最多 4 MiB、同一通道最多 16 个在途请求。
+//! 8 MiB（`MAX_REQUEST_BYTES`）、普通响应最多 4 MiB、同一通道最多 16 个在途请求。
 //! 响应可以乱序返回，客户端按 `id` 匹配，因此取消与选择抢占不需要独占整条通道。
 
 use serde_json::{Map, Value};
@@ -19,6 +19,8 @@ pub const PROTOCOL: u32 = 2;
 /// `request_too_large`，不会先把任意大的行缓冲进内存再判断。
 pub const MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+/// 文件预览允许 16 MiB 原始资源，经过 base64 包装仍须能通过此上限。
+pub const MAX_FILE_RESPONSE_BYTES: usize = 24 * 1024 * 1024;
 pub const MAX_IN_FLIGHT: usize = 16;
 const MAX_TOKEN: usize = 80;
 
@@ -36,7 +38,6 @@ pub const CAPABILITIES: &[&str] = &[
     "patch",
     "commit",
     "receipt",
-    "journalIdentity",
     "cancel",
     // 历史、比较与文件历史（T2）
     "history",
@@ -129,6 +130,7 @@ pub struct Request {
     pub id: String,
     pub op: String,
     pub fields: Map<String, Value>,
+    pub large_file_response: bool,
 }
 
 /// 请求本身不合法时仍要回答，因此连可用的 `id` 一起带回。
@@ -215,17 +217,18 @@ pub fn parse_request(line: &[u8]) -> Result<Request, Rejection> {
             ))
         }
     };
-    Ok(Request { id, op, fields })
+    let large_file_response = fields.remove("largeFileResponse").and_then(|value| value.as_bool()) == Some(true);
+    Ok(Request { id, op, fields, large_file_response })
 }
 
-pub fn ok_frame(id: &str, result: Value) -> Vec<u8> {
+pub fn ok_frame(id: &str, result: Value, limit: usize) -> Vec<u8> {
     let frame = serde_json::json!({ "v": PROTOCOL, "id": id, "ok": true, "result": result });
-    bounded(id, frame)
+    bounded(id, frame, limit)
 }
 
 pub fn err_frame(id: &str, error: &AppError) -> Vec<u8> {
     let frame = serde_json::json!({ "v": PROTOCOL, "id": id, "ok": false, "error": error });
-    bounded(id, frame)
+    bounded(id, frame, MAX_RESPONSE_BYTES)
 }
 
 /// 事件帧：不携带请求 `id`，客户端按 `event` 字段分派。
@@ -250,12 +253,12 @@ pub fn event_frame(kind: &str, body: Map<String, Value>) -> Vec<u8> {
     bytes
 }
 /// 结果超出单帧上限时换成明确的错误，绝不发送半截 JSON。
-fn bounded(id: &str, frame: Value) -> Vec<u8> {
+fn bounded(id: &str, frame: Value, limit: usize) -> Vec<u8> {
     let mut bytes = serde_json::to_vec(&frame).unwrap_or_default();
-    if bytes.len() > MAX_RESPONSE_BYTES {
+    if bytes.len() > limit {
         let error = AppError::new(
             "result_too_large",
-            "响应超过 4 MiB，请减少每页数量或缩小请求范围。",
+            format!("响应超过 {} MiB，请减少每页数量或缩小请求范围。", limit / (1024 * 1024)),
         );
         bytes = serde_json::to_vec(&serde_json::json!({
             "v": PROTOCOL,

@@ -544,7 +544,7 @@
       const cancel = () => void api.cancelDocumentResources(requestId).catch(() => {});
       signal.addEventListener("abort", cancel, { once: true });
       try {
-        const result = await api.documentRemoteImage(target.reason, requestId);
+        const result = await api.documentRemoteImage(target.reason, requestId, repository);
         if (signal.aborted) throw new Error("图片读取已取消。");
         return { dataUrl: result.dataUrl, message: result.message || "远程图片不可用。" };
       } finally {

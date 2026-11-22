@@ -1319,12 +1319,14 @@ export interface TerminalSnapshot {
   signal: string | null;
   seq: number;
   output: string;
+  replayTruncated?: boolean;
 }
 
 export interface TerminalOutputEvent {
   sessionId: string;
   seq: number;
   data: string;
+  replay?: boolean;
 }
 
 export interface TerminalExitEvent {

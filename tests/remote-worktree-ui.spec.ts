@@ -22,6 +22,8 @@ const port = vi.hoisted(() => ({
   write: vi.fn(),
   recover: vi.fn(),
   call: vi.fn(),
+  events: vi.fn(),
+  cancelReads: vi.fn(),
 }));
 
 const review = vi.hoisted(() => ({
@@ -32,15 +34,18 @@ const review = vi.hoisted(() => ({
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock("../src/lib/remote-worktree", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/lib/remote-worktree")>();
   return { ...actual, remoteWorktreePort: port, remoteReviewPort: review };
 });
 
-import { api, openRemoteRepository, remoteRepositoryState } from "../src/lib/api";
+import { api, listenEvent, openRemoteRepository, remoteRepositoryState } from "../src/lib/api";
 import {
   REMOTE_READ_OPS,
+  REMOTE_TERMINAL_OPS,
   REMOTE_WRITE_OPS,
+  type RemoteEventBatch,
   normalizeRemotePath,
   parseRemotePatch,
   parseRemoteRepositoryKey,
@@ -561,6 +566,149 @@ describe("远端仓库在主窗口：审查基线、草稿与新建/克隆的边
   });
 });
 
+describe("远端文件与终端", () => {
+  it("Windows 文件树和搜索走同一个 SSH 响应代次", async () => {
+    const root = "C:/工作区/含 空格";
+    const key = remoteRepositoryKey(hostA.targetId, root);
+    const repository = await openHost(hostA, key, "session-win", snapshot({ root, repo: root }));
+    port.call
+      .mockResolvedValueOnce({ repo: root, directory: { path: "", generation: 1, entries: [{ path: "中文.md" }] } })
+      .mockResolvedValueOnce({ repo: root, search: { generation: 1, hits: [] } })
+      .mockResolvedValueOnce({ repo: root, search: { generation: 1, matches: [] } });
+    const { generation } = repository;
+    await expect(api.repositoryDirectory(key, "", false, generation, 61)).resolves.toMatchObject({ generation });
+    await api.repositoryPathSearch(key, "中文", null, false, 50, generation, 62);
+    await api.repositoryContentSearch(key, "标记", { kind: "file", path: "中文.md" }, false, 30, generation, 63);
+    expect(port.call.mock.calls.map(([request]) => request)).toEqual([
+      { sessionId: "session-win", op: "directory", readId: 61, fields: { relative: "", includeIgnored: false } },
+      { sessionId: "session-win", op: "pathSearch", readId: 62, fields: { query: "中文", directory: null, includeIgnored: false, limit: 50 } },
+      { sessionId: "session-win", op: "contentSearch", readId: 63, fields: { query: "标记", scope: { kind: "file", path: "中文.md" }, includeIgnored: false, limit: 30 } },
+    ]);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("在 Cliora 会话中保持 Markdown 的来源绑定和图片的取消归属", async () => {
+    const openedReview = await openRemoteRepository(
+      { kind: "ssh", hostId: hostA.targetId, hostRevision: hostA.targetRevision, path: "/srv/repo" },
+      { reviewId: "remote-review", baseline: "c".repeat(40) },
+    );
+    if (openedReview.kind !== "opened") throw new Error("expected review session");
+    const { generation } = openedReview.repository;
+    const source = { path: "doc.md", revision: "worktree" };
+    port.call
+      .mockResolvedValueOnce({ repo: "repo-a", document: { generation: 7, source: { ...source, repository: "repo-a" } } })
+      .mockResolvedValueOnce({ repo: "repo-a", resource: { kind: "image", generation: 7 } })
+      .mockResolvedValueOnce({ repo: "repo-a", image: { kind: "image", generation: 0 } });
+    const doc = await api.repositoryDocument(keyA, source, generation, 70);
+    expect(doc.source.repository).toBe(keyA);
+    await expect(api.documentResource(keyA, { ...doc.source, path: "资产/a.png" }, generation, 71)).resolves.toMatchObject({ generation });
+    await expect(api.documentResource(keyA, { ...doc.source, repository: keyB }, generation, 72)).rejects.toMatchObject({ code: "document_repository" });
+    await api.documentRemoteImage("https://example.com/a.png", 73, keyA);
+    expect(port.call.mock.calls.map(([request]) => request.op)).toEqual(["document", "documentResource", "documentRemoteImage"]);
+    expect(port.call.mock.calls[1][0].fields.source.repository).toBe("repo-a");
+    expect(invoke).not.toHaveBeenCalled();
+    await api.cancelDocumentResources(73);
+    expect(port.cancelReads).toHaveBeenCalledWith("session-a", 73);
+  });
+
+  it("文件保存保留版本摘要，并把已确认的编辑冲突和预期回执区分开", async () => {
+    const { generation } = await openHost();
+    port.call
+      .mockResolvedValueOnce({ state: "failed", operationId: "first", code: "edit_conflict", message: "文件在编辑期间已变化" })
+      .mockResolvedValueOnce({
+        state: "completed", operationId: "second", snapshot: snapshot({ generation: "g2" }),
+        edit: { path: "小.txt", text: "next\n", digest: "b".repeat(64), generation: 2 },
+      });
+    await expect(api.repositoryEditSave(keyA, "小.txt", "a".repeat(64), "draft", generation, 81)).rejects.toMatchObject({ code: "edit_conflict" });
+    expect(remoteRepositoryState(keyA)?.pending).toBe(false);
+    const saved = await api.repositoryEditSave(keyA, "小.txt", "c".repeat(64), "next\n", generation, 82);
+    expect(saved).toMatchObject({ text: "next\n", digest: "b".repeat(64) });
+    expect(saved.generation).toBeGreaterThan(generation);
+    expect(port.call.mock.calls[1][0]).toEqual({
+      sessionId: "session-a", op: "editSave", generation: "g1",
+      fields: { path: "小.txt", expectedDigest: "c".repeat(64), content: "next\n" },
+    });
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("远端批量删除保留实际部分失败，重复删除不会切成永久模式", async () => {
+    const { generation } = await openHost();
+    port.call.mockResolvedValueOnce({
+      state: "completed", operationId: "delete", snapshot: snapshot({ generation: "g2" }),
+      delete: { deleted: ["one.txt"], skipped: [], failures: [{ path: "two.txt", code: "trash_failed", message: "回收站不可用" }] },
+    });
+    const result = await api.repositoryDeleteEntries(keyA, ["one.txt", "two.txt"], false, generation, 85);
+    expect(result.deleted).toEqual(["one.txt"]);
+    expect(result.failures).toMatchObject([{ path: "two.txt", code: "trash_failed" }]);
+    expect(port.call).toHaveBeenCalledOnce();
+    expect(port.call.mock.calls[0][0].fields.permanent).toBe(false);
+  });
+
+  it("终端拼接分片输出并在断线后阻止旧会话落到本机终端", async () => {
+    const events = deferred<RemoteEventBatch>();
+    const disconnected = deferred<RemoteEventBatch>();
+    port.events.mockReturnValueOnce(events.promise).mockReturnValueOnce(disconnected.promise);
+    port.open.mockResolvedValue({ ...opened(), events: true });
+    const repository = await api.openRepository(keyA, 90);
+    const remoteTerminal = { repoPath: "repo-a", sessionId: "terminal-5-1", seq: 0, cwd: "/srv/repo", shell: "/bin/sh", running: true };
+    port.call
+      .mockResolvedValueOnce({ repo: "repo-a", terminal: remoteTerminal })
+      .mockResolvedValueOnce({ repo: "repo-a", accepted: true });
+    const term = await api.terminalCreate(repository.summary.path);
+    expect(term.sessionId).not.toBe(remoteTerminal.sessionId);
+    await api.terminalWrite(term.sessionId, "pwd\r");
+    expect(port.call.mock.calls[1][0]).toMatchObject({
+      sessionId: "session-a", op: "terminalInput", fields: { sessionId: "terminal-5-1", data: "pwd\r" },
+    });
+    const output = vi.fn();
+    const stop = await listenEvent("terminal-output", output);
+    try {
+      const event = { repo: "repo-a", event: "terminalOutput", sessionId: "terminal-5-1", seq: 1, parts: 2 };
+      events.resolve({
+        overflow: false, disconnected: false,
+        events: [
+          { ...event, repo: "alternate-repo", part: 0, data: "别的仓库" },
+          { ...event, part: 0, data: "远端" }, { ...event, part: 1, data: "输出" },
+        ],
+      });
+      await vi.waitFor(() => expect(output).toHaveBeenCalledExactlyOnceWith({ sessionId: term.sessionId, seq: 1, data: "远端输出" }));
+      disconnected.resolve({ events: [], overflow: false, disconnected: true });
+      await vi.waitFor(() => expect(remoteRepositoryState(keyA)?.connected).toBe(false));
+      await expect(api.terminalWrite(term.sessionId, "old")).rejects.toMatchObject({ code: "terminal_closed" });
+      expect(invoke).not.toHaveBeenCalled();
+    } finally {
+      stop();
+    }
+  });
+
+  it("事件 IPC 出错时保持仓库连接并允许手动读取", async () => {
+    port.events.mockRejectedValueOnce("event command unavailable");
+    port.open.mockResolvedValue({ ...opened(), events: true });
+    port.call.mockResolvedValueOnce({ repo: "repo-a", directory: { generation: 1, entries: [] } });
+    const changed = vi.fn();
+    const stop = await listenEvent("repo-changed", changed);
+    try {
+      const { generation } = await api.openRepository(keyA, 90);
+      await vi.waitFor(() => expect(changed).toHaveBeenCalledWith({ path: keyA, generation, degraded: true }));
+      expect(remoteRepositoryState(keyA)?.connected).toBe(true);
+      await expect(api.repositoryDirectory(keyA, "", false, generation, 91)).resolves.toMatchObject({ entries: [] });
+    } finally {
+      stop();
+    }
+  });
+
+  it("初始历史差异使用组件默认分页，显式下一页保留大小", async () => {
+    const { generation } = await openHost();
+    port.call
+      .mockResolvedValueOnce({ repo: "repo-a", diff: {} })
+      .mockResolvedValueOnce({ repo: "repo-a", compareFileDiff: {} });
+    await api.commitFileDiff(keyA, "a".repeat(40), null, "small.txt", generation, 91);
+    await api.compareFileDiff(keyA, "a".repeat(40), "b".repeat(40), "small.txt", generation, 92, 50, 100);
+    expect(port.call.mock.calls[0][0].fields).not.toHaveProperty("limit");
+    expect(port.call.mock.calls[1][0].fields).toMatchObject({ offset: 50, limit: 100 });
+  });
+});
+
 describe("远端桥接：op 白名单与块级可暂存标记", () => {
   it("白名单与 Rust 侧的 BRIDGE_READ_OPS / BRIDGE_WRITE_OPS 逐项一致", async () => {
     const { readFileSync } = await import("node:fs");
@@ -575,6 +723,7 @@ describe("远端桥接：op 白名单与块级可暂存标记", () => {
     };
     expect([...REMOTE_READ_OPS]).toEqual(declared("BRIDGE_READ_OPS"));
     expect([...REMOTE_WRITE_OPS]).toEqual(declared("BRIDGE_WRITE_OPS"));
+    expect([...REMOTE_TERMINAL_OPS]).toEqual(declared("TERMINAL_OPS"));
     // 有独立命令的 op 不经桥接，避免同一条能力出现两个入口。
     for (const op of ["open", "status", "diff", "write", "recover"]) {
       expect([...REMOTE_READ_OPS, ...REMOTE_WRITE_OPS]).not.toContain(op);

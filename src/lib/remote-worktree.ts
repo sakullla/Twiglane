@@ -1,11 +1,13 @@
 import type {
   BranchInfo,
+  BatchDeleteResult,
   ChangeKind,
   DiffHunk,
   DiffLine,
   DiffResponse,
   FileChange,
   RepositoryEndpoint,
+  RepositoryEditSnapshot,
   StatusSnapshot,
 } from "./types";
 
@@ -68,7 +70,7 @@ export interface RemoteConnectionProgress {
 }
 
 export type RemoteOpenResult =
-  | { kind: "open"; sessionId: string; snapshot: RemoteWorktreeSnapshot; pendingWrite: RemotePendingWrite | null; reviewOutcome?: RemoteReviewOutcome | null }
+  | { kind: "open"; sessionId: string; snapshot: RemoteWorktreeSnapshot; pendingWrite: RemotePendingWrite | null; reviewOutcome?: RemoteReviewOutcome | null; events?: boolean }
   | { kind: "install_required"; version: string; size: number; confirmationId?: string };
 
 export type RemoteDiffView = "staged" | "unstaged" | "task";
@@ -103,7 +105,7 @@ export type RemoteWriteAction =
 
 export interface RemotePendingWrite {
   operationId: string;
-  op: RemoteWriteAction["op"];
+  op: RemoteWriteAction["op"] | RemoteWriteOp;
 }
 
 export type RemoteWriteRequest = RemoteWriteAction & {
@@ -138,6 +140,15 @@ export const REMOTE_READ_OPS = [
   "mergeSession",
   "conflictView",
   "worktrees",
+  "directory",
+  "fileContent",
+  "filePreview",
+  "document",
+  "documentResource",
+  "documentRemoteImage",
+  "pathSearch",
+  "contentSearch",
+  "editSnapshot",
 ] as const;
 
 export const REMOTE_WRITE_OPS = [
@@ -172,11 +183,28 @@ export const REMOTE_WRITE_OPS = [
   "amendCommit",
   "discard",
   "worktreeRemove",
+  "editSave",
+  "createEntry",
+  "copyEntry",
+  "moveEntry",
+  "deleteEntries",
+] as const;
+
+export const REMOTE_TERMINAL_OPS = [
+  "terminalProfiles",
+  "terminalList",
+  "terminalCreate",
+  "terminalAttach",
+  "terminalInput",
+  "terminalResize",
+  "terminalRestart",
+  "terminalClose",
 ] as const;
 
 export type RemoteReadOp = (typeof REMOTE_READ_OPS)[number];
 export type RemoteWriteOp = (typeof REMOTE_WRITE_OPS)[number];
-export type RemoteCallOp = RemoteReadOp | RemoteWriteOp;
+export type RemoteTerminalOp = (typeof REMOTE_TERMINAL_OPS)[number];
+export type RemoteCallOp = RemoteReadOp | RemoteWriteOp | RemoteTerminalOp;
 
 export interface RemoteCallRequest {
   sessionId: string;
@@ -185,6 +213,13 @@ export interface RemoteCallRequest {
   fields?: Record<string, unknown>;
   /** 状态代次；有就随请求带上，由远端核对。 */
   generation?: string;
+  readId?: number;
+}
+
+export interface RemoteEventBatch {
+  events: Record<string, unknown>[];
+  overflow: boolean;
+  disconnected: boolean;
 }
 
 /**
@@ -194,9 +229,9 @@ export interface RemoteCallRequest {
 export type RemoteCallResult = RemoteWriteResult | Record<string, unknown>;
 
 export type RemoteWriteResult =
-  | { state: "completed"; operationId: string; snapshot: RemoteWorktreeSnapshot; head?: string | null; reviewOutcome?: RemoteReviewOutcome | null }
+  | { state: "completed"; operationId: string; snapshot: RemoteWorktreeSnapshot; head?: string | null; reviewOutcome?: RemoteReviewOutcome | null; edit?: RepositoryEditSnapshot; delete?: BatchDeleteResult }
   // Return "failed" only when the outcome is verified and the write had no effect.
-  | { state: "failed" | "unknown"; operationId: string; op?: RemotePendingWrite["op"]; message: string };
+  | { state: "failed" | "unknown"; operationId: string; op?: RemotePendingWrite["op"]; message: string; code?: string };
 
 export interface RemoteWorktreePort {
   targets: () => Promise<RemoteTarget[]>;
@@ -209,6 +244,8 @@ export interface RemoteWorktreePort {
   recover: (sessionId: string, operationId: string) => Promise<RemoteWriteResult>;
   /** 通用桥接：按 op 白名单调用远端 agent v2 的其余 Git 能力。 */
   call: (request: RemoteCallRequest) => Promise<RemoteCallResult>;
+  events: (sessionId: string) => Promise<RemoteEventBatch>;
+  cancelReads: (sessionId: string, requestId?: number) => Promise<void>;
 }
 
 async function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -230,6 +267,8 @@ export const remoteWorktreePort: RemoteWorktreePort = {
   write: (request) => invoke("remote_worktree_write", { request }),
   recover: (sessionId, operationId) => invoke("remote_worktree_recover", { sessionId, operationId }),
   call: (request) => invoke("remote_worktree_call", { request }),
+  events: (sessionId) => invoke("remote_worktree_events", { sessionId }),
+  cancelReads: (sessionId, requestId) => invoke("remote_worktree_cancel_reads", { sessionId, requestId }),
 };
 
 export interface RemoteReviewSource {

@@ -504,6 +504,12 @@ describe("远端桥接：历史、分支、同步、stash、合并都走 op 白�
     // 已接通：历史、分支标签、同步、stash、合并与提交范围内核对，不再被挡住。
     for (const id of [
       "view.history",
+      "view.files",
+      "files.quickOpen",
+      "files.search",
+      "file.reveal",
+      "terminal.new",
+      "terminal.toggle",
       "task.stash",
       "task.merge",
       "task.abortMerge",
@@ -518,7 +524,7 @@ describe("远端桥接：历史、分支、同步、stash、合并都走 op 白�
       expect(blocked.has(id), id + " 已接通却被挡住").toBe(false);
     }
     // 仍然依赖本机能力或缺少桥接 op 的入口继续挡住。
-    for (const id of ["view.files", "files.search", "task.scope", "sync.upstream", "commit.push", "terminal.new"]) {
+    for (const id of ["task.scope", "sync.upstream", "commit.push"]) {
       expect(blocked.has(id), id + " 没有接通却放开了").toBe(true);
     }
   });

@@ -30,6 +30,7 @@
   import { onMount, tick, untrack } from "svelte";
   import { api, listenEvent } from "../api";
   import { normalizeError } from "../errors";
+  import { isRemoteRepositoryKey } from "../remote-worktree";
   import {
     MAX_PANES_PER_GROUP,
     MAX_TERMINALS_PER_REPO,
@@ -72,6 +73,8 @@
   interface Props {
     /** 当前仓库根目录；每个仓库有自己的一组终端。 */
     path: string;
+    remoteConnectionId?: string;
+    remoteConnected?: boolean;
     /** 状态栏与命令面板共同控制的展开状态。 */
     open: boolean;
     theme: "light" | "dark";
@@ -89,6 +92,8 @@
 
   let {
     path,
+    remoteConnectionId,
+    remoteConnected = true,
     open,
     theme,
     fontSize = TERMINAL_FONT_DEFAULT,
@@ -108,6 +113,7 @@
   const router = new TerminalRouter(listenEvent);
   let disposed = false;
   const paneApis = new Map<string, TerminalPaneApi>();
+  const connections = new Map<string, string>();
 
   let layouts = $state<Record<string, TerminalLayout>>({});
   let infos = $state<Record<string, SessionInfo>>({});
@@ -115,7 +121,7 @@
   let bootErrors = $state<Record<string, string | null>>({});
   let actionError = $state<string | null>(null);
   let creating = $state(false);
-  let profiles = $state<TerminalProfile[]>([]);
+  const profiles = new Map<string, TerminalProfile[]>();
   let maximized = $state(false);
   let height = $state<number | null>(loadHeight());
   let menu = $state<ContextMenuRequest | null>(null);
@@ -165,10 +171,22 @@
   $effect(() => {
     const isOpen = open;
     const repo = path;
-    if (!isOpen || !repo) return;
+    const connection = remoteConnectionId;
+    const connected = remoteConnected;
+    if (!repo) return;
     untrack(() => {
+      const previous = connections.get(repo);
+      if (connection && previous && previous !== connection) {
+        for (const group of layouts[repo]?.groups ?? []) group.panes.forEach(forget);
+        layouts[repo] = emptyLayout();
+        booting[repo] = false;
+        creating = false;
+        profiles.delete(previous);
+        actionError = "旧 SSH 连接的终端已结束。";
+      }
+      if (connection) connections.set(repo, connection);
       const current = layouts[repo];
-      if ((!current || sessionCount(current) === 0) && !booting[repo]) void bootstrap(repo);
+      if (isOpen && connected && (!current || sessionCount(current) === 0) && !booting[repo]) void bootstrap(repo);
     });
   });
 
@@ -212,16 +230,21 @@
     return null;
   }
 
+  function ownsTerminalConnection(repo: string, connection: string | undefined): boolean {
+    return !disposed && (!isRemoteRepositoryKey(repo) || (path === repo && remoteConnectionId === connection && remoteConnected));
+  }
+
   /** 首次展开某个仓库：先恢复后端已有会话，没有才新建一个。返回是否新建过。 */
   async function bootstrap(repo: string): Promise<boolean> {
-    if (disposed) return false;
+    const connection = remoteConnectionId;
+    if (!ownsTerminalConnection(repo, connection)) return false;
     preloadTerminal();
     void router.start().catch(() => {});
     booting[repo] = true;
     bootErrors[repo] = null;
     try {
       const existing = await api.terminalList(repo);
-      if (disposed) return false;
+      if (!ownsTerminalConnection(repo, connection)) return false;
       if (existing.length > 0) {
         existing.forEach(remember);
         layouts[repo] = layoutFromSessions(existing.map((snapshot) => snapshot.sessionId));
@@ -229,25 +252,26 @@
       }
       const snapshot = await api.terminalCreate(repo, null);
       // 组件卸载期间完成的新建没有归属，必须回收；已有后台会话仍按仓库保留。
-      if (disposed) {
-        await api.terminalClose(snapshot.sessionId);
+      if (!ownsTerminalConnection(repo, connection)) {
+        await api.terminalClose(snapshot.sessionId).catch(() => {});
         return false;
       }
       remember(snapshot);
       layouts[repo] = addGroup(emptyLayout(), snapshot.sessionId);
       return true;
     } catch (error) {
-      bootErrors[repo] = normalizeError(error).message;
+      if (ownsTerminalConnection(repo, connection)) bootErrors[repo] = normalizeError(error).message;
       return false;
     } finally {
-      booting[repo] = false;
+      if (!isRemoteRepositoryKey(repo) || connections.get(repo) === connection) booting[repo] = false;
     }
   }
 
   /** 新建终端：`split` 时并排进当前标签页，否则开新标签页。 */
   async function create(profile: string | null, split: boolean) {
     const repo = path;
-    if (!repo || creating || disposed) return;
+    const connection = remoteConnectionId;
+    if (!repo || creating || !ownsTerminalConnection(repo, connection)) return;
     if (sessionCount(layouts[repo] ?? emptyLayout()) >= MAX_TERMINALS_PER_REPO) {
       actionError = limitReason || `每个仓库最多 ${MAX_TERMINALS_PER_REPO} 个终端，请先关闭不用的终端`;
       return;
@@ -257,8 +281,8 @@
     actionError = null;
     try {
       const snapshot = await api.terminalCreate(repo, profile);
-      if (disposed) {
-        await api.terminalClose(snapshot.sessionId);
+      if (!ownsTerminalConnection(repo, connection)) {
+        await api.terminalClose(snapshot.sessionId).catch(() => {});
         return;
       }
       remember(snapshot);
@@ -266,9 +290,9 @@
       layouts[repo] = split ? splitGroup(current, current.activeGroup, snapshot.sessionId) : addGroup(current, snapshot.sessionId);
       bootErrors[repo] = null;
     } catch (error) {
-      actionError = normalizeError(error).message;
+      if (ownsTerminalConnection(repo, connection)) actionError = normalizeError(error).message;
     } finally {
-      creating = false;
+      if (!isRemoteRepositoryKey(repo) || connections.get(repo) === connection) creating = false;
     }
   }
 
@@ -288,13 +312,17 @@
   async function closeSession(sessionId: string) {
     const repo = repoOf(sessionId);
     if (!repo) return;
+    const connection = remoteConnectionId;
     actionError = null;
     try {
       await api.terminalClose(sessionId);
     } catch (error) {
-      actionError = normalizeError(error).message;
-      return;
+      if (!isRemoteRepositoryKey(repo) || remoteConnected) {
+        if (ownsTerminalConnection(repo, connection)) actionError = normalizeError(error).message;
+        return;
+      }
     }
+    if (isRemoteRepositoryKey(repo) && connections.get(repo) !== connection) return;
     const next = removeSession(layouts[repo] ?? emptyLayout(), sessionId);
     layouts[repo] = next;
     forget(sessionId);
@@ -317,19 +345,20 @@
 
   async function restartSession(sessionId: string) {
     const repo = repoOf(sessionId);
-    if (!repo) return;
+    const connection = remoteConnectionId;
+    if (!repo || !ownsTerminalConnection(repo, connection)) return;
     actionError = null;
     try {
       const snapshot = await api.terminalRestart(sessionId);
-      if (disposed) {
-        await api.terminalClose(snapshot.sessionId);
+      if (!ownsTerminalConnection(repo, connection)) {
+        await api.terminalClose(snapshot.sessionId).catch(() => {});
         return;
       }
       remember(snapshot);
       layouts[repo] = replaceSession(layouts[repo] ?? emptyLayout(), sessionId, snapshot.sessionId);
       forget(sessionId);
     } catch (error) {
-      actionError = normalizeError(error).message;
+      if (ownsTerminalConnection(repo, connection)) actionError = normalizeError(error).message;
     }
   }
 
@@ -493,18 +522,27 @@
   }
 
   async function loadProfiles(): Promise<TerminalProfile[]> {
-    if (profiles.length > 0) return profiles;
+    const repo = path;
+    const connection = remoteConnectionId;
+    const key = connection ?? "local";
+    const cached = profiles.get(key);
+    if (cached) return cached;
     try {
-      profiles = await api.terminalProfiles();
+      const result = await (isRemoteRepositoryKey(repo) ? api.terminalProfiles(repo) : api.terminalProfiles());
+      if (ownsTerminalConnection(repo, connection)) profiles.set(key, result);
+      return result;
     } catch (error) {
-      actionError = normalizeError(error).message;
+      if (ownsTerminalConnection(repo, connection)) actionError = normalizeError(error).message;
+      return [];
     }
-    return profiles;
   }
 
   async function profileMenu(anchor: HTMLElement) {
+    const repo = path;
+    const connection = remoteConnectionId;
     const list = await loadProfiles();
-    const defaultId = list.some((item) => item.id === defaultProfile) ? defaultProfile : (list[0]?.id ?? null);
+    if (path !== repo || remoteConnectionId !== connection) return;
+    const defaultId = !connection && list.some((item) => item.id === defaultProfile) ? defaultProfile : (list[0]?.id ?? null);
     const point = pointFor(anchor);
     const entries: ContextMenuEntry[] = [{ heading: "新建终端" }];
     for (const profile of list) {
@@ -516,7 +554,7 @@
         run: () => void create(profile.id, false),
       });
     }
-    if (list.length === 0) entries.push({ id: "profile:none", label: "没有探测到可用的终端", disabledReason: "本机没有可用的终端类型", run: () => {} });
+    if (list.length === 0) entries.push({ id: "profile:none", label: "没有探测到可用的终端", disabledReason: "当前主机没有可用的终端类型", run: () => {} });
     entries.push(
       { separator: true },
       {
@@ -689,6 +727,7 @@
    * 不在终端上返回 false，由外壳按原来的「拖入仓库」处理。
    */
   export function dropPaths(paths: string[], x: number, y: number): boolean {
+    if (isRemoteRepositoryKey(path)) return false;
     const target = paneAt(x, y);
     dropTarget = null;
     if (!target) return false;
@@ -962,6 +1001,8 @@
           <TerminalPane
             {sessionId}
             {router}
+            remote={Boolean(remoteConnectionId)}
+            connectionLost={!remoteConnected}
             visible={open && active}
             focused={open && active && layout.focused === sessionId}
             {theme}

@@ -1077,9 +1077,10 @@ async fn connect_planned(
             hello["os"].as_str().unwrap_or_default(),
             hello["arch"].as_str().unwrap_or_default(),
         ) != remote_ssh::platform(&plan.system, &plan.architecture)
-        || ["open", "status", "history", "commitDetail", "commitDiff", "diff", "reviewIdentity", "taskReview", "receipt", "journalIdentity"]
-            .iter()
-            .any(|required| !capabilities.iter().any(|value| value.as_str() == Some(*required)))
+        || ["open", "status", "diff", "reviewIdentity", "receipt"]
+            .iter().copied().chain(BRIDGE_READ_OPS.iter().copied())
+            .chain(FILE_WRITE_OPS.iter().copied()).chain(TERMINAL_OPS.iter().copied())
+            .any(|required| !capabilities.iter().any(|value| value.as_str() == Some(required)))
     {
         return Err(protocol_mismatch());
     }
@@ -1398,6 +1399,7 @@ pub async fn remote_worktree_open(
         "snapshot":snapshot,
         "pendingWrite":pending,
         "protocol":protocol,
+        "events":protocol == 2,
         "agentVersion":agent_version,
         "reviewOutcome":review_outcome,
     }))
@@ -1422,6 +1424,20 @@ pub async fn remote_worktree_close(state: Managed<'_>, session_id: String) -> Re
 #[tauri::command]
 pub async fn remote_worktree_status(state: Managed<'_>, session_id: String) -> Result<Value> {
     state.session(&session_id)?.status().await
+}
+
+#[tauri::command]
+pub async fn remote_worktree_events(state: Managed<'_>, session_id: String) -> Result<Value> {
+    let session = state.session(&session_id)?;
+    let (mut events, overflow, disconnected) = session.agent.next_events().await;
+    events.retain(|event| event["repo"].as_str() == Some(session.repo.as_str()));
+    Ok(json!({"events": events, "overflow": overflow, "disconnected": disconnected}))
+}
+
+#[tauri::command]
+pub async fn remote_worktree_cancel_reads(state: Managed<'_>, session_id: String, request_id: Option<u64>) -> Result<()> {
+    state.session(&session_id)?.agent.cancel_reads(request_id).await;
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -1574,6 +1590,15 @@ const BRIDGE_READ_OPS: &[&str] = &[
     "mergeSession",
     "conflictView",
     "worktrees",
+    "directory",
+    "fileContent",
+    "filePreview",
+    "document",
+    "documentResource",
+    "documentRemoteImage",
+    "pathSearch",
+    "contentSearch",
+    "editSnapshot",
 ];
 
 /// 写入 op：每类写入自成一类回执，因此 op 名原样进入 journal，不作为「同类」合并。
@@ -1609,17 +1634,33 @@ const BRIDGE_WRITE_OPS: &[&str] = &[
     "amendCommit",
     "discard",
     "worktreeRemove",
+    "editSave",
+    "createEntry",
+    "copyEntry",
+    "moveEntry",
+    "deleteEntries",
 ];
 
+const FILE_WRITE_OPS: &[&str] = &["editSave", "createEntry", "copyEntry", "moveEntry", "deleteEntries"];
+const FILE_READ_OPS: &[&str] = &[
+    "directory", "fileContent", "filePreview", "document", "documentResource",
+    "documentRemoteImage", "pathSearch", "contentSearch", "editSnapshot",
+];
+const TERMINAL_OPS: &[&str] = &[
+    "terminalProfiles", "terminalList", "terminalCreate", "terminalAttach",
+    "terminalInput", "terminalResize", "terminalRestart", "terminalClose",
+];
 /// 桥接参数里永远不允许出现的字段：普通 Git RPC 也照样拒绝这些名字。
 const BRIDGE_FORBIDDEN_FIELDS: &[&str] = &[
     "program", "command", "shell", "cwd", "env", "args", "id", "v", "op", "generation", "operationId", "stateToken",
+    "largeFileResponse",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BridgeKind {
     Read,
     Write,
+    Terminal,
 }
 
 fn bridge_kind(op: &str) -> Result<BridgeKind> {
@@ -1627,6 +1668,8 @@ fn bridge_kind(op: &str) -> Result<BridgeKind> {
         Ok(BridgeKind::Read)
     } else if BRIDGE_WRITE_OPS.contains(&op) {
         Ok(BridgeKind::Write)
+    } else if TERMINAL_OPS.contains(&op) {
+        Ok(BridgeKind::Terminal)
     } else {
         Err(AppError::new(
             "remote_unsupported",
@@ -1643,6 +1686,7 @@ pub struct CallRequest {
     #[serde(default)]
     fields: Value,
     generation: Option<String>,
+    read_id: Option<u64>,
 }
 
 /// 组装转发字段：仓库键由会话决定，调用方给的 `repo` 一律被覆盖；
@@ -1692,8 +1736,23 @@ async fn bridge_call(state: &RemoteWorktrees, request: CallRequest) -> Result<Va
             .unwrap()
             .check_bound(id, &request.session_id, &session)?;
     }
-    if kind == BridgeKind::Read {
+    if kind == BridgeKind::Terminal && matches!(request.op.as_str(), "terminalCreate" | "terminalInput" | "terminalRestart") {
+        let _guard = state.mutations.lock().unwrap();
+        if find_pending(&state.data, &session)?.is_some() {
+            return Err(remote_error("operation_pending"));
+        }
+    }
+    if kind != BridgeKind::Write {
+        if let Some(id) = request.read_id {
+            if !FILE_READ_OPS.contains(&request.op.as_str()) {
+                return Err(AppError::new("invalid_request", "这个操作不能作为文件读取取消。"));
+            }
+            return session.agent.rpc_read(&request.op, fields, id).await;
+        }
         return session.agent.rpc(&request.op, fields).await;
+    }
+    if request.read_id.is_some() {
+        return Err(AppError::new("invalid_request", "写入不能作为文件读取取消。"));
     }
     let operation_id = Uuid::new_v4().to_string();
     let mut fields = fields;
@@ -1778,6 +1837,16 @@ fn definitive_error(code: &str) -> bool {
             | "operation_conflict"
             | "invalid_operation"
             | "invalid_patch"
+            | "edit_conflict"
+            | "edit_digest"
+            | "edit_content"
+            | "entry_exists"
+            | "entry_changed"
+            | "entry_platform_unsupported"
+            | "nested_repository"
+            | "unsupported_entry"
+            | "invalid_request"
+            | "file_path"
     )
 }
 
@@ -1848,7 +1917,11 @@ async fn finish_write(
             };
             match proof.state {
                 "completed" => {
-                    let Ok(snapshot) = session.status().await else {
+                    let mut status = session.status().await;
+                    if status.as_ref().is_err_and(|failure| failure.code == "stale_state") {
+                        status = session.status().await;
+                    }
+                    let Ok(snapshot) = status else {
                         return Ok(unknown(&pending.operation_id));
                     };
                     if snapshot["head"].as_str() != proof.head
@@ -1862,17 +1935,29 @@ async fn finish_write(
                         ("mergeComplete", Some("mergeComplete"), Some("committed")) => Some(review::Outcome::Committed),
                         _ => None,
                     };
-                    json!({"state":"completed","operationId":pending.operation_id,"snapshot":snapshot,"head":snapshot["head"]})
+                    let mut result = json!({"state":"completed","operationId":pending.operation_id,"snapshot":snapshot,"head":snapshot["head"]});
+                    if !receipt_lookup {
+                        let field = match pending.op.as_str() {
+                            "editSave" => Some("edit"),
+                            "deleteEntries" => Some("delete"),
+                            _ => None,
+                        };
+                        if let Some((field, value)) = field.and_then(|field| response.get(field).map(|value| (field, value))) {
+                            result[field] = value.clone();
+                        }
+                    }
+                    result
                 }
                 "failed" => {
-                    let error = remote_error(proof.reason.unwrap_or("ssh_failed"));
-                    json!({"state":"failed","operationId":pending.operation_id,"message":error.message})
+                    let reason = proof.reason.unwrap_or("ssh_failed");
+                    let error = remote_error(reason);
+                    json!({"state":"failed","operationId":pending.operation_id,"code":reason,"message":error.message})
                 }
                 _ => return Ok(unknown(&pending.operation_id)),
             }
         }
         Err(error) if !receipt_lookup && definitive_error(&error.code) => {
-            json!({"state":"failed","operationId":pending.operation_id,"message":remote_error(&error.code).message})
+            json!({"state":"failed","operationId":pending.operation_id,"code":error.code,"message":error.message})
         }
         _ => return Ok(unknown(&pending.operation_id)),
     };
@@ -2282,6 +2367,7 @@ input.on("line", line => {
                 op: "fetch".into(),
                 fields: Value::Object(fields),
                 generation: None,
+                read_id: None,
             };
             assert_eq!(
                 bridge_fields(&session, &request).unwrap_err().code,
@@ -2295,6 +2381,7 @@ input.on("line", line => {
             op: "history".into(),
             fields: json!({"repo":"other/repo","offset":40}),
             generation: Some("7".into()),
+            read_id: None,
         };
         let fields = bridge_fields(&session, &request).unwrap();
         assert_eq!(fields["repo"], json!("repo-a"));
@@ -2321,6 +2408,7 @@ input.on("line", line => {
                 op: "fetch".into(),
                 fields: json!({"remote":"origin"}),
                 generation: Some("7".into()),
+                read_id: None,
             },
         )
         .await
@@ -2344,6 +2432,7 @@ input.on("line", line => {
                 op: "pull".into(),
                 fields: json!({}),
                 generation: None,
+                read_id: None,
             },
         )
         .await
@@ -2423,6 +2512,7 @@ input.on("line", line => {
                 op: "branchCreate".into(),
                 fields: json!({"name":"feature"}),
                 generation: None,
+                read_id: None,
             },
         )
         .await
@@ -2459,6 +2549,7 @@ input.on("line", line => {
                 op: "fetch".into(),
                 fields: json!({}),
                 generation: None,
+                read_id: None,
             },
         )
         .await

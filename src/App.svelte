@@ -650,21 +650,8 @@
   /** 会访问远程、可以取消的同步动作。 */
   const REMOTE_PENDING = new Set(["fetch", "pull", "push", "publish", "associate"]);
 
-  /**
-   * 远端仓库在主窗口的可用范围：打开、刷新、状态、差异、整文件暂存/提交，以及
-   * 历史、分支标签、同步、暂存（stash）、合并冲突与远端审查返回（都经 op 白名单桥接）。
-   *
-   * 这里挡住的入口依赖本机 Git、本机文件系统或本机终端，或者远端组件还没有对应的桥接 op
-   * （文件视图与搜索、任务范围与发布、关联/修改上游、提交并推送、终端、块级与逐行暂存）。
-   * 仓库键不会被当成路径交给本机命令，所以这些命令既不执行也不静默回退。
-   */
+  /** 尚未桥接的仓库操作由命令分派统一拦截。 */
   const REMOTE_BLOCKED_COMMANDS = new Set([
-    "view.files",
-    "files.quickOpen",
-    "files.search",
-    "file.reveal",
-    "file.back",
-    "file.forward",
     // 任务范围由本机 task_review 计划器给出；远端还没有同名桥接 op。
     "task.scope",
     "task.publish",
@@ -672,8 +659,6 @@
     "sync.upstream",
     // 提交并推送要一次回两段结果，远端桥接按 op 分开执行，还没有对应 op。
     "commit.push",
-    "terminal.toggle",
-    "terminal.new",
   ]);
   /**
    * 切换仓库时可以让路的动作：只等网络的远程操作。
@@ -1189,7 +1174,7 @@
         void unstagePaths(commandState.unstageTargets);
         return;
       case "repo.copyPath":
-        void copyPath(opened?.summary.path ?? "");
+        void copyPath(absolutePath(""));
         return;
       case "task.stash":
       case "task.merge":
@@ -3301,7 +3286,7 @@
 
   /** 有对话框或命令面板盖着时终端不可见也不可操作，不接收拖入。 */
   function terminalDropAllowed(): boolean {
-    return terminalOpen && !taskModal && !cloneOpen && !dependencyOpen && !confirmPath && !paletteOpen && openModalCount() === 0;
+    return remoteKey === null && terminalOpen && !taskModal && !cloneOpen && !dependencyOpen && !confirmPath && !paletteOpen && openModalCount() === 0;
   }
 
   function dragOverTerminal(position: { x: number; y: number } | undefined): boolean {
@@ -4170,9 +4155,9 @@
   }
 
   function absolutePath(relative: string): string {
-    const raw = opened?.summary.path ?? "";
+    const raw = opened?.summary.remotePath ?? opened?.summary.path ?? "";
+    if (!relative) return raw;
     const cleanRoot = raw.replace(/[\\/]+$/, "") || (raw.startsWith("/") ? "/" : raw);
-    if (!relative) return cleanRoot;
     const separator = raw.includes("\\") && !raw.includes("/") ? "\\" : "/";
     // 仓库路径是 Windows 风格（只含反斜杠）时用反斜杠拼接，否则用斜杠；去掉末尾多余的分隔符。
     return `${cleanRoot === "/" ? "" : cleanRoot}${separator}${relative.split("/").join(separator)}`;
@@ -4181,14 +4166,22 @@
   /** 文件树「插入到终端」：展开终端，按终端类型加引号插入完整路径，不回车。 */
   async function insertIntoTerminal(relatives: string[]) {
     if (!opened || relatives.length === 0) return;
+    const repo = opened.summary.path;
+    const connection = remoteRepoState?.connectionId;
+    const paths = relatives.map(absolutePath);
+    if (remoteKey && paths.some((path) => /[\u0000-\u001f\u007f]/.test(path))) {
+      notice("路径包含终端控制字符，无法安全插入。");
+      return;
+    }
     terminalOpen = true;
     await tick();
-    await terminalPanel?.insertPaths(relatives.map(absolutePath));
+    if (opened?.summary.path !== repo || remoteRepoState?.connectionId !== connection) return;
+    await terminalPanel?.insertPaths(paths);
   }
 
   async function revealInFolder(relative: string) {
     const current = opened;
-    if (!current) return;
+    if (!current || isRemoteRepositoryKey(current.summary.path)) return;
     try {
       await api.revealPath(current.summary.path, relative);
     } catch (error) {
@@ -4198,7 +4191,7 @@
 
   async function openWithDefault(relative: string) {
     const current = opened;
-    if (!current) return;
+    if (!current || isRemoteRepositoryKey(current.summary.path)) return;
     try {
       await api.openPath(current.summary.path, relative);
     } catch (error) {
@@ -4281,20 +4274,20 @@
       });
     }
     entries.push({ separator: true });
-    entries.push({
-      id: "reveal",
-      label: navigator.platform?.toLowerCase().includes("mac") ? "在访达中显示" : "在资源管理器中显示",
-      icon: "folder-open",
-      run: () => void revealInFolder(row.path),
-    });
-    entries.push({
-      id: "open",
-      label: "用默认程序打开",
-      icon: "file",
-      disabledReason: deleted ? "文件已删除，工作区里没有它" : undefined,
-      run: () => void openWithDefault(row.path),
-    });
-    entries.push({ separator: true });
+    if (!remoteKey) {
+      entries.push({
+        id: "reveal",
+        label: navigator.platform?.toLowerCase().includes("mac") ? "在访达中显示" : "在资源管理器中显示",
+        icon: "folder-open",
+        run: () => void revealInFolder(row.path),
+      }, {
+        id: "open",
+        label: "用默认程序打开",
+        icon: "file",
+        disabledReason: deleted ? "文件已删除，工作区里没有它" : undefined,
+        run: () => void openWithDefault(row.path),
+      }, { separator: true });
+    }
     entries.push({ id: "copy-rel", label: "复制相对路径", icon: "copy", run: () => void copyText(row.path, "相对路径") });
     entries.push({ id: "copy-abs", label: "复制完整路径", icon: "copy", run: () => void copyText(absolutePath(row.path), "完整路径") });
     entries.push({ id: "copy-name", label: "复制文件名", icon: "copy", run: () => void copyText(row.path.split("/").pop() ?? row.path, "文件名") });
@@ -4351,20 +4344,20 @@
       }
       entries.push({ separator: true });
     }
-    entries.push({
-      id: "reveal",
-      label: navigator.platform?.toLowerCase().includes("mac") ? "在访达中显示" : "在资源管理器中显示",
-      icon: "folder-open",
-      run: () => void revealInFolder(path),
-    });
-    entries.push({
-      id: "open",
-      label: "用默认程序打开",
-      icon: "file",
-      disabledReason: deleted ? "文件已删除，工作区里没有它" : undefined,
-      run: () => void openWithDefault(path),
-    });
-    entries.push({ separator: true });
+    if (!remoteKey) {
+      entries.push({
+        id: "reveal",
+        label: navigator.platform?.toLowerCase().includes("mac") ? "在访达中显示" : "在资源管理器中显示",
+        icon: "folder-open",
+        run: () => void revealInFolder(path),
+      }, {
+        id: "open",
+        label: "用默认程序打开",
+        icon: "file",
+        disabledReason: deleted ? "文件已删除，工作区里没有它" : undefined,
+        run: () => void openWithDefault(path),
+      }, { separator: true });
+    }
     entries.push({ id: "copy-rel", label: "复制相对路径", icon: "copy", run: () => void copyText(path, "相对路径") });
     entries.push({ id: "copy-abs", label: "复制完整路径", icon: "copy", run: () => void copyText(absolutePath(path), "完整路径") });
     entries.push({ id: "copy-name", label: "复制文件名", icon: "copy", run: () => void copyText(name, "文件名") });
@@ -5503,6 +5496,8 @@
       <span class="infobar-text">
         {#if remoteRepoState?.pending}
           远端操作结果待确认：写入已禁用，重新打开这个远端仓库可核对原操作。
+        {:else if remoteRepoState?.connected === false}
+          远端连接已断开。重新打开仓库可继续读取和编辑，旧终端已失效。
         {:else}
           远端仓库 {remoteRepoState?.host ?? opened?.summary.host ?? ""} · {remoteRepoState?.path ?? opened?.summary.remotePath ?? ""}
         {/if}
@@ -5771,7 +5766,7 @@
               bind:this={filesView}
               active={workspaceView === "files"}
               {opened}
-              disabled={writeLocked}
+              disabled={writeLocked || remoteRepoState?.pending === true || remoteRepoState?.connected === false}
               {nextId}
               {paneWidth}
               {windowWidth}
@@ -5780,11 +5775,11 @@
               onGeneration={adoptGeneration}
               onFileHistory={openFileHistory}
               onOpenDiff={(path, side) => openFileDiff(path, side)}
-              onReveal={(path) => void revealInFolder(path)}
-              onOpenDefault={(path) => void openWithDefault(path)}
+              onReveal={remoteKey ? undefined : (path) => void revealInFolder(path)}
+              onOpenDefault={remoteKey ? undefined : (path) => void openWithDefault(path)}
               onCopyPath={(text, what) => void copyText(text, what)}
               onRefreshRepo={() => void refresh()}
-              onIgnore={(path, local) => void ignore(path, local)}
+              onIgnore={remoteKey ? undefined : (path, local) => void ignore(path, local)}
               onInsertToTerminal={(paths) => void insertIntoTerminal(paths)}
               toAbsolute={absolutePath}
               onNav={(nav) => (filesNav = nav)}
@@ -5871,6 +5866,8 @@
     <TerminalPanel
       bind:this={terminalPanel}
       path={opened.summary.path}
+      remoteConnectionId={remoteRepoState?.connectionId}
+      remoteConnected={remoteRepoState?.connected}
       open={terminalOpen}
       theme={resolvedTheme}
       fontSize={terminalPrefs.fontSize}

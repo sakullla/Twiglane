@@ -71,6 +71,7 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 struct InFlight {
     flag: Arc<AtomicBool>,
     remote: bool,
+    stop: Arc<tokio::sync::Notify>,
 }
 
 pub struct Context {
@@ -80,6 +81,7 @@ pub struct Context {
     cancels: Mutex<HashMap<String, InFlight>>,
     slots: Arc<Semaphore>,
     out: mpsc::Sender<Vec<u8>>,
+    replies: mpsc::Sender<Vec<u8>>,
     /// 当前仓库的变化事件源；打开新仓库时替换。
     changes: Mutex<Option<Arc<ChangeFeed>>>,
     /// 远端 PTY 会话：与仓库 RPC 物理分离，只有显式的终端 op 会碰它。
@@ -261,23 +263,19 @@ impl WriteOp {
     }
 }
 
-/// 写入成功后回执需要的分支名：优先用返回 DTO 里的 snapshot.branch.name。
-fn written_branch(value: &Value) -> Option<String> {
-    value
-        .get("snapshot")
-        .and_then(|snapshot| snapshot.get("branch"))
-        .and_then(|branch| branch.get("name"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-}
-
 
 pub async fn serve() -> Result<(), AppError> {
     let (out, mut outgoing) = mpsc::channel::<Vec<u8>>(MAX_IN_FLIGHT * 4);
+    let (replies, mut responses) = mpsc::channel::<Vec<u8>>(MAX_IN_FLIGHT);
     let writer = tokio::spawn(async move {
         use tokio::io::AsyncWriteExt;
         let mut stdout = tokio::io::stdout();
-        while let Some(frame) = outgoing.recv().await {
+        loop {
+            let frame = tokio::select! {
+                Some(frame) = responses.recv() => frame,
+                Some(frame) = outgoing.recv() => frame,
+                else => break,
+            };
             if stdout.write_all(&frame).await.is_err() {
                 break;
             }
@@ -287,7 +285,7 @@ pub async fn serve() -> Result<(), AppError> {
         }
     });
 
-    // 终端事件走同一条写出通道：会话、重放与背压都由共享实现负责，这里只把事件写成帧。
+    // 终端和普通请求各有有界队列，共用传输时不会挤掉请求回执。
     let terminal_repos = Arc::new(Mutex::new(HashMap::new()));
     let terminal = Arc::new(TerminalManager::new(Arc::new(FrameEvents::new(
         out.clone(),
@@ -300,19 +298,20 @@ pub async fn serve() -> Result<(), AppError> {
         cancels: Mutex::new(HashMap::new()),
         slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
         out,
+        replies,
         changes: Mutex::new(None),
         terminal,
         terminal_repos,
     });
 
-    let (lines, mut incoming) = mpsc::unbounded_channel::<Line>();
+    let (lines, mut incoming) = mpsc::channel::<Line>(MAX_IN_FLIGHT);
     std::thread::spawn(move || read_lines(lines));
 
     while let Some(line) = incoming.recv().await {
         match line {
-            Line::Frame(bytes) => context.handle_line(&bytes),
+            Line::Frame(bytes) => context.handle_line(&bytes).await,
             // 超限行在读取侧就被丢弃，这里只补一条与解析侧完全一致的拒绝。
-            Line::TooLarge => context.reject_too_large(),
+            Line::TooLarge => context.reject_too_large().await,
         }
     }
     // 标准输入关闭：等在途请求收尾再结束，不半途丢弃已登记的写入。
@@ -340,7 +339,7 @@ const READ_CHUNK: usize = 64 * 1024;
 /// 单帧上限是 8 MiB，但客户端可以送来任意大的行。旧实现用 `read_until` 把整行读进
 /// 无界 `Vec` 才判断上限，等于把内存交给对端；这里改成边读边算长度，越过上限就立刻
 /// 丢弃该行剩余字节并交一条 `TooLarge`，下一个换行处恢复切行，通道本身不会再变大。
-fn read_lines(sender: mpsc::UnboundedSender<Line>) {
+fn read_lines(sender: mpsc::Sender<Line>) {
     use std::io::Read;
     let stdin = std::io::stdin();
     let mut handle = stdin.lock();
@@ -386,8 +385,8 @@ fn read_lines(sender: mpsc::UnboundedSender<Line>) {
 }
 
 /// 交出一帧；通道已关闭时返回 false（读线程没有继续的意义）。空行直接跳过。
-fn deliver(sender: &mpsc::UnboundedSender<Line>, line: Vec<u8>) -> bool {
-    line.is_empty() || sender.send(Line::Frame(line)).is_ok()
+fn deliver(sender: &mpsc::Sender<Line>, line: Vec<u8>) -> bool {
+    line.is_empty() || sender.blocking_send(Line::Frame(line)).is_ok()
 }
 
 /// 追加一段字节并在越过上限时立即收手：清空缓冲、发一条 `TooLarge`、转入丢弃状态。
@@ -395,12 +394,12 @@ fn push_bounded(
     line: &mut Vec<u8>,
     bytes: &[u8],
     discarding: &mut bool,
-    sender: &mpsc::UnboundedSender<Line>,
+    sender: &mpsc::Sender<Line>,
 ) {
     if line.len().saturating_add(bytes.len()) > MAX_REQUEST_BYTES {
         line.clear();
         *discarding = true;
-        let _ = sender.send(Line::TooLarge);
+        let _ = sender.blocking_send(Line::TooLarge);
         return;
     }
     line.extend_from_slice(bytes);
@@ -449,22 +448,24 @@ impl Context {
     }
 
     /// 读取侧围栏命中：与解析侧超限拒绝同一份 `code` 与文案，且不执行任何东西。
-    fn reject_too_large(&self) {
+    async fn reject_too_large(&self) {
         let rejection = protocol::too_large_rejection();
-        self.respond(protocol::err_frame(&rejection.id, &rejection.error));
+        let _ = self.replies.send(protocol::err_frame(&rejection.id, &rejection.error)).await;
     }
 
-    fn handle_line(self: &Arc<Self>, line: &[u8]) {
+    async fn handle_line(self: &Arc<Self>, line: &[u8]) {
         match protocol::parse_request(line) {
-            Ok(request) => self.dispatch(request),
-            Err(rejection) => self.respond(protocol::err_frame(&rejection.id, &rejection.error)),
+            Ok(request) => self.dispatch(request).await,
+            Err(rejection) => {
+                let _ = self.replies.send(protocol::err_frame(&rejection.id, &rejection.error)).await;
+            }
         }
     }
 
-    fn dispatch(self: &Arc<Self>, request: Request) {
+    async fn dispatch(self: &Arc<Self>, request: Request) {
         if request.op == "cancel" {
             let result = self.cancel(&request.fields);
-            self.finish(&request.id, result);
+            self.finish(&request.id, result, protocol::MAX_RESPONSE_BYTES).await;
             return;
         }
         let permit = match Arc::clone(&self.slots).try_acquire_owned() {
@@ -473,11 +474,13 @@ impl Context {
                 self.finish(
                     &request.id,
                     Err(AppError::new("remote_busy", "远端请求已满，请稍后重试。")),
-                );
+                    protocol::MAX_RESPONSE_BYTES,
+                ).await;
                 return;
             }
         };
         let cancel = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(tokio::sync::Notify::new());
         self.cancels
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -486,34 +489,40 @@ impl Context {
                 InFlight {
                     flag: Arc::clone(&cancel),
                     remote: remote_op(&request.op),
+                    stop: Arc::clone(&stop),
                 },
             );
         let context = Arc::clone(self);
         tokio::spawn(async move {
             let id = request.id.clone();
-            let result = context.run(&request, &cancel).await;
+            let limit = file_response_limit(&request);
+            let result = if matches!(request.op.as_str(), "directory" | "fileContent" | "filePreview"
+                | "document" | "documentResource" | "documentRemoteImage" | "pathSearch" | "contentSearch" | "editSnapshot")
+            {
+                tokio::select! {
+                    biased;
+                    _ = stop.notified() => Err(AppError::new("cancelled", "请求已取消，未继续。")),
+                    result = context.run(&request, &cancel) => result,
+                }
+            } else {
+                context.run(&request, &cancel).await
+            };
             context
                 .cancels
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .remove(&id);
-            context.finish(&id, result);
+            context.finish(&id, result, limit).await;
             drop(permit);
         });
     }
 
-    fn finish(&self, id: &str, result: Result<Value, AppError>) {
+    async fn finish(&self, id: &str, result: Result<Value, AppError>, limit: usize) {
         let frame = match result {
-            Ok(value) => protocol::ok_frame(id, value),
+            Ok(value) => protocol::ok_frame(id, value, limit),
             Err(error) => protocol::err_frame(id, &error),
         };
-        self.respond(frame);
-    }
-
-    fn respond(&self, frame: Vec<u8>) {
-        if self.out.try_send(frame).is_err() {
-            eprintln!("twiglane-agent-v2: 响应通道已满或已关闭");
-        }
+        let _ = self.replies.send(frame).await;
     }
     async fn run(&self, request: &Request, cancel: &AtomicBool) -> Result<Value, AppError> {
         // 普通 Git RPC 没有「执行程序」这一维：仓库操作只经共享 Git 实现执行。任何请求带上
@@ -579,7 +588,7 @@ impl Context {
             "terminalList" => self.terminal_list(&request.fields),
             "terminalCreate" => self.terminal_create(&request.fields).await,
             "terminalAttach" => self.terminal_attach(&request.fields),
-            "terminalInput" => self.terminal_input(&request.fields),
+            "terminalInput" => self.terminal_input(&request.fields).await,
             "terminalResize" => self.terminal_resize(&request.fields),
             "terminalRestart" => self.terminal_restart(&request.fields).await,
             "terminalClose" => self.terminal_close(&request.fields).await,
@@ -1758,13 +1767,17 @@ impl Context {
     }
 
     /// 输入：只有显式创建的终端会话接受 PTY 输入。
-    fn terminal_input(&self, fields: &Map<String, Value>) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+    async fn terminal_input(&self, fields: &Map<String, Value>) -> Result<Value, AppError> {
+        let session = self.repo_session(fields).await?;
         let id = string_field(fields, "sessionId")?;
         let data = raw_text_field(fields, "data")?;
         // 只要归属：`attach` 会复制最多 2 MiB 的重放缓冲，写输入不该为它付代价。
         self.check_terminal_owner(&self.terminal.repo_of(&id)?, &session.key)?;
-        self.terminal.write(&id, &data)?;
+        let manager = Arc::clone(&self.terminal);
+        let target = id.clone();
+        tokio::task::spawn_blocking(move || manager.write(&target, &data))
+            .await
+            .map_err(|_| AppError::new("terminal_write", "终端输入已中断。"))??;
         Ok(json!({ "repo": session.key, "sessionId": id, "accepted": true }))
     }
 
@@ -1975,7 +1988,7 @@ impl Context {
             session.set_state(state.clone());
         }
         let generation = self.backend.scheduler.current_generation(&session.key);
-        let branch = written_branch(&value);
+        let branch = state.as_ref().and_then(|state| state.branch.clone());
         receipt.review_outcome = state.as_ref().and_then(|state| {
             let head = state.head.as_deref()?;
             match op {
@@ -2601,10 +2614,11 @@ impl Context {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .get(&target)
-            .map(|entry| (Arc::clone(&entry.flag), entry.remote));
+            .map(|entry| (Arc::clone(&entry.flag), entry.remote, Arc::clone(&entry.stop)));
         match entry {
-            Some((flag, remote)) => {
+            Some((flag, remote, stop)) => {
                 flag.store(true, Ordering::SeqCst);
+                stop.notify_one();
                 let remote_stopped = if remote { self.stop_remote() } else { false };
                 Ok(json!({
                     "targetId": target,
@@ -2695,6 +2709,20 @@ struct DiffQuery {
     offset: u32,
     context: u32,
     as_text: bool,
+}
+
+fn file_response_limit(request: &Request) -> usize {
+    if request.large_file_response
+        && matches!(
+            request.op.as_str(),
+            "fileContent" | "filePreview" | "document" | "documentResource"
+                | "documentRemoteImage" | "editSnapshot" | "editSave"
+        )
+    {
+        protocol::MAX_FILE_RESPONSE_BYTES
+    } else {
+        protocol::MAX_RESPONSE_BYTES
+    }
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]

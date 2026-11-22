@@ -4,7 +4,7 @@
 //! 自己安装的原生组件。请求形状相同，差异只在 `v` 的取值、请求字节上限，以及 v2 会在
 //! 同一条通道上多路复用**事件帧**（不带 `id` 的失效通知）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, Write};
 use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch, Notify};
 use uuid::Uuid;
 
 use crate::error::AppError;
@@ -24,8 +24,9 @@ const REQUEST_BYTES: usize = 128 * 1024;
 /// v2 的请求上限：文件保存走同一条通道，128 KiB 会让稍大的源文件永远存不进去。
 const REQUEST_BYTES_V2: usize = 8 * 1024 * 1024;
 const RESPONSE_BYTES: usize = 4 * 1024 * 1024 + 1024;
-/// 事件帧只是失效通知：只保留最近若干条，绝不因为它们挤掉请求回执或撑大内存。
+const FILE_RESPONSE_BYTES: usize = 24 * 1024 * 1024 + 1024;
 const MAX_EVENTS: usize = 64;
+const MAX_EVENT_BYTES: usize = 1024 * 1024;
 const STDERR_BYTES: usize = 64 * 1024;
 
 /// 会话协议的请求字节上限。v1 与 v2 各自的协议规定不同，不能共用一个常量。
@@ -38,7 +39,10 @@ fn request_limit(protocol: u32) -> usize {
 }
 
 type Reply = Result<Value, AppError>;
-type Waiter = oneshot::Sender<Reply>;
+struct Waiter {
+    reply: oneshot::Sender<Reply>,
+    limit: usize,
+}
 type StderrClassifier = fn(&[u8]) -> AppError;
 
 fn disconnected() -> AppError {
@@ -74,7 +78,7 @@ impl Pending {
     fn close(&mut self, error: AppError) {
         let error = self.failure.get_or_insert(error);
         for (_, waiter) in self.waiters.drain() {
-            let _ = waiter.send(Err(error.clone()));
+            let _ = waiter.reply.send(Err(error.clone()));
         }
     }
 }
@@ -89,7 +93,45 @@ pub struct AgentTransport {
     /// 会话期望的协议版本：请求帧写这个版本，响应帧也必须是这个版本。
     protocol: u32,
     /// v2 事件帧队列：不带 id，不唤醒任何 waiter，只在这里等待调用方取走。
-    events: Arc<Mutex<Vec<Value>>>,
+    events: Arc<EventQueue>,
+}
+
+#[derive(Default)]
+struct EventQueue {
+    state: Mutex<EventState>,
+    ready: Notify,
+}
+
+#[derive(Default)]
+struct EventState {
+    queue: VecDeque<(Value, usize)>,
+    bytes: usize,
+    overflow: bool,
+}
+
+impl EventQueue {
+    fn push(&self, event: Value, bytes: usize) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if bytes <= MAX_EVENT_BYTES {
+            while state.queue.len() >= MAX_EVENTS || state.bytes + bytes > MAX_EVENT_BYTES {
+                if let Some((_, size)) = state.queue.pop_front() {
+                    state.bytes -= size;
+                }
+                state.overflow = true;
+            }
+            state.bytes += bytes;
+            state.queue.push_back((event, bytes));
+        } else {
+            state.overflow = true;
+        }
+        drop(state);
+        self.ready.notify_one();
+    }
+
+    fn take(&self) -> (Vec<Value>, bool) {
+        let state = std::mem::take(&mut *self.state.lock().unwrap_or_else(|e| e.into_inner()));
+        (state.queue.into_iter().map(|(event, _)| event).collect(), state.overflow)
+    }
 }
 
 impl AgentTransport {
@@ -132,10 +174,30 @@ impl AgentTransport {
         self.protocol
     }
 
-    /// 取走已收集的事件帧（按到达顺序）。事件只是失效通知，丢了也不改变仓库状态。
+    #[cfg(test)]
     pub fn take_events(&self) -> Vec<Value> {
-        let mut events = self.events.lock().unwrap_or_else(|e| e.into_inner());
-        std::mem::take(&mut *events)
+        self.events.take().0
+    }
+
+    pub(crate) async fn next_events(&self) -> (Vec<Value>, bool, bool) {
+        let mut stopped = self.stopped.clone();
+        let wait = async {
+            loop {
+                let ready = self.events.ready.notified();
+                let (events, overflow) = self.events.take();
+                let disconnected = *stopped.borrow();
+                if !events.is_empty() || overflow || disconnected {
+                    return (events, overflow, disconnected);
+                }
+                tokio::select! {
+                    _ = ready => {}
+                    _ = stopped.wait_for(|finished| *finished) => {}
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(25), wait)
+            .await
+            .unwrap_or_default()
     }
 
     fn start(
@@ -166,12 +228,12 @@ impl AgentTransport {
         protocol: u32,
         classify: Option<StderrClassifier>,
     ) -> Self {
-        let (outgoing, requests) = mpsc::channel(MAX_IN_FLIGHT);
+        let (outgoing, requests) = mpsc::channel(MAX_IN_FLIGHT + 1);
         let (stop, mut stopping) = watch::channel(false);
         let (finished, stopped) = watch::channel(false);
         let pending = Arc::new(Mutex::new(Pending::default()));
         let waiting = Arc::clone(&pending);
-        let events = Arc::new(Mutex::new(Vec::new()));
+        let events = Arc::new(EventQueue::default());
         let pushed = Arc::clone(&events);
         tokio::spawn(async move {
             let mut diagnostic = tokio::spawn(drain_stderr(stderr, classify));
@@ -220,22 +282,50 @@ impl AgentTransport {
     /// Fields are an object containing only operation arguments. The transport
     /// owns v/id/op. A successful call unwraps result; agent errors retain code.
     pub async fn rpc(&self, op: &str, fields: Value) -> Reply {
+        self.rpc_with_id(op, fields, Uuid::new_v4().simple().to_string(), false).await
+    }
+
+    pub(crate) async fn rpc_read(&self, op: &str, fields: Value, request_id: u64) -> Reply {
+        self.rpc_with_id(op, fields, format!("read-{request_id}"), false).await
+    }
+
+    pub(crate) async fn cancel_reads(&self, request_id: Option<u64>) {
+        let single = request_id.map(|id| format!("read-{id}"));
+        let reads: Vec<String> = self.pending.lock().unwrap_or_else(|e| e.into_inner())
+            .waiters.keys()
+            .filter(|id| id.starts_with("read-") && single.as_ref().is_none_or(|target| *id == target))
+            .cloned().collect();
+        let cancel = async {
+            for id in reads {
+                let _ = self.rpc_with_id("cancel", serde_json::json!({"targetId": id}), Uuid::new_v4().simple().to_string(), true).await;
+            }
+        };
+        let _ = tokio::time::timeout(Duration::from_secs(1), cancel).await;
+    }
+
+    async fn rpc_with_id(&self, op: &str, fields: Value, id: String, control: bool) -> Reply {
         if !token(op) {
             return Err(AppError::new("remote_request", "远端操作名称无效。"));
         }
         let Value::Object(mut frame) = fields else {
             return Err(AppError::new("remote_request", "远端操作参数必须是对象。"));
         };
-        if ["id", "v", "op"].iter().any(|key| frame.contains_key(*key)) {
+        if ["id", "v", "op", "largeFileResponse"].iter().any(|key| frame.contains_key(*key)) {
             return Err(AppError::new(
                 "remote_request",
                 "远端操作参数包含保留字段。",
             ));
         }
-        let id = Uuid::new_v4().simple().to_string();
         frame.insert("id".into(), Value::String(id.clone()));
         frame.insert("v".into(), Value::from(self.protocol));
         frame.insert("op".into(), Value::String(op.into()));
+        let large_reply = self.protocol == 2 && matches!(
+            op, "fileContent" | "filePreview" | "document" | "documentResource"
+                | "documentRemoteImage" | "editSnapshot" | "editSave"
+        );
+        if large_reply {
+            frame.insert("largeFileResponse".into(), Value::Bool(true));
+        }
         let limit = request_limit(self.protocol);
         let mut bytes = RequestBuffer {
             bytes: Vec::new(),
@@ -256,7 +346,9 @@ impl AgentTransport {
             if let Some(error) = &pending.failure {
                 return Err(if starting { error.clone() } else { not_sent() });
             }
-            if pending.waiters.len() >= MAX_IN_FLIGHT {
+            if pending.waiters.len() >= MAX_IN_FLIGHT + usize::from(control)
+                || pending.waiters.contains_key(&id)
+            {
                 return Err(busy());
             }
             use mpsc::error::TrySendError;
@@ -268,7 +360,10 @@ impl AgentTransport {
                 Err(TrySendError::Closed(_)) => return Err(not_sent()),
                 Err(TrySendError::Full(_)) => return Err(busy()),
             }
-            pending.waiters.insert(id, reply);
+            pending.waiters.insert(id, Waiter {
+                reply,
+                limit: if large_reply { FILE_RESPONSE_BYTES } else { RESPONSE_BYTES },
+            });
         }
         // A cancelled caller leaves its bounded ID until its reply or EOF so a
         // legitimate late response cannot invalidate unrelated requests.
@@ -561,12 +656,12 @@ struct AgentError {
 fn decode_frame(
     bytes: &[u8],
     protocol: u32,
-    events: &Mutex<Vec<Value>>,
+    events: &EventQueue,
 ) -> std::result::Result<Option<Response>, AppError> {
     let value: Value = serde_json::from_slice(bytes).map_err(|_| protocol_error())?;
     if value.get("event").is_some() {
         // 事件帧只属于 v2 会话；v1 会话收到同形态就是无效帧。
-        if protocol != 2 {
+        if protocol != 2 || bytes.len() > RESPONSE_BYTES {
             return Err(protocol_error());
         }
         let Some(kind) = value.get("event").and_then(Value::as_str) else {
@@ -575,11 +670,7 @@ fn decode_frame(
         if value.get("v").and_then(Value::as_u64) != Some(2) || !token(kind) {
             return Err(protocol_error());
         }
-        let mut queue = events.lock().unwrap_or_else(|e| e.into_inner());
-        if queue.len() >= MAX_EVENTS {
-            queue.remove(0);
-        }
-        queue.push(value);
+        events.push(value, bytes.len());
         return Ok(None);
     }
     let response: Response = serde_json::from_value(value).map_err(|_| protocol_error())?;
@@ -594,10 +685,11 @@ async fn read_responses(
     stdout: ChildStdout,
     pending: &Mutex<Pending>,
     protocol: u32,
-    events: &Mutex<Vec<Value>>,
+    events: &EventQueue,
 ) -> AppError {
     let mut pipe = BufReader::new(stdout);
     let mut frame = Vec::new();
+    let mut limit = RESPONSE_BYTES;
     loop {
         let bytes = match pipe.fill_buf().await {
             Ok([]) if frame.is_empty() => return disconnected(),
@@ -607,7 +699,11 @@ async fn read_responses(
         };
         let newline = bytes.iter().position(|&byte| byte == b'\n');
         let count = newline.map_or(bytes.len(), |index| index + 1);
-        if count > RESPONSE_BYTES - frame.len() {
+        if frame.is_empty() {
+            limit = pending.lock().unwrap_or_else(|e| e.into_inner())
+                .waiters.values().map(|waiter| waiter.limit).max().unwrap_or(RESPONSE_BYTES);
+        }
+        if count > limit - frame.len() {
             return protocol_error();
         }
         frame.extend_from_slice(&bytes[..count]);
@@ -615,6 +711,7 @@ async fn read_responses(
         if newline.is_none() {
             continue;
         }
+        let frame_size = frame.len();
         let decoded = decode_frame(&frame, protocol, events);
         frame.clear();
         let Some(response) = (match decoded {
@@ -635,8 +732,13 @@ async fn read_responses(
         let Some(waiter) = pending.waiters.remove(&response.id) else {
             return protocol_error();
         };
+        if frame_size > waiter.limit {
+            let error = protocol_error();
+            let _ = waiter.reply.send(Err(error.clone()));
+            return error;
+        }
         pending.received_response = true;
-        let _ = waiter.send(result);
+        let _ = waiter.reply.send(result);
     }
 }
 
@@ -1040,7 +1142,76 @@ function receive(req) {
         agent.close().await;
     }
 
-    /// v1 组件不会发事件帧：收到同形态就是无效帧，不能被当成「空结果」悄悄吞掉。
+    #[tokio::test]
+    async fn terminal_event_overflow_preserves_rpc_replies_and_signals_replay() {
+        let (agent, _) = helper_version(
+            r#"
+function receive(req) {
+    if (req.op === "terminalInput") {
+        for (let seq = 1; seq <= 72; seq++) {
+            send({v:2,event:"terminalOutput",repo:"repo-a",sessionId:"term-a",seq,part:0,parts:1,data:"x".repeat(65536)});
+        }
+    }
+    result(req, {ok:true});
+}"#,
+            2,
+        );
+        assert_eq!(agent.rpc("terminalInput", json!({})).await.unwrap(), json!({"ok":true}));
+        let (frames, overflow, disconnected) = agent.next_events().await;
+        assert!(overflow);
+        assert!(!disconnected);
+        assert!(frames.len() < 16);
+        assert_eq!(frames.last().unwrap()["seq"], json!(72));
+        assert_eq!(agent.rpc("terminalAttach", json!({})).await.unwrap(), json!({"ok":true}));
+        agent.close().await;
+        assert!(agent.next_events().await.2);
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_file_request_preserves_the_other_inflight_reply() {
+        let (agent, _) = helper_version(
+            r#"
+function receive(req) {
+    if (req.op === "fileContent") {
+        send({v:2,event:"change",repo:"repo-a",seq:1});
+    } else if (req.op === "cancel") {
+        send({v:2,id:req.targetId,ok:false,error:{code:"cancelled",message:"cancelled"}});
+        result(req, {cancelled:true});
+    } else {
+        result(req, {active:true});
+    }
+}"#,
+            2,
+        );
+        let read = agent.rpc_read("fileContent", json!({}), 15);
+        let cancel = async {
+            let _ = agent.next_events().await;
+            agent.cancel_reads(Some(15)).await;
+            agent.rpc("terminalList", json!({})).await
+        };
+        let (read, active) = tokio::join!(read, cancel);
+        assert_eq!(read.unwrap_err().code, "cancelled");
+        assert_eq!(active.unwrap(), json!({"active":true}));
+        agent.close().await;
+    }
+
+    #[tokio::test]
+    async fn larger_file_replies_are_opted_in_per_request() {
+        let (agent, _) = helper_version(
+            r#"
+function receive(req) {
+    if (req.op === "filePreview" && req.largeFileResponse !== true) throw new Error("expected file limit");
+    result(req, {data:"x".repeat(5*1024*1024)});
+}"#,
+            2,
+        );
+        let asset = agent.rpc("filePreview", json!({})).await.unwrap();
+        assert_eq!(asset["data"].as_str().unwrap().len(), 5 * 1024 * 1024);
+        assert_eq!(agent.rpc("hello", json!({})).await.unwrap_err().code, "remote_protocol");
+        agent.close().await;
+    }
+
+    /// v1 组件收到通知帧时应该明确报协议错误。
     #[tokio::test]
     async fn event_frames_are_a_protocol_error_on_a_v1_session() {
         let (agent, _) = helper("function receive(req){ send({v:1,event:'change'}); }");

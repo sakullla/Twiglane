@@ -25,12 +25,14 @@ import {
   type RemotePendingWrite,
   type RemoteReviewOutcome,
   type RemoteTarget,
+  type RemoteTerminalOp,
   type RemoteWriteOp,
   type RemoteWorktreeSnapshot,
   type RemoteWriteAction,
   type RemoteWriteRequest,
   type RemoteWriteResult,
 } from "./remote-worktree";
+import { TERMINAL_EXIT_EVENT, TERMINAL_OUTPUT_EVENT } from "./terminal";
 import {
   REMOTE_HUNKS_UNSTAGEABLE_REASON,
   type RemotePatchStageability,
@@ -151,7 +153,13 @@ export async function listenEvent<T>(
   handler: (payload: T) => void,
 ): Promise<() => void> {
   const { listen } = await import("@tauri-apps/api/event");
-  return listen<T>(name, (event) => handler(event.payload));
+  const unlisten = await listen<T>(name, (event) => handler(event.payload));
+  const dispatch = (event: Event) => handler((event as CustomEvent<T>).detail);
+  remoteEvents.addEventListener(name, dispatch);
+  return () => {
+    remoteEvents.removeEventListener(name, dispatch);
+    unlisten();
+  };
 }
 
 /** 当前应用版本号（tauri.conf.json 的 version）；浏览器/预览环境没有 Tauri 运行时，返回 null。 */
@@ -276,6 +284,7 @@ interface RemoteRepositorySession {
    */
   disconnected: boolean;
   diffs: Map<string, RemoteDiffCacheEntry>;
+  terminals: Set<string>;
 }
 
 /** 传输层错误：连接已不可用，界面转入只读。 */
@@ -283,6 +292,7 @@ const DISCONNECT_CODES = new Set(["remote_disconnected", "ssh_failed", "remote_t
 
 const remoteSessions = new Map<string, RemoteRepositorySession>();
 const remoteHostLabels = new Map<string, string>();
+const remoteEvents = new EventTarget();
 let remoteGeneration = 1000;
 let remoteOpenEpoch = 0;
 
@@ -538,7 +548,7 @@ async function settleRemoteWrite(
     // 远端已核实这次写入没有生效：清掉待确认记录，错误如实上报。
     session.pending = null;
     noteRemoteState();
-    throw remoteError("remote_write_failed", result.message || "远端操作失败，工作树没有被改动。", session.generation);
+    throw remoteError(result.code ?? "remote_write_failed", result.message || "远端操作失败，工作树没有被改动。", session.generation);
   }
   session.pending = { operationId: result.operationId, op: result.op ?? op };
   noteRemoteState();
@@ -653,6 +663,7 @@ export interface RemoteRepositoryState {
   pending: boolean;
   reviewId: string | null;
   connected: boolean;
+  connectionId: string;
 }
 
 async function openRemote(
@@ -717,6 +728,7 @@ async function openRemote(
     returnedOutcome: null,
     disconnected: false,
     diffs: new Map(),
+    terminals: new Set(),
   };
   if (session.reviewId) {
     try {
@@ -734,6 +746,7 @@ async function openRemote(
   }
   remoteSessions.set(key, session);
   noteRemoteState();
+  if (opened.events) void readRemoteEvents(session);
   if (session.pending) {
     // 打开时后端已经带回持久记录：只核对回执，不重发写入。
     await recoverRemoteWrite(session).catch(() => undefined);
@@ -777,6 +790,7 @@ export function remoteRepositoryState(key: string): RemoteRepositoryState | null
     pending: session.pending !== null,
     reviewId: session.reviewId,
     connected: !session.disconnected,
+    connectionId: session.sessionId,
   };
 }
 
@@ -1029,7 +1043,7 @@ const apiBase = {
   /** Explicit opt-in only; callers own requestId and cancel only their own image.
    * Remote images are not repository versions: the returned FilePreview.generation is
    * always 0, so accept/drop these results by requestId instead of generation. */
-  documentRemoteImage: (url: string, requestId: number) => invoke<FilePreview>("document_remote_image", { url, requestId }),
+  documentRemoteImage: (url: string, requestId: number, _repository?: string) => invoke<FilePreview>("document_remote_image", { url, requestId }),
   cancelDocumentResources: (requestId: number) => invoke<void>("cancel_document_resources", { requestId }),
   repositoryDirectory: (
     path: string,
@@ -1661,7 +1675,7 @@ const apiBase = {
   saveDraft: (path: string, message: string) => invoke<void>("save_draft", { path, message }),
   cancelReads: () => invoke<void>("cancel_reads"),
   /** 本机可用的终端类型，第一项是平台默认。 */
-  terminalProfiles: () => invoke<TerminalProfile[]>("terminal_profiles"),
+  terminalProfiles: (_repository?: string) => invoke<TerminalProfile[]>("terminal_profiles"),
   /** 仓库现有终端会话（按创建顺序，不带输出）；附着时用 terminalAttach 取输出重放。 */
   terminalList: (path: string) => invoke<TerminalSnapshot[]>("terminal_list", { path }),
   /** 在仓库根目录新建会话；profile 为空时用设置里的默认终端类型。 */
@@ -1776,6 +1790,153 @@ function bridgeField<T>(result: BridgePayload, name: string): T {
   return value as T;
 }
 
+async function remoteFileRead<T extends { generation: number }>(
+  session: RemoteRepositorySession,
+  op: RemoteCallOp,
+  field: string,
+  fields: BridgePayload,
+  requestId?: number,
+): Promise<T> {
+  const result = await remoteBridgeRead(session, op, fields, requestId);
+  if (result.repo !== session.repo) {
+    throw remoteError("remote_protocol", "远端文件响应缺少当前工作树标识。");
+  }
+  return { ...bridgeField<T>(result, field), generation: session.generation };
+}
+
+function remoteDocumentSource(session: RemoteRepositorySession, source: DocumentSource): DocumentSource {
+  if (source.repository && source.repository !== session.key) {
+    throw remoteError("document_repository", "文档来源属于另一棵工作树。");
+  }
+  return { ...source, repository: session.repo };
+}
+
+const REMOTE_TERMINAL_PREFIX = "ssh-terminal:";
+const rawTerminalId = (value: unknown): value is string =>
+  typeof value === "string" && /^[a-zA-Z0-9_-]{1,80}$/.test(value);
+
+function remoteTerminalId(session: RemoteRepositorySession, id: string): string {
+  return `${REMOTE_TERMINAL_PREFIX}${session.sessionId}:${id}`;
+}
+
+function terminalRoute(id: string): { session: RemoteRepositorySession; raw: string } | null {
+  if (!id.startsWith(REMOTE_TERMINAL_PREFIX)) return null;
+  const [connection, raw, ...rest] = id.slice(REMOTE_TERMINAL_PREFIX.length).split(":");
+  const session = [...remoteSessions.values()].find((current) => current.sessionId === connection);
+  if (!session || session.disconnected || !rawTerminalId(raw) || rest.length || !session.terminals.has(raw)) {
+    throw remoteError("terminal_closed", "远端终端已失效；请重新连接仓库后新建终端。");
+  }
+  return { session, raw };
+}
+
+function bindRemoteTerminal(session: RemoteRepositorySession, snapshot: TerminalSnapshot): TerminalSnapshot {
+  if (!snapshot || !rawTerminalId(snapshot.sessionId) || snapshot.repoPath !== session.repo) {
+    throw remoteError("remote_protocol", "远端终端归属无法核对。");
+  }
+  session.terminals.add(snapshot.sessionId);
+  return { ...snapshot, sessionId: remoteTerminalId(session, snapshot.sessionId), repoPath: session.key };
+}
+
+async function remoteTerminalCall(
+  session: RemoteRepositorySession,
+  op: RemoteTerminalOp,
+  fields: BridgePayload = {},
+): Promise<BridgePayload> {
+  if (session.disconnected) throw remoteError("remote_disconnected", "远端终端连接已断开。请重新打开仓库。");
+  try {
+    const payload = bridgePayload(await remoteWorktreePort.call({ sessionId: session.sessionId, op, fields }), op);
+    checkRemoteResponse(session);
+    if (payload.repo !== session.repo) {
+      throw remoteError("target_changed", "远端终端不属于已打开的工作树。");
+    }
+    return payload;
+  } catch (error) {
+    const failure = normalizeError(error);
+    if (DISCONNECT_CODES.has(failure.code) && remoteSessions.get(session.key) === session) {
+      session.disconnected = true;
+      noteRemoteState();
+    }
+    throw failure;
+  }
+}
+
+function publishRemoteEvent(name: string, detail: object): void {
+  remoteEvents.dispatchEvent(new CustomEvent(name, { detail }));
+}
+
+async function readRemoteEvents(session: RemoteRepositorySession): Promise<void> {
+  const chunks = new Map<string, { seq: number; parts: number; chunks: string[] }>();
+  let changeSeq = 0;
+  const resync = (raw: string) => publishRemoteEvent(TERMINAL_OUTPUT_EVENT, {
+    sessionId: remoteTerminalId(session, raw), seq: 0, data: "", replay: true,
+  });
+  try {
+    while (remoteSessions.get(session.key) === session && !session.disconnected) {
+      const batch = await remoteWorktreePort.events(session.sessionId);
+      if (remoteSessions.get(session.key) !== session || session.disconnected) return;
+      let changed = batch.overflow;
+      if (batch.overflow) {
+        chunks.clear();
+        session.terminals.forEach(resync);
+      }
+      for (const event of batch.events) {
+        if (event.repo !== session.repo || typeof event.seq !== "number" || !Number.isSafeInteger(event.seq)) continue;
+        const seq = event.seq;
+        if (event.event === "change" && seq > changeSeq) {
+          changeSeq = seq;
+          changed = true;
+        }
+        const raw = event.sessionId;
+        if (!rawTerminalId(raw) || !session.terminals.has(raw)) continue;
+        const sessionId = remoteTerminalId(session, raw);
+        if (event.event === "terminalExit" && typeof event.exitCode === "number") {
+          chunks.delete(raw);
+          publishRemoteEvent(TERMINAL_EXIT_EVENT, {
+            sessionId, seq, exitCode: event.exitCode,
+            signal: typeof event.signal === "string" ? event.signal : null,
+          });
+        } else if (event.event === "terminalOutput") {
+          const { part, parts, data } = event;
+          if (typeof part !== "number" || typeof parts !== "number" || typeof data !== "string"
+              || !Number.isInteger(part) || !Number.isInteger(parts) || parts < 1 || parts > 32
+              || part < 0 || part >= parts || data.length > 64 * 1024) continue;
+          if (part === 0) chunks.set(raw, { seq, parts, chunks: [] });
+          const frame = chunks.get(raw);
+          if (!frame || frame.seq !== seq || frame.parts !== parts || frame.chunks.length !== part) {
+            chunks.delete(raw);
+            resync(raw);
+            continue;
+          }
+          frame.chunks.push(data);
+          if (frame.chunks.length === parts) {
+            chunks.delete(raw);
+            publishRemoteEvent(TERMINAL_OUTPUT_EVENT, { sessionId, seq, data: frame.chunks.join("") });
+          }
+        }
+      }
+      if (batch.disconnected) {
+        session.disconnected = true;
+        noteRemoteState();
+        return;
+      }
+      if (changed) {
+        session.generation = ++remoteGeneration;
+        session.diffs.clear();
+        publishRemoteEvent("repo-changed", { path: session.key, generation: session.generation, degraded: false });
+      }
+    }
+  } catch (error) {
+    if (remoteSessions.get(session.key) !== session || session.disconnected) return;
+    if (DISCONNECT_CODES.has(normalizeError(error).code)) {
+      session.disconnected = true;
+      noteRemoteState();
+      return;
+    }
+    session.latest = { ...session.latest, watchDegraded: true };
+    publishRemoteEvent("repo-changed", { path: session.key, generation: session.generation, degraded: true });
+  }
+}
+
 /**
  * 只读 op：字段直通，结果原样带回。
  *
@@ -1786,6 +1947,7 @@ async function remoteBridgeRead(
   session: RemoteRepositorySession,
   op: RemoteCallOp,
   fields: BridgePayload = {},
+  readId?: number,
 ): Promise<BridgePayload> {
   const generation = session.generation;
   let result: unknown;
@@ -1794,6 +1956,7 @@ async function remoteBridgeRead(
       sessionId: session.sessionId,
       op,
       fields,
+      ...(readId === undefined ? {} : { readId }),
     });
   } catch (error) {
     checkRemoteResponse(session, generation);
@@ -1805,7 +1968,11 @@ async function remoteBridgeRead(
     throw failure;
   }
   checkRemoteResponse(session, generation);
-  return bridgePayload(result, op);
+  const payload = bridgePayload(result, op);
+  if (payload.repo !== undefined && payload.repo !== session.repo) {
+    throw remoteError("target_changed", "远端返回了另一棵工作树的数据。");
+  }
+  return payload;
 }
 
 /**
@@ -1820,6 +1987,15 @@ async function remoteBridgeWrite(
   op: RemoteWriteOp,
   fields: BridgePayload = {},
 ): Promise<RemoteWorktreeSnapshot> {
+  return (await remoteBridgeWriteResult(session, generation, op, fields)).snapshot;
+}
+
+async function remoteBridgeWriteResult(
+  session: RemoteRepositorySession,
+  generation: number,
+  op: RemoteWriteOp,
+  fields: BridgePayload,
+): Promise<Extract<RemoteWriteResult, { state: "completed" }>> {
   if (generation !== session.generation) {
     throw remoteError("stale", "远端仓库已有变化，请刷新后重试。", session.generation);
   }
@@ -1851,7 +2027,21 @@ async function remoteBridgeWrite(
       session.generation,
     );
   }
-  return settleRemoteWrite(session, result, op as RemotePendingWrite["op"]);
+  await settleRemoteWrite(session, result, op);
+  if (result.state !== "completed") {
+    throw remoteError("remote_protocol", "远端写入回执格式无效。");
+  }
+  return result;
+}
+
+async function remoteDeleteEntries(path: string, relatives: string[], permanent: boolean, generation: number): Promise<BatchDeleteResult> {
+  const session = remoteBridgeSession(path, generation);
+  const result = await remoteBridgeWriteResult(session, generation, "deleteEntries", { relatives, permanent });
+  const deletion = result.delete;
+  if (!deletion || !Array.isArray(deletion.deleted) || !Array.isArray(deletion.skipped) || !Array.isArray(deletion.failures)) {
+    throw remoteError("remote_protocol", "已核对远端操作，未收到删除明细。请刷新工作树查看结果。");
+  }
+  return { ...deletion, snapshot: remoteStatus(result.snapshot, session.generation) };
 }
 
 /**
@@ -2088,6 +2278,177 @@ const remoteOverrides: Record<string, unknown> = {
     const session = remoteSession(path);
     const snapshot = await remoteStatusOf(session);
     return remoteStatus(snapshot, session.generation);
+  },
+
+  async repositoryDirectory(path: string, relative: string, includeIgnored: boolean, generation: number, requestId: number) {
+    if (!isRemoteRepositoryKey(path)) return apiBase.repositoryDirectory(path, relative, includeIgnored, generation, requestId);
+    return remoteFileRead<RepositoryDirectory>(remoteBridgeSession(path, generation), "directory", "directory", { relative, includeIgnored }, requestId);
+  },
+
+  async repositoryFileContent(path: string, relative: string, offset: number, limit: number | undefined, generation: number, requestId: number) {
+    if (!isRemoteRepositoryKey(path)) return apiBase.repositoryFileContent(path, relative, offset, limit, generation, requestId);
+    return remoteFileRead<RepositoryFileContent>(remoteBridgeSession(path, generation), "fileContent", "content", { relative, offset, limit }, requestId);
+  },
+
+  async repositoryPathSearch(path: string, query: string, directory: string | null, includeIgnored: boolean, limit: number | undefined, generation: number, requestId: number) {
+    if (!isRemoteRepositoryKey(path)) return apiBase.repositoryPathSearch(path, query, directory, includeIgnored, limit, generation, requestId);
+    return remoteFileRead<RepositoryPathSearch>(remoteBridgeSession(path, generation), "pathSearch", "search", { query, directory, includeIgnored, limit }, requestId);
+  },
+
+  async repositoryContentSearch(path: string, query: string, scope: RepositorySearchScope, includeIgnored: boolean, limit: number | undefined, generation: number, requestId: number) {
+    if (!isRemoteRepositoryKey(path)) return apiBase.repositoryContentSearch(path, query, scope, includeIgnored, limit, generation, requestId);
+    return remoteFileRead<RepositoryContentSearch>(remoteBridgeSession(path, generation), "contentSearch", "search", { query, scope, includeIgnored, limit }, requestId);
+  },
+
+  async filePreview(path: string, source: PreviewSource, generation: number, download = false) {
+    if (!isRemoteRepositoryKey(path)) return apiBase.filePreview(path, source, generation, download);
+    return remoteFileRead<FilePreview>(remoteBridgeSession(path, generation), "filePreview", "preview", { source, download });
+  },
+
+  async repositoryDocument(path: string, source: DocumentSource, generation: number, requestId: number, mode: "document" | "source" = "document", offset = 0, limit?: number, expectedVersion: string | null = null) {
+    if (!isRemoteRepositoryKey(path)) return apiBase.repositoryDocument(path, source, generation, requestId, mode, offset, limit, expectedVersion);
+    const session = remoteBridgeSession(path, generation);
+    const document = await remoteFileRead<RepositoryDocument>(session, "document", "document", {
+      source: remoteDocumentSource(session, source), mode, offset, limit, expectedVersion,
+    }, requestId);
+    if (document.source.repository !== session.repo) {
+      throw remoteError("document_repository", "远端文档来源与当前工作树不符。");
+    }
+    return { ...document, source: { ...document.source, repository: session.key } };
+  },
+
+  async documentResource(path: string, source: DocumentSource, generation: number, requestId: number) {
+    if (!isRemoteRepositoryKey(path)) return apiBase.documentResource(path, source, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    return remoteFileRead<FilePreview>(session, "documentResource", "resource", {
+      source: remoteDocumentSource(session, source),
+    }, requestId);
+  },
+
+  async documentRemoteImage(url: string, requestId: number, repository?: string) {
+    if (!repository || !isRemoteRepositoryKey(repository)) return apiBase.documentRemoteImage(url, requestId);
+    const session = remoteSession(repository);
+    if (session.disconnected) throw remoteError("remote_disconnected", "远端仓库已断开，无法读取图片。");
+    return bridgeField<FilePreview>(await remoteBridgeRead(session, "documentRemoteImage", { url }, requestId), "image");
+  },
+
+  async cancelDocumentResources(requestId: number) {
+    await Promise.allSettled([
+      apiBase.cancelDocumentResources(requestId),
+      ...[...remoteSessions.values()].map((session) => remoteWorktreePort.cancelReads(session.sessionId, requestId)),
+    ]);
+  },
+
+  async cancelReads() {
+    await Promise.all([
+      apiBase.cancelReads(),
+      ...[...remoteSessions.values()].map((session) => remoteWorktreePort.cancelReads(session.sessionId).catch(() => {})),
+    ]);
+  },
+
+  async repositoryEditSnapshot(path: string, relative: string, generation: number, requestId: number) {
+    if (!isRemoteRepositoryKey(path)) return apiBase.repositoryEditSnapshot(path, relative, generation, requestId);
+    return remoteFileRead<RepositoryEditSnapshot>(remoteBridgeSession(path, generation), "editSnapshot", "edit", { relative }, requestId);
+  },
+
+  async repositoryEditSave(path: string, relative: string, expectedDigest: string, content: string, generation: number, requestId: number) {
+    if (!isRemoteRepositoryKey(path)) return apiBase.repositoryEditSave(path, relative, expectedDigest, content, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    let result: Extract<RemoteWriteResult, { state: "completed" }>;
+    try {
+      result = await remoteBridgeWriteResult(session, generation, "editSave", { path: relative, expectedDigest, content });
+    } catch (error) {
+      const failure = normalizeError(error);
+      if (failure.code !== "state_mismatch" && failure.code !== "stale_state") throw error;
+      await remoteStatusOf(session);
+      throw remoteError("stale", failure.message, session.generation);
+    }
+    if (!result.edit || result.edit.path !== relative) {
+      throw remoteError("remote_protocol", "已确认保存，远端未返回文件版本。请重新读取文件。");
+    }
+    return { ...result.edit, generation: session.generation };
+  },
+
+  async repositoryCreateEntry(path: string, relative: string, kind: "file" | "directory", generation: number, requestId: number) {
+    if (!isRemoteRepositoryKey(path)) return apiBase.repositoryCreateEntry(path, relative, kind, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    return remoteStatus(await remoteBridgeWrite(session, generation, "createEntry", { path: relative, kind }), session.generation);
+  },
+
+  async repositoryCopyEntry(path: string, source: string, target: string, generation: number, requestId: number) {
+    if (!isRemoteRepositoryKey(path)) return apiBase.repositoryCopyEntry(path, source, target, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    return remoteStatus(await remoteBridgeWrite(session, generation, "copyEntry", { source, target }), session.generation);
+  },
+
+  async repositoryMoveEntry(path: string, source: string, target: string, generation: number, requestId: number) {
+    if (!isRemoteRepositoryKey(path)) return apiBase.repositoryMoveEntry(path, source, target, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    return remoteStatus(await remoteBridgeWrite(session, generation, "moveEntry", { source, target }), session.generation);
+  },
+
+  async repositoryDeleteEntry(path: string, relative: string, generation: number, requestId: number) {
+    if (!isRemoteRepositoryKey(path)) return apiBase.repositoryDeleteEntry(path, relative, generation, requestId);
+    const result = await remoteDeleteEntries(path, [relative], false, generation);
+    const failed = result.failures[0];
+    if (failed) throw remoteError(failed.code, failed.message);
+    return result.snapshot;
+  },
+
+  async repositoryDeleteEntries(path: string, relatives: string[], permanent: boolean, generation: number, requestId: number) {
+    if (!isRemoteRepositoryKey(path)) return apiBase.repositoryDeleteEntries(path, relatives, permanent, generation, requestId);
+    return remoteDeleteEntries(path, relatives, permanent, generation);
+  },
+
+  async terminalProfiles(path?: string) {
+    if (!path || !isRemoteRepositoryKey(path)) return apiBase.terminalProfiles();
+    return bridgeField<TerminalProfile[]>(await remoteTerminalCall(remoteSession(path), "terminalProfiles"), "profiles");
+  },
+
+  async terminalList(path: string) {
+    if (!isRemoteRepositoryKey(path)) return apiBase.terminalList(path);
+    const session = remoteSession(path);
+    return bridgeField<TerminalSnapshot[]>(await remoteTerminalCall(session, "terminalList"), "sessions")
+      .map((snapshot) => bindRemoteTerminal(session, snapshot));
+  },
+
+  async terminalCreate(path: string, profile: string | null = null) {
+    if (!isRemoteRepositoryKey(path)) return apiBase.terminalCreate(path, profile);
+    const session = remoteSession(path);
+    return bindRemoteTerminal(session, bridgeField(await remoteTerminalCall(session, "terminalCreate", { profile }), "terminal"));
+  },
+
+  async terminalAttach(sessionId: string) {
+    const route = terminalRoute(sessionId);
+    if (!route) return apiBase.terminalAttach(sessionId);
+    return bindRemoteTerminal(route.session, bridgeField(await remoteTerminalCall(route.session, "terminalAttach", { sessionId: route.raw }), "terminal"));
+  },
+
+  async terminalRestart(sessionId: string) {
+    const route = terminalRoute(sessionId);
+    if (!route) return apiBase.terminalRestart(sessionId);
+    const data = await remoteTerminalCall(route.session, "terminalRestart", { sessionId: route.raw });
+    route.session.terminals.delete(route.raw);
+    return bindRemoteTerminal(route.session, bridgeField(data, "terminal"));
+  },
+
+  async terminalClose(sessionId: string) {
+    const route = terminalRoute(sessionId);
+    if (!route) return apiBase.terminalClose(sessionId);
+    await remoteTerminalCall(route.session, "terminalClose", { sessionId: route.raw });
+    route.session.terminals.delete(route.raw);
+  },
+
+  async terminalWrite(sessionId: string, data: string) {
+    const route = terminalRoute(sessionId);
+    if (!route) return apiBase.terminalWrite(sessionId, data);
+    await remoteTerminalCall(route.session, "terminalInput", { sessionId: route.raw, data });
+  },
+
+  async terminalResize(sessionId: string, rows: number, cols: number) {
+    const route = terminalRoute(sessionId);
+    if (!route) return apiBase.terminalResize(sessionId, rows, cols);
+    await remoteTerminalCall(route.session, "terminalResize", { sessionId: route.raw, rows, cols });
   },
 
   async taskReview(path: string, baseline: string, generation: number, requestId: number): Promise<TaskReview> {
@@ -2392,7 +2753,7 @@ const remoteOverrides: Record<string, unknown> = {
       parent,
       path: relative,
       offset,
-      limit,
+      ...(limit > 0 ? { limit } : {}),
       ...(context === undefined ? {} : { context }),
       ...(asText ? { asText } : {}),
     });
@@ -2432,7 +2793,7 @@ const remoteOverrides: Record<string, unknown> = {
       head,
       path: relative,
       offset,
-      limit,
+      ...(limit > 0 ? { limit } : {}),
       ...(context === undefined ? {} : { context }),
     });
     return { ...bridgeField<DiffResponse>(result, "compareFileDiff"), generation: session.generation };

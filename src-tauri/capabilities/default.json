@@ -34,6 +34,8 @@
     "allow-remote-worktree-write",
     "allow-remote-worktree-recover",
     "allow-remote-worktree-call",
+    "allow-remote-worktree-events",
+    "allow-remote-worktree-cancel-reads",
     "allow-remote-ssh-settings",
     "allow-set-remote-ssh-enabled",
     "allow-remote-ssh-save-target",

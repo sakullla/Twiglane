@@ -2006,6 +2006,7 @@ input.on("line", line => {
         }
     }
 
+    #[cfg(unix)]
     fn requests(dir: &Path) -> Vec<String> {
         std::fs::read_to_string(dir.join("requests.log"))
             .unwrap_or_default()

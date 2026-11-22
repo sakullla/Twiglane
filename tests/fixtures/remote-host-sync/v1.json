@@ -147,9 +147,7 @@
         "kind": "host-sync-v1",
         "role": "receiver",
         "result": "association_required",
-        "hostId": null,
         "sharedHostId": "11111111-2222-3333-4444-555555555555",
-        "password": "absent",
         "receipts": [],
         "sessionClosed": false,
         "candidates": [
@@ -159,6 +157,27 @@
             "host": "example.test",
             "port": 22,
             "user": "deploy"
+          }
+        ]
+      }
+    },
+    {
+      "name": "association-conflict",
+      "description": "同地址记录已关联到另一个共享标识：返回冲突，不新建重复记录、不写任何内容",
+      "receive": {
+        "protocol": 1,
+        "kind": "host-sync-v1",
+        "role": "receiver",
+        "result": "association_conflict",
+        "sharedHostId": "11111111-2222-3333-4444-555555555555",
+        "receipts": [],
+        "sessionClosed": false,
+        "conflicts": [
+          {
+            "hostId": "host-a",
+            "displayName": "prod",
+            "host": "example.test",
+            "sharedHostId": "99999999-8888-7777-6666-555555555555"
           }
         ]
       }

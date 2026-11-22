@@ -174,16 +174,33 @@ export interface HostSyncCandidate {
   user?: string;
 }
 
+/** 同地址但已关联到别的共享标识的本机记录：只能由用户手动处理，不再复制一条。 */
+export interface HostSyncConflict {
+  hostId: string;
+  displayName: string;
+  host: string;
+  sharedHostId: string | null;
+}
+
 export interface HostSyncResult {
   protocol: number;
   kind: "host-sync-v1";
-  result: "consistent" | "applied" | "partial" | "unknown" | "unchanged" | "association_required" | "conflict";
+  result:
+    | "consistent"
+    | "applied"
+    | "partial"
+    | "unknown"
+    | "unchanged"
+    | "association_required"
+    | "association_conflict"
+    | "conflict";
   hostId: string | null;
   sharedHostId: string | null;
   password: HostSyncPasswordState;
   receipts: HostSyncReceipt[];
   sessionClosed: boolean;
   candidates?: HostSyncCandidate[];
+  conflicts?: HostSyncConflict[];
 }
 
 /** 把同步回执翻成一句话。只描述状态，不回显任何配置或秘密。 */
@@ -200,6 +217,8 @@ export function hostSyncMessage(result: HostSyncResult): string {
       return "配置已保存，但密码未能写入系统凭据。原密码仍保留，可在跳转流程里重试。";
     case "conflict":
       return "本机这台主机在同步期间被修改，本次没有覆盖。请重新发起跳转。";
+    case "association_conflict":
+      return "本机这条主机记录已关联到另一个共享标识，本次没有写入任何内容。请手动处理这条记录，或改用另一台主机发起跳转。";
     case "association_required": {
       const count = result.candidates?.length ?? 0;
       return count > 0

@@ -42,6 +42,10 @@ const MAX_FETCHES: u32 = 2;
 /// 会话目录上限：超出时先清理过期会话，仍超限则拒绝新建。
 const MAX_SESSIONS: usize = 16;
 const MAX_FIELD: usize = 4096;
+/// stdin 上的一行参数上限：只放标识与一次性挑战，远小于会话文件。
+const MAX_REQUEST_LINE: usize = 8192;
+/// 一次性确认票据的有效期。用户确认的是「这一次跳转」，不是长期读取权。
+const CONFIRM_TTL_SECONDS: u64 = 120;
 
 type Result<T> = std::result::Result<T, AppError>;
 
@@ -192,6 +196,53 @@ fn sessions_dir(data: &Path) -> PathBuf {
     data.join("host-sync")
 }
 
+fn confirmation_required() -> AppError {
+    error(
+        "sync_confirmation_required",
+        "取回密码需要用户在桌面端确认这一次跳转，本次没有读取或输出任何密码。",
+    )
+}
+
+/// 一次性确认票据目录：`${XDG_STATE_HOME:-~/.local/state}/twiglane/host-sync`。
+/// 票据是「用户刚刚确认过这一次跳转」的事实，与会话状态分开存放。
+fn confirmation_dir() -> Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("TWIGLANE_HOST_SYNC_CONFIRM_DIR") {
+        let dir = PathBuf::from(dir);
+        if dir.is_absolute() {
+            return Ok(dir);
+        }
+        return Err(invalid());
+    }
+    if let Some(state) = std::env::var_os("XDG_STATE_HOME") {
+        let state = PathBuf::from(state);
+        if state.is_absolute() {
+            return Ok(state.join("twiglane").join("host-sync"));
+        }
+        return Err(invalid());
+    }
+    dirs::home_dir()
+        .map(|home| {
+            home.join(".local")
+                .join("state")
+                .join("twiglane")
+                .join("host-sync")
+        })
+        .ok_or_else(|| error("host_sync_unavailable", "无法定位本机状态目录。"))
+}
+
+/// 一次用户确认的凭据：只绑本机主机身份、关联 id 与 120 秒有效期，不含任何密码。
+/// 桌面 UI 在用户确认跳转时写入，helper 只校验并立即消费。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Confirmation {
+    protocol: u64,
+    host_id: String,
+    #[serde(default)]
+    shared_host_id: Option<String>,
+    created_at: u64,
+    expires_at: u64,
+}
+
 fn prepare_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path).map_err(|_| error("host_sync_unavailable", "无法创建同步会话目录。"))?;
     #[cfg(unix)]
@@ -246,6 +297,8 @@ struct Source<'a> {
     store: &'a AppStore,
     secrets: &'a dyn CredentialStore,
     dir: PathBuf,
+    /// 票据目录缺省按 XDG 状态目录解析；测试显式指定，避免读写真实用户目录。
+    confirm: Option<PathBuf>,
 }
 
 impl<'a> Source<'a> {
@@ -254,7 +307,15 @@ impl<'a> Source<'a> {
             store,
             secrets,
             dir,
+            confirm: None,
         }
+    }
+
+    /// 只用于测试指定票据目录；T6 接线时桌面侧写票据可复用同一解析规则。
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn with_confirm_dir(mut self, dir: PathBuf) -> Self {
+        self.confirm = Some(dir);
+        self
     }
 
     fn path(&self, reference: &str) -> PathBuf {
@@ -294,6 +355,57 @@ impl<'a> Source<'a> {
             return Err(expired());
         }
         Ok(session)
+    }
+
+    fn confirm_path(&self, reference: &str) -> Result<PathBuf> {
+        let dir = match &self.confirm {
+            Some(dir) => dir.clone(),
+            None => confirmation_dir()?,
+        };
+        Ok(dir.join(format!("{reference}.confirm")))
+    }
+
+    /// 校验并消费一次性确认票据。校验失败时不读密码、也不输出明文；
+    /// 校验通过后先删票据再读密码，票据不能被重放。
+    fn consume_confirmation(&self, session: &Session) -> Result<()> {
+        let path = self.confirm_path(&session.session_ref)?;
+        let load = || -> Result<Confirmation> {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = fs::metadata(&path)
+                    .map_err(|_| confirmation_required())?
+                    .permissions()
+                    .mode();
+                // 票据必须是私有的：别人能写能读的票据等于没有确认。
+                if mode & 0o777 != 0o600 {
+                    return Err(confirmation_required());
+                }
+            }
+            let raw = fs::read_to_string(&path).map_err(|_| confirmation_required())?;
+            serde_json::from_str::<Confirmation>(&raw).map_err(|_| confirmation_required())
+        };
+        let loaded = load();
+        if loaded.is_err() {
+            // 不识别的票据同样删掉：它不能被重放，也没有留在磁盘上的理由。
+            let _ = fs::remove_file(&path);
+        }
+        let ticket = loaded?;
+        let valid = ticket.protocol == PROTOCOL
+            && ticket.host_id == session.host_id
+            && ticket.shared_host_id == session.shared_host_id
+            && ticket.created_at <= now()
+            && ticket.expires_at > now()
+            && ticket
+                .expires_at
+                .saturating_sub(ticket.created_at)
+                <= CONFIRM_TTL_SECONDS;
+        // 无论是否通过都先删除：票据只对一次取回有效，也不该留在磁盘上。
+        let _ = fs::remove_file(&path);
+        if !valid {
+            return Err(confirmation_required());
+        }
+        Ok(())
     }
 
     fn store_session(&self, session: &Session) -> Result<()> {
@@ -423,7 +535,13 @@ impl<'a> Source<'a> {
         }
         self.current(&session)?;
         let want_config = matches!(scope, "config" | "all");
-        let (password, password_state) = if matches!(scope, "password" | "all") {
+        let want_password = matches!(scope, "password" | "all");
+        // 明文密码只在用户为本次会话写过一次性确认票据时才离开本进程；
+        // 没有票据就报 sync_confirmation_required，绝不回退成「直接给」。
+        if want_password {
+            self.consume_confirmation(&session)?;
+        }
+        let (password, password_state) = if want_password {
             match self.secrets.load(&session.host_id) {
                 Ok(Some(secret)) if !secret.is_empty() => (Some(secret), "available"),
                 Ok(_) => (None, "absent"),
@@ -499,20 +617,34 @@ fn first_json_line(bytes: &[u8]) -> Result<Value> {
 }
 
 impl HelperPeer {
-    fn call(&self, args: &[&str]) -> Result<Value> {
-        let output = Command::new(&self.program)
+    /// 动作名走 argv，参数只走 stdin 的一行 JSON：会话引用不会被 ps 或进程审计看到。
+    fn call(&self, action: &str, params: Value) -> Result<Value> {
+        let unavailable = || {
+            error(
+                "host_sync_unavailable",
+                "无法启动来源应用的同步 helper。请确认来源应用已正确安装。",
+            )
+        };
+        let mut child = Command::new(&self.program)
             .arg(FLAG)
-            .args(args)
-            .stdin(Stdio::null())
+            .arg(action)
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output()
-            .map_err(|_| {
-                error(
-                    "host_sync_unavailable",
-                    "无法启动来源应用的同步 helper。请确认来源应用已正确安装。",
-                )
-            })?;
+            .spawn()
+            .map_err(|_| unavailable())?;
+        {
+            let mut stdin = child.stdin.take().ok_or_else(unavailable)?;
+            let line = format!("{params}\n");
+            let written = stdin.write_all(line.as_bytes());
+            // 显式关掉管道再等子进程：对端提前退出时也不会留下僵尸进程。
+            drop(stdin);
+            if written.is_err() {
+                let _ = child.wait();
+                return Err(unavailable());
+            }
+        }
+        let output = child.wait_with_output().map_err(|_| unavailable())?;
         if !output.status.success() {
             // 对端只回错误码：不把诊断文本（可能含主机信息）带进本机界面。
             let code = first_json_line(&output.stderr)
@@ -535,7 +667,10 @@ impl HelperPeer {
 
 impl Peer for HelperPeer {
     fn check(&self, reference: &str, challenge: &str) -> Result<PeerCheck> {
-        let value = self.call(&["check", reference, challenge])?;
+        let value = self.call(
+            "check",
+            json!({ "sessionRef": reference, "challenge": challenge }),
+        )?;
         Ok(PeerCheck {
             fingerprint: value["configFingerprint"]
                 .as_str()
@@ -552,7 +687,10 @@ impl Peer for HelperPeer {
     }
 
     fn fetch(&self, reference: &str, challenge: &str, scope: &str) -> Result<PeerFetch> {
-        let value = self.call(&["fetch", reference, challenge, scope])?;
+        let value = self.call(
+            "fetch",
+            json!({ "sessionRef": reference, "challenge": challenge, "scope": scope }),
+        )?;
         let config = value
             .get("config")
             .filter(|config| !config.is_null())
@@ -570,7 +708,8 @@ impl Peer for HelperPeer {
     }
 
     fn settle(&self, reference: &str) -> Result<()> {
-        self.call(&["settle", reference]).map(|_| ())
+        self.call("settle", json!({ "sessionRef": reference }))
+            .map(|_| ())
     }
 }
 
@@ -683,11 +822,40 @@ impl<'a> Receiver<'a> {
                 match matched {
                     Some(target) => Some(target),
                     None => {
-                        // 没有关联记录时先看有没有未关联候选：存在就必须显式解决，
-                        // 不按名称或地址自动合并。
-                        let candidates: Vec<Value> = targets
+                        // 按同地址找本机记录：已属于另一个共享标识的记录说明两端是
+                        // 两条不同身份的历史记录，不能因此再复制一份；未关联的同地址
+                        // 候选则必须由用户显式解决。两种情况都不按名称或地址自动合并。
+                        let source_host = self.pending_host(peer, reference, &challenge)?;
+                        let same_address: Vec<&SshTarget> = targets
                             .iter()
-                            .filter(|item| item.shared_host_id.is_none())
+                            .filter(|item| item.host.eq_ignore_ascii_case(&source_host))
+                            .collect();
+                        let conflicts: Vec<Value> = same_address
+                            .iter()
+                            .filter(|item| item.shared_host_id.is_some())
+                            .map(|item| {
+                                json!({
+                                    "hostId": item.id,
+                                    "displayName": item.display_name,
+                                    "host": item.host,
+                                    "sharedHostId": item.shared_host_id,
+                                })
+                            })
+                            .collect();
+                        if !conflicts.is_empty() {
+                            return Ok(json!({
+                                "protocol": PROTOCOL,
+                                "kind": KIND,
+                                "role": "receiver",
+                                "result": "association_conflict",
+                                "sharedHostId": shared_id,
+                                "conflicts": conflicts,
+                                "receipts": Vec::<Value>::new(),
+                                "sessionClosed": false,
+                            }));
+                        }
+                        let candidates: Vec<Value> = same_address
+                            .iter()
                             .map(|item| {
                                 json!({
                                     "hostId": item.id,
@@ -698,16 +866,7 @@ impl<'a> Receiver<'a> {
                                 })
                             })
                             .collect();
-                        let source_host = self.pending_host(peer, reference, &challenge)?;
-                        let same_host: Vec<&Value> = candidates
-                            .iter()
-                            .filter(|item| {
-                                item["host"]
-                                    .as_str()
-                                    .is_some_and(|host| host.eq_ignore_ascii_case(&source_host))
-                            })
-                            .collect();
-                        if same_host.is_empty() {
+                        if candidates.is_empty() {
                             None
                         } else {
                             return Ok(json!({
@@ -716,7 +875,7 @@ impl<'a> Receiver<'a> {
                                 "role": "receiver",
                                 "result": "association_required",
                                 "sharedHostId": shared_id,
-                                "candidates": same_host,
+                                "candidates": candidates,
                                 "receipts": Vec::<Value>::new(),
                                 "sessionClosed": false,
                             }));
@@ -786,10 +945,32 @@ impl<'a> Receiver<'a> {
         let fetched = peer.fetch(reference, &challenge, scope)?;
 
         // 写入前重新核对双方修订：核对之后发生的接收方修改形成冲突，不静默覆盖。
+        // 这一步必须在**任何**写入之前：密码同样会改写记录，不能绕过这次核对。
         let mut receipts: Vec<Receipt> = Vec::new();
         let mut host_id = local.as_ref().map(|target| target.id.clone());
         let mut revision = local.as_ref().map(|target| target.revision);
         let mut config_state = "unchanged";
+        if let Some(current) = local
+            .as_ref()
+            .and_then(|target| self.store.remote_ssh_target(&target.id))
+        {
+            if Some(current.revision) != local.as_ref().map(|target| target.revision) {
+                return Ok(json!({
+                    "protocol": PROTOCOL,
+                    "kind": KIND,
+                    "role": "receiver",
+                    "result": "conflict",
+                    "hostId": current.id,
+                    "sharedHostId": shared,
+                    "password": password.as_str(),
+                    "receipts": [ Receipt {
+                        kind: if need_config { "config" } else { "password" },
+                        state: "conflict",
+                    } ],
+                    "sessionClosed": false,
+                }));
+            }
+        }
         if need_config {
             let Some(config) = fetched.config.clone() else {
                 return Err(error(
@@ -802,21 +983,6 @@ impl<'a> Receiver<'a> {
                     "host_sync_protocol",
                     "来源应用的配置不合法，本次没有写入。",
                 ));
-            }
-            if let Some(current) = local.as_ref().and_then(|target| self.store.remote_ssh_target(&target.id)) {
-                if Some(current.revision) != local.as_ref().map(|target| target.revision) {
-                    return Ok(json!({
-                        "protocol": PROTOCOL,
-                        "kind": KIND,
-                        "role": "receiver",
-                        "result": "conflict",
-                        "hostId": current.id,
-                        "sharedHostId": shared,
-                        "password": password.as_str(),
-                        "receipts": [ Receipt { kind: "config", state: "conflict" } ],
-                        "sessionClosed": false,
-                    }));
-                }
             }
             let target = match &local {
                 Some(current) => SshTarget {
@@ -950,48 +1116,226 @@ impl<'a> Receiver<'a> {
     }
 }
 
-/// helper 的一次调用：读参数、执行、把一行 JSON 打到 stdout。
+/// helper 一次调用的参数。动作名之外的参数都不经 argv，只从 stdin 读。
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Params {
+    Begin {
+        host_id: String,
+    },
+    Check {
+        session_ref: String,
+        challenge: String,
+    },
+    Fetch {
+        session_ref: String,
+        challenge: String,
+        scope: String,
+    },
+    Settle {
+        session_ref: String,
+    },
+    Receive {
+        session_ref: String,
+        resolve_to: Option<String>,
+    },
+}
+
+/// 从 stdin 读一行参数。读不到（EOF）或超长都按无效请求处理。
+fn request_line() -> Result<String> {
+    use std::io::BufRead;
+    let mut line = String::new();
+    let read = std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(|_| invalid())?;
+    if read == 0 || line.len() > MAX_REQUEST_LINE {
+        return Err(invalid());
+    }
+    Ok(line)
+}
+
+/// argv 只允许动作名（receive 另加对端程序路径）。
+/// 会话引用或主机标识出现在 argv 里一律拒绝，避免被 ps 与进程审计观测。
+fn verify_argv(rest: &[String], allowed: usize) -> Result<()> {
+    if rest.len() != allowed {
+        return Err(error(
+            "host_sync_argv_rejected",
+            "同步参数必须经 stdin 的 JSON 传入，argv 不接受会话引用或主机标识。",
+        ));
+    }
+    Ok(())
+}
+
+/// 一行 JSON 参数：字段名固定，多余或缺失字段都拒绝。
+fn json_params(action: &str, line: &str) -> Result<Params> {
+    let value: Value = serde_json::from_str(line).map_err(|_| invalid())?;
+    let object = value.as_object().ok_or_else(invalid)?;
+    let allowed: &[&str] = match action {
+        "begin" => &["hostId"],
+        "check" => &["sessionRef", "challenge"],
+        "fetch" => &["sessionRef", "challenge", "scope"],
+        "settle" => &["sessionRef"],
+        "receive" => &["sessionRef", "resolveTo"],
+        _ => return Err(invalid()),
+    };
+    if object
+        .keys()
+        .any(|key| !allowed.contains(&key.as_str()))
+    {
+        return Err(invalid());
+    }
+    let text = |key: &str| {
+        object
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(invalid)
+    };
+    Ok(match action {
+        "begin" => Params::Begin {
+            host_id: text("hostId")?,
+        },
+        "check" => Params::Check {
+            session_ref: text("sessionRef")?,
+            challenge: text("challenge")?,
+        },
+        "fetch" => Params::Fetch {
+            session_ref: text("sessionRef")?,
+            challenge: text("challenge")?,
+            scope: text("scope")?,
+        },
+        "settle" => Params::Settle {
+            session_ref: text("sessionRef")?,
+        },
+        _ => Params::Receive {
+            session_ref: text("sessionRef")?,
+            resolve_to: match object.get("resolveTo") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(chosen)) => Some(chosen.clone()),
+                Some(_) => return Err(invalid()),
+            },
+        },
+    })
+}
+
+/// 解析 stdin 上的一行参数：首选一行 JSON，也接受同样的定位纯文本字段。
+fn parse_params(action: &str, line: &str) -> Result<Params> {
+    let line = line.trim();
+    if line.is_empty() || line.len() > MAX_REQUEST_LINE {
+        return Err(invalid());
+    }
+    if line.starts_with('{') {
+        return json_params(action, line);
+    }
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    let expected = match action {
+        "begin" | "settle" | "receive" => 1,
+        "check" => 2,
+        "fetch" => 3,
+        _ => return Err(invalid()),
+    };
+    if fields.len() != expected {
+        return Err(invalid());
+    }
+    Ok(match action {
+        "begin" => Params::Begin {
+            host_id: fields[0].to_string(),
+        },
+        "check" => Params::Check {
+            session_ref: fields[0].to_string(),
+            challenge: fields[1].to_string(),
+        },
+        "fetch" => Params::Fetch {
+            session_ref: fields[0].to_string(),
+            challenge: fields[1].to_string(),
+            scope: fields[2].to_string(),
+        },
+        "settle" => Params::Settle {
+            session_ref: fields[0].to_string(),
+        },
+        _ => Params::Receive {
+            session_ref: fields[0].to_string(),
+            resolve_to: None,
+        },
+    })
+}
+
+/// helper 的一次调用：动作名在 argv，参数从 stdin 读，结果一行 JSON 打到 stdout。
 pub(crate) fn run(args: &[String]) -> Result<()> {
+    let action = args.first().cloned().ok_or_else(invalid)?;
+    let rest = &args[1..];
     let store_path = data_dir()?.join("state.json");
     let store = AppStore::open(store_path);
     let secrets = crate::change_request::KeyringStore::remote_ssh();
     let dir = sessions_dir(&data_dir()?);
     let source = Source::new(&store, &secrets, dir);
-    let value = match args {
-        [action] if action == "version" => json!({
-            "protocol": PROTOCOL,
-            "kind": KIND,
-            "app": "twiglane",
-            "capabilities": ["begin", "check", "fetch", "settle", "receive"],
-            "ttlSeconds": TTL_SECONDS,
-        }),
-        [action, host_id] if action == "begin" => source.begin(host_id)?,
-        [action, reference, challenge] if action == "check" => source.check(reference, challenge)?,
-        [action, reference] if action == "settle" => source.settle(reference)?,
-        [action, reference, challenge, scope] if action == "fetch" => {
-            source.fetch(reference, challenge, scope)?
+    let value = match action.as_str() {
+        "version" => {
+            verify_argv(rest, 0)?;
+            json!({
+                "protocol": PROTOCOL,
+                "kind": KIND,
+                "app": "twiglane",
+                "capabilities": ["begin", "check", "fetch", "settle", "receive"],
+                "ttlSeconds": TTL_SECONDS,
+                "confirmation": { "required": "password", "ttlSeconds": CONFIRM_TTL_SECONDS },
+            })
         }
-        [action, program, reference] if action == "receive" => {
-            let program = PathBuf::from(program);
+        "begin" => {
+            verify_argv(rest, 0)?;
+            let Params::Begin { host_id } = parse_params("begin", &request_line()?)? else {
+                return Err(invalid());
+            };
+            source.begin(&host_id)?
+        }
+        "check" => {
+            verify_argv(rest, 0)?;
+            let Params::Check {
+                session_ref,
+                challenge,
+            } = parse_params("check", &request_line()?)?
+            else {
+                return Err(invalid());
+            };
+            source.check(&session_ref, &challenge)?
+        }
+        "settle" => {
+            verify_argv(rest, 0)?;
+            let Params::Settle { session_ref } = parse_params("settle", &request_line()?)? else {
+                return Err(invalid());
+            };
+            source.settle(&session_ref)?
+        }
+        "fetch" => {
+            verify_argv(rest, 0)?;
+            let Params::Fetch {
+                session_ref,
+                challenge,
+                scope,
+            } = parse_params("fetch", &request_line()?)?
+            else {
+                return Err(invalid());
+            };
+            source.fetch(&session_ref, &challenge, &scope)?
+        }
+        "receive" => {
+            verify_argv(rest, 1)?;
+            let program = PathBuf::from(&rest[0]);
             if !program.is_file() {
                 return Err(error(
                     "host_sync_unavailable",
                     "找不到来源应用的同步 helper。",
                 ));
             }
+            let Params::Receive {
+                session_ref,
+                resolve_to,
+            } = parse_params("receive", &request_line()?)?
+            else {
+                return Err(invalid());
+            };
             let receiver = Receiver::new(&store, &secrets);
-            receiver.receive(&HelperPeer { program }, reference, None)?
-        }
-        [action, program, reference, chosen] if action == "receive" => {
-            let program = PathBuf::from(program);
-            if !program.is_file() {
-                return Err(error(
-                    "host_sync_unavailable",
-                    "找不到来源应用的同步 helper。",
-                ));
-            }
-            let receiver = Receiver::new(&store, &secrets);
-            receiver.receive(&HelperPeer { program }, reference, Some(chosen))?
+            receiver.receive(&HelperPeer { program }, &session_ref, resolve_to.as_deref())?
         }
         _ => return Err(invalid()),
     };
@@ -1029,6 +1373,8 @@ impl HostSync {
     }
 }
 
+/// T6 接线时由 `remote_host_sync_begin` 使用；本版本没有 IPC 命令调用它，
+/// T6 登记命令与 ACL 后删掉 `allow(dead_code)`。
 #[allow(dead_code)]
 fn secrets() -> crate::change_request::KeyringStore {
     crate::change_request::KeyringStore::remote_ssh()
@@ -1071,6 +1417,8 @@ pub async fn remote_host_sync_receive(
 
 /// Cliora 的 helper 位置。与 remote_worktree 的定位规则一致，但这里只在同步时使用，
 /// 因此独立实现，避免让同步依赖远端仓库的连接器状态机。
+/// T6 接线时由 `remote_host_sync_receive` 使用；本版本没有 IPC 命令调用它，
+/// T6 登记命令与 ACL 后删掉 `allow(dead_code)`。
 #[allow(dead_code)]
 fn cliora_helper() -> Result<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
@@ -1636,6 +1984,378 @@ mod tests {
             store.remote_ssh_target("host-a").unwrap().shared_host_id.as_deref(),
             Some("shared-1")
         );
+    }
+
+    /// 写一张一次性确认票据。桌面 UI 在 T6 接线时按这一格式写入同一目录。
+    fn write_ticket(
+        dir: &Path,
+        reference: &str,
+        host_id: &str,
+        shared: Option<&str>,
+        created: u64,
+        expires: u64,
+        mode: u32,
+    ) -> PathBuf {
+        fs::create_dir_all(dir).unwrap();
+        let path = dir.join(format!("{reference}.confirm"));
+        let raw = serde_json::to_vec(&json!({
+            "protocol": PROTOCOL,
+            "hostId": host_id,
+            "sharedHostId": shared,
+            "createdAt": created,
+            "expiresAt": expires,
+        }))
+        .unwrap();
+        fs::write(&path, raw).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
+        path
+    }
+
+    fn confirm_source<'a>(
+        store: &'a AppStore,
+        secrets: &'a dyn CredentialStore,
+        dir: &Path,
+    ) -> (Source<'a>, PathBuf) {
+        let confirm = dir.join("confirm");
+        (
+            Source::new(store, secrets, dir.join("host-sync")).with_confirm_dir(confirm.clone()),
+            confirm,
+        )
+    }
+
+    #[test]
+    fn password_scope_without_a_ticket_returns_confirmation_required_and_no_secret() {
+        let (dir, store) = fixture("host-a", "example.test");
+        let secrets = FakeSecrets::with_password("host-a", "hunter2");
+        let (source, confirm) = confirm_source(&store, &secrets, dir.path());
+        let reference = source.begin("host-a").unwrap()["sessionRef"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        for scope in ["password", "all"] {
+            let failure = source.fetch(&reference, &random_hex(), scope).unwrap_err();
+            assert_eq!(failure.code, "sync_confirmation_required", "{scope}");
+            // 错误里也只有说明，没有密码。
+            assert!(!failure.message.contains("hunter2"), "{scope}");
+        }
+        assert!(!confirm.exists(), "没有票据时不会凭空产生票据");
+        // 只取配置不需要票据，也绝不带出密码。
+        let value = source.fetch(&reference, &random_hex(), "config").unwrap();
+        assert!(value["password"].is_null());
+        assert_eq!(value["passwordState"], "not_requested");
+        assert!(!value.to_string().contains("hunter2"));
+    }
+
+    #[test]
+    fn a_valid_ticket_is_consumed_once_and_then_refused() {
+        let (dir, store) = fixture("host-a", "example.test");
+        let secrets = FakeSecrets::with_password("host-a", "hunter2");
+        let (source, confirm) = confirm_source(&store, &secrets, dir.path());
+        let reference = source.begin("host-a").unwrap()["sessionRef"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let shared = store
+            .remote_ssh_target("host-a")
+            .unwrap()
+            .shared_host_id
+            .unwrap();
+        let created = now();
+        let path = write_ticket(
+            &confirm,
+            &reference,
+            "host-a",
+            Some(&shared),
+            created,
+            created + CONFIRM_TTL_SECONDS,
+            0o600,
+        );
+        let challenge = random_hex();
+        let value = source.fetch(&reference, &challenge, "password").unwrap();
+        assert_eq!(value["password"], "hunter2", "带票据时正常取回密码");
+        assert_eq!(value["passwordState"], "available");
+        assert!(!path.exists(), "票据用后即删");
+
+        // 同一会话再要一次密码：看不到票据，必须重新确认。
+        let again = source
+            .fetch(&reference, &random_hex(), "password")
+            .unwrap_err();
+        assert_eq!(again.code, "sync_confirmation_required");
+        assert!(store.remote_ssh_target("host-a").unwrap().shared_host_id.is_some());
+    }
+
+    #[test]
+    fn tickets_for_another_host_or_window_or_mode_are_refused() {
+        let (dir, store) = fixture("host-a", "example.test");
+        let secrets = FakeSecrets::with_password("host-a", "hunter2");
+        let (source, confirm) = confirm_source(&store, &secrets, dir.path());
+        let reference = source.begin("host-a").unwrap()["sessionRef"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let shared = store
+            .remote_ssh_target("host-a")
+            .unwrap()
+            .shared_host_id
+            .unwrap();
+        let created = now();
+        let expired = created.saturating_sub(CONFIRM_TTL_SECONDS * 4);
+        let too_long = created.saturating_sub(CONFIRM_TTL_SECONDS * 2);
+        let cases: Vec<(&str, PathBuf)> = vec![
+            (
+                "别的机器",
+                write_ticket(
+                    &confirm,
+                    &reference,
+                    "host-b",
+                    Some(&shared),
+                    created,
+                    created + CONFIRM_TTL_SECONDS,
+                    0o600,
+                ),
+            ),
+            (
+                "别的关联",
+                write_ticket(
+                    &confirm,
+                    &reference,
+                    "host-a",
+                    Some("shared-other"),
+                    created,
+                    created + CONFIRM_TTL_SECONDS,
+                    0o600,
+                ),
+            ),
+            (
+                "已过期",
+                write_ticket(
+                    &confirm,
+                    &reference,
+                    "host-a",
+                    Some(&shared),
+                    expired,
+                    expired + CONFIRM_TTL_SECONDS,
+                    0o600,
+                ),
+            ),
+            (
+                "有效期超过上限",
+                write_ticket(
+                    &confirm,
+                    &reference,
+                    "host-a",
+                    Some(&shared),
+                    too_long,
+                    created,
+                    0o600,
+                ),
+            ),
+        ];
+        for (label, path) in cases {
+            let failure = source
+                .fetch(&reference, &random_hex(), "password")
+                .unwrap_err();
+            assert_eq!(failure.code, "sync_confirmation_required", "{label}");
+            assert!(!path.exists(), "{label}：不识别的票据不会留在磁盘上");
+        }
+        // 权限不是 0600 的票据不算确认（POSIX 文件权限才有意义）。
+        #[cfg(unix)]
+        {
+            let path = write_ticket(
+                &confirm,
+                &reference,
+                "host-a",
+                Some(&shared),
+                created,
+                created + CONFIRM_TTL_SECONDS,
+                0o644,
+            );
+            let failure = source
+                .fetch(&reference, &random_hex(), "password")
+                .unwrap_err();
+            assert_eq!(failure.code, "sync_confirmation_required", "权限过宽");
+            assert!(!path.exists());
+        }
+    }
+
+    #[test]
+    fn same_address_records_owned_by_another_shared_id_become_a_conflict() {
+        let (dir, store) = fixture("host-a", "example.test");
+        let target = store.remote_ssh_target("host-a").unwrap();
+        store
+            .save_remote_ssh_target(SshTarget {
+                shared_host_id: Some("shared-other".to_string()),
+                ..target
+            })
+            .unwrap();
+        let before = fs::read(dir.path().join("state.json")).unwrap();
+        let secrets = FakeSecrets::default();
+        let peer = FakePeer::new(
+            &"a".repeat(64),
+            HostConfig::of(&host("x", "prod", "example.test")),
+        );
+        let receiver = Receiver::new(&store, &secrets);
+        let value = receiver.receive(&peer, &peer.reference, None).unwrap();
+        assert_eq!(value["result"], "association_conflict");
+        assert_eq!(value["conflicts"][0]["hostId"], "host-a");
+        assert_eq!(value["conflicts"][0]["sharedHostId"], "shared-other");
+        assert!(value["receipts"].as_array().unwrap().is_empty());
+        assert_eq!(value["sessionClosed"], false);
+        // 本机记录不变：不新增重复记录，也不改写已有记录的关联。
+        assert_eq!(fs::read(dir.path().join("state.json")).unwrap(), before);
+        assert_eq!(store.remote_ssh_targets().len(), 1);
+        assert_eq!(
+            store
+                .remote_ssh_target("host-a")
+                .unwrap()
+                .shared_host_id
+                .as_deref(),
+            Some("shared-other")
+        );
+        assert_eq!(*peer.settled.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn explicit_link_refuses_a_record_owned_by_another_shared_id() {
+        let (_dir, store) = fixture("host-a", "example.test");
+        let target = store.remote_ssh_target("host-a").unwrap();
+        store
+            .save_remote_ssh_target(SshTarget {
+                shared_host_id: Some("shared-other".to_string()),
+                ..target
+            })
+            .unwrap();
+        let before_revision = store.remote_ssh_target("host-a").unwrap().revision;
+        let secrets = FakeSecrets::default();
+        let peer = FakePeer::new(
+            &"a".repeat(64),
+            HostConfig::of(&host("x", "prod", "example.test")),
+        );
+        let receiver = Receiver::new(&store, &secrets);
+        let failure = receiver
+            .receive(&peer, &peer.reference, Some("host-a"))
+            .unwrap_err();
+        assert_eq!(failure.code, "association_conflict");
+        let after = store.remote_ssh_target("host-a").unwrap();
+        assert_eq!(after.shared_host_id.as_deref(), Some("shared-other"));
+        assert_eq!(after.revision, before_revision, "冲突时不推进修订");
+    }
+
+    #[test]
+    fn a_concurrent_local_edit_blocks_a_password_only_write() {
+        let (dir, store) = fixture("host-a", "example.test");
+        let target = store.remote_ssh_target("host-a").unwrap();
+        store
+            .save_remote_ssh_target(SshTarget {
+                shared_host_id: Some("shared-1".to_string()),
+                ..target.clone()
+            })
+            .unwrap();
+        let before = fs::read(dir.path().join("state.json")).unwrap();
+        let secrets = FakeSecrets::with_password("host-a", "旧密码");
+        let store = Arc::new(store);
+        let editing = Arc::clone(&store);
+        let mut peer =
+            FakePeer::new(&"a".repeat(64), HostConfig::of(&target)).with_password("新密码");
+        // check 之后、写之前，用户在本机改了同一台主机：只改密码的那一路也必须停下来。
+        peer.before_fetch = Some(Box::new(move || {
+            let mut changed = editing.remote_ssh_target("host-a").unwrap();
+            changed.host = "locally-edited.test".to_string();
+            editing.save_remote_ssh_target(changed).unwrap();
+        }));
+        let receiver = Receiver::new(&store, &secrets);
+        let value = receiver.receive(&peer, &peer.reference, None).unwrap();
+        assert_eq!(value["result"], "conflict");
+        assert_eq!(value["receipts"][0]["kind"], "password");
+        assert_eq!(value["receipts"][0]["state"], "conflict");
+        assert_eq!(value["sessionClosed"], false);
+        assert_eq!(
+            secrets.password("host-a").as_deref(),
+            Some("旧密码"),
+            "冲突时不改写密码"
+        );
+        assert_eq!(
+            store.remote_ssh_target("host-a").unwrap().host,
+            "locally-edited.test"
+        );
+        assert_ne!(
+            fs::read(dir.path().join("state.json")).unwrap(),
+            before,
+            "本机改动仍在，只是同步没有覆盖"
+        );
+        assert_eq!(*peer.settled.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn session_references_must_come_from_stdin_not_argv() {
+        let reference = "a".repeat(64);
+        let challenge = "b".repeat(64);
+        for rest in [
+            vec!["host-a".to_string()],
+            vec![reference.clone(), challenge.clone()],
+            vec![reference.clone(), challenge.clone(), "all".to_string()],
+            vec![reference.clone()],
+        ] {
+            assert_eq!(
+                verify_argv(&rest, 0).unwrap_err().code,
+                "host_sync_argv_rejected"
+            );
+        }
+        assert!(verify_argv(&[], 0).is_ok());
+        assert!(verify_argv(&["/usr/bin/cliora".to_string()], 1).is_ok());
+
+        let line = format!(
+            "{{\"sessionRef\":\"{reference}\",\"challenge\":\"{challenge}\",\"scope\":\"all\"}}"
+        );
+        assert_eq!(
+            parse_params("fetch", &line).unwrap(),
+            Params::Fetch {
+                session_ref: reference.clone(),
+                challenge: challenge.clone(),
+                scope: "all".to_string(),
+            }
+        );
+        assert_eq!(
+            parse_params("begin", "host-a
+").unwrap(),
+            Params::Begin {
+                host_id: "host-a".to_string()
+            }
+        );
+        assert_eq!(
+            parse_params("settle", &reference).unwrap(),
+            Params::Settle {
+                session_ref: reference.clone()
+            }
+        );
+        assert_eq!(
+            parse_params(
+                "receive",
+                &format!("{{\"sessionRef\":\"{reference}\",\"resolveTo\":\"host-a\"}}")
+            )
+            .unwrap(),
+            Params::Receive {
+                session_ref: reference.clone(),
+                resolve_to: Some("host-a".to_string())
+            }
+        );
+        // 多余字段、缺失字段、越权字段与非 JSON 错行都拒绝。
+        for bad in [
+            "",
+            "{}",
+            "{\"sessionRef\":\"x\"}",
+            "{\"sessionRef\":\"x\",\"challenge\":\"y\",\"scope\":\"all\",\"hostId\":\"z\"}",
+            "{\"sessionRef\":\"x\",\"challenge\":\"y\",\"scope\":\"all\",\"password\":\"hunter2\"}",
+        ] {
+            assert!(parse_params("fetch", bad).is_err(), "{bad}");
+        }
+        assert!(parse_params("nope", "x").is_err());
     }
 
     #[test]

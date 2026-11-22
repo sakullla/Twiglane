@@ -39,7 +39,7 @@ fn oid(value: &str) -> bool {
     hex(value, 40) || hex(value, 64)
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Source {
     pub(super) review_id: String,
@@ -54,6 +54,25 @@ pub struct Source {
     /// 可选的一次性同步会话引用：只有引用，没有配置或密码。
     host_sync: Option<String>,
 }
+
+/// `hostSync` 只是本次跳转附带的同步会话引用：每次跳转都会换一个新的。
+/// 它不参与来源同一性判定，否则同一个 reviewId 重发一次跳转就会被误判成
+/// `target_changed`。其余字段仍然逐字段严格比较。
+impl PartialEq for Source {
+    fn eq(&self, other: &Self) -> bool {
+        self.review_id == other.review_id
+            && self.session_id == other.session_id
+            && self.target_id == other.target_id
+            && self.target_revision == other.target_revision
+            && self.peer_revision == other.peer_revision
+            && self.peer_identity == other.peer_identity
+            && self.worktree_identity == other.worktree_identity
+            && self.worktree_path == other.worktree_path
+            && self.baseline == other.baseline
+    }
+}
+
+impl Eq for Source {}
 
 impl Source {
     fn parse(raw: &str) -> Result<Self> {
@@ -580,6 +599,25 @@ mod tests {
         let event = source.event("opening").to_string();
         assert!(!event.contains("hostSync"));
         assert!(!event.contains("hunter2"));
+    }
+
+    #[test]
+    fn a_new_host_sync_reference_is_not_a_source_change() {
+        let valid = source_link();
+        let first = Source::parse(&format!("{valid}&hostSync={}", "a".repeat(64))).unwrap();
+        let mut book = Book::default();
+        assert!(book.prepare(&first).unwrap());
+        // 同一个 reviewId 换一次新的同步会话引用：来源没变，不能判成 target_changed。
+        let second = Source::parse(&format!("{valid}&hostSync={}", "b".repeat(64))).unwrap();
+        assert_eq!(first, second);
+        assert_ne!(first.host_sync, second.host_sync);
+        assert!(!book.prepare(&second).unwrap(), "同一来源不重复建账");
+        assert_eq!(book.source(&first.review_id).unwrap().host_sync, first.host_sync);
+        // 其余字段变化仍然算来源不符。
+        let mut other = second.clone();
+        other.target_revision = "e".repeat(64);
+        assert_ne!(first, other);
+        assert!(book.prepare(&other).is_err());
     }
 
     #[test]

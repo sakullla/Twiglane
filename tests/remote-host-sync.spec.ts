@@ -92,6 +92,13 @@ describe("host-sync v1 前端契约", () => {
     const association = fixture.cases.find((item: { name: string }) => item.name === "association-required").receive as HostSyncResult;
     expect(hostSyncMessage(association)).toContain("需要先选定");
     expect(association.sessionClosed).toBe(false);
+    // 同地址但已关联到别的共享标识：只报冲突，不声明任何写入。
+    const conflict = fixture.cases.find((item: { name: string }) => item.name === "association-conflict").receive as HostSyncResult;
+    expect(conflict.result).toBe("association_conflict");
+    expect(conflict.receipts).toEqual([]);
+    expect(conflict.sessionClosed).toBe(false);
+    expect(hostSyncMessage(conflict)).toContain("另一个共享标识");
+    expect(hostSyncMessage(conflict)).toContain("没有写入任何内容");
   });
 
   it("原生实现只把结构化结果写到 stdout，密码只以状态出现在回执里", () => {

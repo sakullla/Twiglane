@@ -971,10 +971,15 @@ export interface FileHistoryPage {
 
 export interface CherryPickOutcome {
   generation: number;
-  created: number;
+  /**
+   * 实际创建的提交数。远端只经原生桥接拿到新状态，finish_write 暂未回传 v2 的 cherryPick
+   * DTO，因此这里是 undefined（不知道），不是 0。
+   */
+  created?: number;
   headOid: string | null;
   conflicted: boolean;
-  skipped: string[];
+  /** 被跳过的提交。同样暂未回传：undefined 表示不知道，不是「一个都没跳过」。 */
+  skipped?: string[];
   note: string;
   snapshot: StatusSnapshot;
 }
@@ -997,8 +1002,11 @@ export interface RevertOutcome {
   headOid: string | null;
   /** 按输入顺序（由新到旧）排列的目标提交。 */
   targets: RevertTarget[];
-  /** 实际创建的逆向提交数。 */
-  created: number;
+  /**
+   * 实际创建的逆向提交数。远端只经原生桥接拿到新状态，finish_write 暂未回传 v2 的 revert
+   * DTO，因此这里是 undefined（不知道），不是 0。
+   */
+  created?: number;
   /** 是否停在冲突。为 true 时 created 可能小于目标数。 */
   conflicted: boolean;
   note: string;
@@ -1011,8 +1019,12 @@ export interface RevertOutcome {
  */
 export interface AmendOutcome {
   generation: number;
-  /** ok，或预览/确认被拒绝的原因代码。 */
+  /** ok、amend_token_unavailable，或预览/确认被拒绝的原因代码。 */
   code: string;
+  /**
+   * 这次修订能不能确认。远端预览拿不到暂存区快照令牌时直接给 false：本机核对不了暂存区，
+   * 重新预览也拿不到令牌，界面据此说明「请在远端终端执行修订」而不是引导反复预览。
+   */
   eligible: boolean;
   wrote: boolean;
   /** 预览时是原 HEAD；确认成功时是新的 HEAD。 */

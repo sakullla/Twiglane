@@ -292,8 +292,17 @@ describe("远端桥接：历史、分支、同步、stash、合并都走 op 白�
 
   it("白名单外的方法与迟到的代次仍明确失败，且不发任何远端请求", async () => {
     const repository = await openHost();
-    // worktreeRemove 在 v2 只删当前打开的工作树、不接受 path，这里保持 unsupported 并说明真实原因。
-    await expect(api.removeWorktree(keyA, false, 39)).rejects.toMatchObject({ code: "remote_unsupported" });
+    // worktreeRemove 在 v2 只删当前打开的工作树、只收 force，不接受路径；本机删的是指定路径上的
+    // linked worktree。两处语义对不上，这里保持 unsupported 并把真实差异说出来。
+    const removeFailure = await api.removeWorktree(keyA, false, 39).then(
+      () => null,
+      (thrown: { code?: string; message?: string }) => thrown,
+    );
+    expect(removeFailure?.code).toBe("remote_unsupported");
+    expect(removeFailure?.message).toContain("只接受 force");
+    expect(removeFailure?.message).toContain("linked worktree");
+    // 不要说「回执里没有 recent」：这条命令本来就不是 worktrees 列表那条 op。
+    expect(removeFailure?.message).not.toContain("最近列表");
     await expect(api.renameBranch(keyA, "a", "b", repository.generation + 99, 40)).rejects.toMatchObject({ code: "stale" });
     expect(port.call).not.toHaveBeenCalled();
     expect(invoke).not.toHaveBeenCalled();
@@ -329,7 +338,11 @@ describe("远端桥接：历史、分支、同步、stash、合并都走 op 白�
     expect(port.call.mock.calls[0][0]).toMatchObject({ op: "cherryPick", fields: { oids: ["a".repeat(40)] } });
     expect(result.headOid).toBe("b".repeat(40));
     expect(result.conflicted).toBe(false);
-    expect(result.note).toContain("读不到");
+    // 原生桥接的 finish_write 只回新状态，v2 的 cherryPick DTO 没传回来：字段留空，
+    // 不填 0 / [] 冒充「一个都没创建、一个都没跳过」。
+    expect(result.created).toBeUndefined();
+    expect(result.skipped).toBeUndefined();
+    expect(result.note).toContain("原生桥接暂未回传");
     expect(invoke).not.toHaveBeenCalled();
   });
 
@@ -376,7 +389,9 @@ describe("远端桥接：历史、分支、同步、stash、合并都走 op 白�
     expect(port.call.mock.calls.at(-1)?.[0]).toMatchObject({ op: "revert", fields: { oids: [oid], expectedHead: "a".repeat(40), confirm: true } });
     expect(done.wrote).toBe(true);
     expect(done.headOid).toBe("d".repeat(40));
-    expect(done.note).toContain("读不到");
+    // 实际创建了几个逆向提交由 v2 的 revert DTO 给，原生桥接暂未回传：留空，不填 0。
+    expect(done.created).toBeUndefined();
+    expect(done.note).toContain("原生桥接暂未回传");
     expect(invoke).not.toHaveBeenCalled();
   });
 
@@ -435,6 +450,13 @@ describe("远端桥接：历史、分支、同步、stash、合并都走 op 白�
     expect(port.call.mock.calls[0][0]).toMatchObject({ op: "commitDetail", fields: { oid: head } });
     expect(preview.wrote).toBe(false);
     expect(preview.stagedToken).toBeNull();
+    // 没有令牌就没有可确认的修订：预览直接给 eligible=false，并说清是原生桥接暂未回传、
+    // 该去远端终端执行，而不是让人反复重新预览去等一个永远拿不到的令牌。
+    expect(preview.eligible).toBe(false);
+    expect(preview.code).toBe("amend_token_unavailable");
+    expect(preview.note).toContain("远端暂存区快照不可用");
+    expect(preview.note).toContain("请在远端终端执行修订");
+    expect(preview.note).not.toContain("重新预览");
     expect(preview.message).toBe("原说明\n\n正文");
     expect(preview.files.map((file) => file.path)).toEqual(["a.txt"]);
     // 预览为只读：一次写入都没有发出。
@@ -532,6 +554,12 @@ describe("远端桥接：历史、分支、同步、stash、合并都走 op 白�
     await expect(
       api.stageLines(keyA, "small.txt", false, [{ hunkIndex: 0, kind: "add", text: "one!" } as never], plain.snapshot, repository.generation, 46),
     ).rejects.toMatchObject({ code: "remote_unsupported" });
+
+    // 这句话必须真的到达界面：App 把它交给 DiffView，DiffView 据此禁用「选行」/「暂存选中行」
+    // 并把同一句写进右键菜单（渲染层的断言见 tests/worktree.spec.ts）。
+    const { readFileSync } = await import("node:fs");
+    const app = readFileSync(new URL("../src/App.svelte", import.meta.url), "utf8");
+    expect(app).toContain("hunksStageableReason={diff?.hunksStageableReason ?? null}");
   });
 });
 

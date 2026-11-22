@@ -84,7 +84,9 @@
     if (!amend.eligible) return amend.note;
     if (!amend.headOid) return "没有可修订的最近提交，请重新预览";
     if (!amendMessage) return "先填写修订后的提交说明";
-    if (!amend.stagedToken) return "暂存区快照不可用，请重新预览后再确认";
+    // 令牌缺失就不发写入：这里只陈述事实，不把人引去「重新预览」——远端那条路重新预览也
+    // 拿不到令牌（预览本身已按 eligible=false 说明原因）。
+    if (!amend.stagedToken) return "暂存区快照不可用，本机核对不了暂存区，这次修订不能确认：请在终端执行修订（git commit --amend）。";
     if (amendUnchanged) return "说明没有变化，也没有纳入非空的暂存改动，不能写入";
     return null;
   });

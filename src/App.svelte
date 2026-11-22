@@ -5553,6 +5553,7 @@
                   onStageLines={(lines) => {
                     if (selected && diff) void stageLinesOf(selected, diff, lines);
                   }}
+                  hunksStageableReason={diff?.hunksStageableReason ?? null}
                   onLoadMore={loadMoreDiff}
                   onFileHistory={openFileHistory}
                   onReadDocument={openDocument}

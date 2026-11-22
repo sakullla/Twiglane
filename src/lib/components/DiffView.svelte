@@ -43,6 +43,12 @@
      * 那些位置只保留文件级与块级入口。
      */
     onStageLines?: (lines: DiffLineSelection[]) => void;
+    /**
+     * 本差异能不能按块/按行暂存，以及不能时的真实原因（远端没有 patch 写入时由调用方从
+     * `DiffResponse.hunksStageableReason` 传进来）。缺省表示没有远端层面的限制，不能暂存
+     * 仍按块自身的截断状态说明。行选与右键菜单都只用这句话，不自己编理由。
+     */
+    hunksStageableReason?: string | null;
     onLoadMore: () => void;
     onFileHistory?: (path: string) => void;
     /** 是否展开为完整文件（整份文件作上下文）；展开时不提供按块暂存。 */
@@ -118,6 +124,7 @@
     readOnlyLabel,
     onStageHunk,
     onStageLines,
+    hunksStageableReason = null,
     onLoadMore,
     onFileHistory,
     fullFile = false,
@@ -342,6 +349,12 @@
     return [line.hunkIndex ?? "-", line.kind, line.oldNo ?? "", line.newNo ?? ""].join(":");
   }
 
+  /**
+   * 这份差异为什么不能按块/按行暂存：远端没有 patch 写入时由 API 层带一句话下来，那是能力
+   * 限制，不是块被截断。块级按钮、行选入口与右键菜单必须共用这一句，别编一个与事实无关的理由。
+   */
+  let stageBlocked = $derived(hunksStageableReason ?? currentDiff?.hunksStageableReason ?? null);
+
   /** 行选为什么不能用：文件级、视图级的原因都要明说，不能只是把按钮灰着。 */
   let pickBlocker = $derived.by<string | null>(() => {
     if (!currentDiff) return "还没有读到差异";
@@ -349,18 +362,20 @@
     if (conflicted) return "冲突文件要在三栏合并里处理";
     if (currentDiff.binary) return "二进制文件不能按行暂存";
     if (currentDiff.preview) return "图片预览没有可选的代码行";
+    // 远端层面不支持时，切视图、换文件都无用：先给真实原因，别把人引到别的入口上。
+    if (stageBlocked) return stageBlocked;
     if (fullFile) return "完整文件视图不能按行暂存，先切回「只看改动部分」";
     if (currentDiff.truncated) return "差异被截断，按行写入会落到错误的位置";
     if (currentDiff.lines.some((line) => line.kind === "meta" && PICK_HEADER.test(line.text))) {
       return "文件本身新增、删除、改名或权限变化，不能逐行暂存";
     }
-    if (!currentDiff.hunks.some((hunk) => hunk.complete)) return "没有可逐行暂存的完整代码块";
+    if (!currentDiff.hunks.some((hunk) => hunk.stageable)) return "没有可逐行暂存的完整代码块";
     return null;
   });
   let canPickLines = $derived(Boolean(onStageLines && currentDiff && pickBlocker === null));
-  /** 只有完整代码块里的行能写：截断块的坐标不可靠。 */
+  /** 只有完整代码块里的行能写：截断块的坐标不可靠；远端不给 stageable 的块也一律不算。 */
   let pickableHunks = $derived(
-    new Set((currentDiff?.hunks ?? []).filter((hunk) => hunk.complete).map((hunk) => hunk.index)),
+    new Set((currentDiff?.hunks ?? []).filter((hunk) => hunk.complete && hunk.stageable).map((hunk) => hunk.index)),
   );
 
   function canPick(line: { kind: string; hunkIndex: number | null } | null | undefined): boolean {
@@ -476,7 +491,8 @@
   });
 
   function commitPickedLines(): void {
-    if (!onStageLines || picked.length === 0 || disabled) return;
+    // stageBlocked 也挡一次：按钮已禁用，但键盘/程序触发不该绕过去发一条注定被拒的写。
+    if (!onStageLines || picked.length === 0 || disabled || stageBlocked) return;
     onStageLines(picked.slice());
   }
 
@@ -928,7 +944,7 @@
         : !hunk
           ? "在某个代码块上右键才能按块操作"
           : !hunk.stageable
-            ? "截断的代码块不能部分暂存"
+            ? stageBlocked ?? "截断的代码块不能部分暂存"
             : disabled
               ? "正在读取或写入，稍后再试"
               : undefined;
@@ -1328,20 +1344,15 @@
     return "diff-line";
   }
 
-  /**
-   * 块不可暂存的原因：远端没有 patch 写入时由 API 层带一句话下来（那是能力限制，不是
-   * 截断），本地差异没有这句话，仍按块自身的截断状态说明。
-   */
-  const hunkStageBlocked = $derived<string | null>(diff?.hunksStageableReason ?? null);
-
+  /** 块不可暂存的原因与行选共用同一句 stageBlocked：本地差异没这句话时按截断说明。 */
   function hunkLabel(hunk: DiffHunk): string {
-    if (!hunk.stageable) return hunkStageBlocked ? "不可暂存" : "已截断";
+    if (!hunk.stageable) return stageBlocked ? "不可暂存" : "已截断";
     return selection?.side === "staged" ? "取消暂存" : "暂存此块";
   }
 
   function hunkStageTitle(hunk: DiffHunk): string {
     if (hunk.stageable) return "";
-    return hunkStageBlocked ?? "截断的代码块不能部分暂存";
+    return stageBlocked ?? "截断的代码块不能部分暂存";
   }
 </script>
 
@@ -1523,8 +1534,8 @@
             type="button"
             class="btn btn-secondary btn-sm"
             aria-label={selection?.side === "staged" ? "取消暂存选中行" : "暂存选中行"}
-            title={disabled ? BUSY_REASON : picked.length === 0 ? "先在差异里选中新增或删除行" : undefined}
-            disabled={disabled || picked.length === 0}
+            title={stageBlocked ?? (disabled ? BUSY_REASON : picked.length === 0 ? "先在差异里选中新增或删除行" : undefined)}
+            disabled={disabled || Boolean(stageBlocked) || picked.length === 0}
             onclick={commitPickedLines}
           >{selection?.side === "staged" ? "取消暂存选中行" : "暂存选中行"}</button>
         {/if}

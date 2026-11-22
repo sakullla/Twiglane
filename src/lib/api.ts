@@ -1362,7 +1362,8 @@ const apiBase = {
   cherryPickCommits: async (path: string, oids: string[], generation: number, requestId: number) => {
     const reviewId = captureClioraReview(path);
     const result = await invoke<CherryPickOutcome>("cherry_pick_commits", { path, oids, generation, requestId, ...(reviewId ? { reviewId } : {}) });
-    if (result.created > 0 && result.headOid) recordClioraCommit(path, result.headOid, reviewId);
+    // 本机后端总会给出 created；缺省只可能来自远端的原生桥接，那种情况不登记（不知道就不声明）。
+    if ((result.created ?? 0) > 0 && result.headOid) recordClioraCommit(path, result.headOid, reviewId);
     return result;
   },
   /**
@@ -1387,7 +1388,8 @@ const apiBase = {
       requestId,
       ...(reviewId ? { reviewId } : {}),
     });
-    if (result.wrote && result.created > 0 && result.headOid) {
+    // 同上：created 缺省表示原生桥接没回传，不能据此登记「已提交」。
+    if (result.wrote && (result.created ?? 0) > 0 && result.headOid) {
       recordClioraCommit(path, result.headOid, reviewId);
     }
     return result;
@@ -2814,8 +2816,9 @@ const remoteOverrides: Record<string, unknown> = {
    *
    * 这几条都在桥接白名单里，因此按现有写通道执行：预览（confirm=false）一律不发送任何
    * 写入，确认（confirm=true）只发送一次写入，随后按「回执 + 一次只读 op」组成 DTO。
-   * 回执里确实没有的证据（创建了几个提交、跳过哪些、暂存区快照令牌）在 note 里如实说
-   * 读不到，绝不猜一个数字冒充。
+   * v2 回执本身带 cherryPick/revert/amend/discard 的 DTO，是原生桥接的 finish_write 只回
+   * {state, operationId, snapshot, head} 把它们丢了。丢掉的字段留空（undefined），不填
+   * 0 / [] 冒充真值，并在 note 里说明「原生桥接暂未回传这些结果」。
    * ---------------------------------------------------------------- */
 
   async discardChanges(
@@ -2852,19 +2855,18 @@ const remoteOverrides: Record<string, unknown> = {
     if (!isRemoteRepositoryKey(path)) return apiBase.cherryPickCommits(path, oids, generation, requestId);
     const session = remoteBridgeSession(path, generation);
     const snapshot = await remoteBridgeWrite(session, generation, "cherryPick", { oids });
-    // 回执只回新状态：实际创建了几个提交、跳过了哪些，这条通道读不到。
+    // v2 回执本身带 cherryPick DTO（created / skipped），是原生桥接的 finish_write 只回新状态
+    // 把它们丢了。丢掉就是不知道：字段留空，不填 0 与 [] 冒充真值。
     const conflictPaths = remoteChanges(snapshot.files)
       .filter((file) => file.unmerged)
       .map((file) => file.path);
     return {
       generation: session.generation,
-      created: 0,
       headOid: snapshot.head ?? null,
       conflicted: conflictPaths.length > 0,
-      skipped: [],
       note: conflictPaths.length > 0
-        ? "远端停在冲突：解决后可以继续或中止。实际创建了几个提交、跳过了哪些，远端回执里没有这项证据，读不到。"
-        : "远端已拣选这些提交。实际创建了几个提交、跳过了哪些，远端回执里没有这项证据，读不到。",
+        ? "远端停在冲突：解决后可以继续或中止。实际创建了几个提交、跳过了哪些，原生桥接暂未回传这些结果，本机读不到。"
+        : "远端已拣选这些提交。实际创建了几个提交、跳过了哪些，原生桥接暂未回传这些结果，本机读不到。",
       snapshot: remoteStatus(snapshot, session.generation),
     };
   },
@@ -2894,7 +2896,6 @@ const remoteOverrides: Record<string, unknown> = {
         wrote: false,
         headOid: session.latest.head ?? null,
         targets,
-        created: 0,
         conflicted: false,
         note:
           "远端预览：按由新到旧为上面这些提交创建逆向提交。取消不会写入；是否已推送、有没有进行中的操作，" +
@@ -2917,12 +2918,12 @@ const remoteOverrides: Record<string, unknown> = {
       wrote: true,
       headOid: snapshot.head ?? null,
       targets,
-      // 实际创建了几个逆向提交，回执里没有这项证据。
-      created: 0,
+      // v2 回执带 revert DTO（created），是原生桥接的 finish_write 只回新状态把它丢了：
+      // 丢掉就是不知道，字段留空，不填 0 冒充「一个都没创建」。
       conflicted: conflictPaths.length > 0,
       note: conflictPaths.length > 0
-        ? "远端已开始还原，停在冲突：解决后可以继续，也可以中止回到开始前。实际创建了几个逆向提交，远端回执里没有这项证据，读不到。"
-        : "远端已还原这些提交，本应用不推送。实际创建了几个逆向提交，远端回执里没有这项证据，读不到。",
+        ? "远端已开始还原，停在冲突：解决后可以继续，也可以中止回到开始前。实际创建了几个逆向提交，原生桥接暂未回传这项结果，本机读不到。"
+        : "远端已还原这些提交，本应用不推送。实际创建了几个逆向提交，原生桥接暂未回传这项结果，本机读不到。",
       snapshot: remoteStatus(snapshot, session.generation),
     };
   },
@@ -2991,8 +2992,10 @@ const remoteOverrides: Record<string, unknown> = {
     if (!confirm) {
       return {
         generation: session.generation,
-        code: "ok",
-        eligible: true,
+        // 没有暂存区快照令牌就没有可确认的修订：预览直接给 eligible=false，
+        // 不再让用户点一次注定失败、重新预览也永远拿不到令牌的「确认」。
+        code: "amend_token_unavailable",
+        eligible: false,
         wrote: false,
         headOid: detail.commit.oid,
         parentOid: detail.commit.parents[0] ?? null,
@@ -3000,11 +3003,11 @@ const remoteOverrides: Record<string, unknown> = {
         message: remoteAmendMessage(detail),
         files: detail.files,
         stagedPaths,
-        // 暂存区快照令牌是远端写锁内算出来的摘要，只读桥接没有这项证据。
+        // 暂存区快照令牌是远端写锁内算出来的摘要，原生桥接的只读回执暂未回传它。
         stagedToken: null,
         note:
-          "远端预览：说明取自远端提交详情（主题行 + 正文）。远端的暂存区快照令牌没有列入只读桥接，" +
-          "这里读不到它，因此本次没有可确认的修订；请在远端终端执行，或等远端组件补上这项只读能力。",
+          "远端暂存区快照不可用：原生桥接的只读回执暂未回传暂存区快照令牌，本机无法核对远端暂存区，" +
+          "因此这次修订不能在这里确认，重试也拿不到令牌。请在远端终端执行修订（git commit --amend）。",
         snapshot: remoteStatus(session.latest, session.generation),
       };
     }
@@ -3043,10 +3046,12 @@ const remoteOverrides: Record<string, unknown> = {
 
   async removeWorktree(path: string, force: boolean, requestId: number): Promise<RecentRepo[]> {
     if (!isRemoteRepositoryKey(path)) return apiBase.removeWorktree(path, force, requestId);
-    // 远端 v2 的 worktreeRemove 只删「当前打开的那棵工作树」，不接受 path，也不返回本机最近列表。
+    // 语义对不上：v2 的 worktreeRemove 只删「当前打开的那棵工作树」且只收 force，本机这条命令
+    // 删的是指定路径上的 linked worktree，两个入口说的不是同一件事，因此不发送任何写入。
     remoteUnsupported(
       "删除工作区",
-      "远端 v2 只删除当前打开的那棵工作树、不接受 path；这条命令还要返回本机最近列表，两处都对不上。",
+      "远端 v2 的 worktreeRemove 只删除当前打开的那棵工作树、只接受 force，不接受路径；" +
+        "本机这条命令删除的是指定路径上的 linked worktree，两处语义对不上，因此不发写入。",
     );
   },
 

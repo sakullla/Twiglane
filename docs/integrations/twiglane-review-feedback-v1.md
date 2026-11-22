@@ -40,7 +40,7 @@ JSON 对象，**不接受任何额外字段**（`deny_unknown_fields`）。字�
 | `sessionId` | string | UUID 形式，必须与当前审查来源一致 |
 | `resultRevision` | number | 非负整数，≤ 9007199254740991；等于 Twiglane 最近一次 returned 的序号，从未返回过为 `0` |
 | `worktreePath` | string | 绝对路径（POSIX `/` 开头或 Windows 盘符），1–1000 字符，无控制字符；接收端重新 canonicalize |
-| `rangeVersion` | string | 1–200 字符，无控制字符；任务范围版本，用于判断意见是否已过期 |
+| `rangeVersion` | string | 1–200 字符，无控制字符；任务范围版本，接收端据此判断范围是否已变 |
 | `baselineOid` | string | 恰好 40 位小写十六进制，必须等于该来源的任务起点 |
 | `headOid` | string | 恰好 40 位小写十六进制，必须等于这批意见看到的 HEAD |
 | `comments` | array | 1–64 条，见下 |
@@ -57,6 +57,8 @@ JSON 对象，**不接受任何额外字段**（`deny_unknown_fields`）。字�
 | `oldNo` | number \| null | 旧侧行号 |
 | `newNo` | number \| null | 新侧行号；`oldNo` 与 `newNo` 不能同时为 null |
 | `body` | string | 1–16384 个 UTF-8 字节；trim 后非空；只允许 `\n` 与 `\t` 作为控制字符 |
+
+「这批意见是否还是当前那一批」由 Twiglane 自己判定，身份是 `reviewId + rangeVersion + baselineOid + headOid + 任务读取代次`。`rangeVersion` 只覆盖范围形状（起点、HEAD、工作区状态），已修改文件只改内容时它不变，所以读取代次也是身份的一部分：代次前进即判旧批次失效，失效批次不会被准备送回，也不会有任何路径把它写进 feedback-v1 文件。
 
 上限：单条正文 16 KiB，整批 64 条，整个文件 1 MiB。任何一项超出在写文件与打开深链之前失败。
 

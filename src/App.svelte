@@ -333,11 +333,24 @@
     ];
   }
   /** 项目下拉里「管理项目…」的哨兵值：选中它只打开管理弹窗，不改变当前项目。 */
+
+  /**
+   * 任务页报告的已解析范围。`generation` 是这次读取被校验过的仓库代次：起点、HEAD 与
+   * 未提交状态的形状都没变、只有已修改文件的内容被改写时，rangeVersion 不变而代次前进。
+   * 任务快照 token、审阅进度与行意见都以它为身份，旧结论不会挂到已经变化的内容上。
+   */
+  interface TaskScopeSnapshot {
+    worktree: string;
+    baselineOid: string;
+    headOid: string;
+    rangeVersion: string;
+    generation: number;
+  }
   interface ReadingContext {
     view: WorkspaceView; selected: FileSelection | null; selectedSet: FileSelection[]; query: string;
     historyPath: string | null; historyQuery: string; taskRequest: TaskRequest | null;
     taskSelectedPath: string | null;
-    taskScope: { worktree: string; baselineOid: string; headOid: string; rangeVersion: string } | null;
+    taskScope: TaskScopeSnapshot | null;
   }
   const readingContexts = new CheckoutContexts<ReadingContext>();
   let git = $state<GitInfo | null>(null);
@@ -643,7 +656,7 @@
   let reviewSerial = 0;
   let taskReviewSerial = 0;
   /** 任务页报告的已解析范围：只有后端校验过的起点与 HEAD 才能作为任务快照 token 的依据。 */
-  let taskScope = $state.raw<{ worktree: string; baselineOid: string; headOid: string; rangeVersion: string } | null>(null);
+  let taskScope = $state.raw<TaskScopeSnapshot | null>(null);
   /**
    * 任务审阅意见（R5）：只在当前来源的当前任务范围里成立。范围一变就整批失效，
    * 不把旧行号映射到新内容上；准备送回是唯一会写交接文件与打开深链的动作。
@@ -663,13 +676,34 @@
       baselineOid: scope.baselineOid,
       headOid: scope.headOid,
       rangeVersion: scope.rangeVersion,
+      // 读取代次进身份：「状态形状没变、内容被改写」只有代次能说明。
+      generation: scope.generation,
     };
   });
+  /**
+   * 任务读取代次已经落后于仓库代次：读完之后工作区又变了，而任务页还没重读完。
+   * 这一小段窗口里这批意见锚的行可能已经不同，所以不能准备送回。
+   */
+  let commentScopeOutdated = $derived(
+    Boolean(
+      commentScope &&
+        taskScope &&
+        opened &&
+        sameWorktreePath(taskScope.worktree, opened.summary.path) &&
+        taskScope.generation !== opened.generation,
+    ),
+  );
   let taskComments = $derived(commentScope ? commentsIn(commentScope) : []);
   let taskCommentKeys = $derived(commentScope ? commentLines(commentScope) : new Set<string>());
   /** 上一条失效说明：只有来源还在时才成立，用户换会话后不冒充新意见的结论。 */
   let staleCommentNotice = $derived(
     clioraReview.source ? staleCommentBatches(clioraReview.source.reviewId)[0]?.reason ?? null : null,
+  );
+  /** 读取代次落后于仓库代次时的就地说明：只有真的还有意见会被误送出时才提示。 */
+  let commentScopeOutdatedNotice = $derived(
+    commentScopeOutdated && taskComments.length > 0
+      ? "工作区在这次读取之后又变化了，这批意见挂的行可能已经不是原来那一行；先重新读取任务，再写或送回意见。"
+      : null,
   );
   let taskSelectedPath = $state<string | null>(null);
   let taskReviewNav = $state.raw<ReviewQueueState | null>(null);
@@ -2266,10 +2300,10 @@
    * 任务页每次成功读取后报告它解析出的范围。任务快照 token 绑定这个范围，
    * 所以范围一变，进度立刻按新身份显示，旧标记不会被当成这次任务的结果。
    */
-  function adoptTaskScope(scope: { worktree: string; baselineOid: string; headOid: string; rangeVersion: string } | null): void {
+  function adoptTaskScope(scope: TaskScopeSnapshot | null): void {
     taskScope = scope;
     taskSelectedPath = scope ? taskSelectedPath : null;
-    // 任务范围变了：上一批意见整体失效，不猜新行号；提示在意见栏里如实说出来。
+    // 任务范围或读取代次变了：上一批意见整体失效，不猜新行号；提示在意见栏里如实说出来。
     if (scope && commentScope) adoptCommentScope(commentScope);
     if (!scope) feedbackNotice = null;
     if (scope) void reverifyTaskReviewed();
@@ -2280,6 +2314,8 @@
   function addReviewComment(anchor: ReviewCommentAnchor, body: string): void {
     const scope = commentScope;
     if (!scope) throw new Error("当前没有任务范围，这条意见没有保存。");
+    // 读取代次落后时先别往过期批次里写：那批意见马上会整体失效，写了也会丢。
+    if (commentScopeOutdated) throw new Error("工作区在这次读取之后又变化了，先重新读取任务再写意见。");
     addTaskCommentRecord(scope, anchor, body);
     feedbackNotice = null;
   }
@@ -2310,7 +2346,19 @@
     }
     const comments = feedbackComments(scope);
     if (comments.length === 0) {
-      notice("先写一条意见，再准备送回原任务。", "warn");
+      // 失效的批次不会回到当前范围里：这里要如实说「已经失效」，不能让用户以为只是没写。
+      const invalidated = staleCommentBatches(source.reviewId).length > 0;
+      notice(
+        invalidated
+          ? "上一批意见已经失效，不会送回；请按当前任务内容重新写一批。"
+          : "先写一条意见，再准备送回原任务。",
+        "warn",
+      );
+      return;
+    }
+    // 任务页还没按最新代次重读：这批意见锚的行可能已经变了，绝不把过期批次送出去。
+    if (commentScopeOutdated) {
+      notice("工作区在这次任务读取之后又变化了，先重新读取任务再准备送回；这批意见不会送出。", "warn");
       return;
     }
     if (feedbackPreparing) return;
@@ -5121,7 +5169,7 @@
       onEditFile={filesViewEnabled ? (path, line) => void editInFiles(path, line, "task") : undefined}
       comments={taskComments}
       commentKeys={taskCommentKeys}
-      commentNotice={commentScope ? feedbackNotice ?? staleCommentNotice : null}
+      commentNotice={commentScope ? feedbackNotice ?? staleCommentNotice ?? commentScopeOutdatedNotice : null}
       onAddComment={addReviewComment}
       onEditComment={editReviewComment}
       onDeleteComment={deleteReviewComment}

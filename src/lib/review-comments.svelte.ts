@@ -1,9 +1,10 @@
 /**
  * 任务审阅意见（R5，feedback-v1 的准备侧）。
  *
- * 意见只属于当前来源的一次任务范围：身份来自 reviewId + rangeVersion + baseline + head，
- * 行定位复用差异里的 hunkIndex / kind / oldNo / newNo，不猜行号、不复用暂存语义、
- * 也不写 Git。范围一变，旧意见整体转入「已失效」，不会映射到新行号上。
+ * 意见只属于当前来源的一次任务范围：身份来自 reviewId + rangeVersion + baseline + head
+ * 与读取代次。行定位复用差异里的 hunkIndex / kind / oldNo / newNo，不猜行号、不复用
+ * 暂存语义、也不写 Git。范围或代次一变，旧意见整体转入「已失效」，不会映射到新行号上；
+ * 代次也进身份，是因为「已修改文件只改了内容」时范围版本不变，只有代次能说明内容变了。
  *
  * 这里只保存当前运行期的内存状态：进程重启后需要重新发起审查，和来源本身一样。
  */
@@ -42,6 +43,12 @@ export interface CommentScope {
   baselineOid: string;
   headOid: string;
   rangeVersion: string;
+  /**
+   * 读到这个范围时的仓库代次。起点、HEAD 与工作区状态形状都没变、只是已修改文件的
+   * 内容被改写时，rangeVersion 不会变，代次一定前进；它是「这份任务范围又被读过一次」
+   * 的唯一证据，所以必须进入身份，否则旧意见会被挂到已经变化的内容上。
+   */
+  generation: number;
 }
 
 export interface StaleCommentBatch {
@@ -54,12 +61,16 @@ const store = $state({
   batches: {} as Record<string, ReviewComment[]>,
   /** 每个来源最近一次失效的批次：只用于说明，不参与任何定位。 */
   stale: {} as Record<string, StaleCommentBatch[]>,
-  /** reviewId → 当前生效的 scopeKey。 */
-  active: {} as Record<string, string>,
+  /** reviewId → 当前生效的 scope（失效说明需要分清是范围变了还是只有内容被重读）。 */
+  active: {} as Record<string, CommentScope>,
 });
 
+/**
+ * 批次身份：来源 + 范围 + 读取代次。代次进身份是为了覆盖「状态形状没变、内容变了」
+ * 这一种情况——范围版本对它不敏感，代次敏感。
+ */
 export function commentScopeKey(scope: CommentScope): string {
-  return [scope.reviewId, scope.rangeVersion, scope.baselineOid, scope.headOid].join("|");
+  return [scope.reviewId, scope.rangeVersion, scope.baselineOid, scope.headOid, scope.generation].join("|");
 }
 
 /** 差异行与意见锚点共用的身份键：路径 + 块号 + 行类型 + 两个行号。 */
@@ -86,25 +97,52 @@ export function normalizedBody(body: string): string {
   return text;
 }
 
+/** 范围本身变了：起点、HEAD 或未提交状态的形状不再相同。 */
+const SCOPE_CHANGED_REASON = "任务范围（起点、HEAD 或工作区）已经变化，这批意见不会自动对应到新行号。";
+
 /**
- * 读到一个新的任务范围时同步：范围真的变了才把上一批意见标为失效。
- * 同一范围重复读取（文件监听、刷新）不会清空正在写的意见。
+ * 失效说明必须说清是哪一种变化：范围换了，还是范围没换但工作区内容被重新读到过。
+ * 后者是「状态形状不变、内容变了」的唯一可见证据，不能含糊地混进范围变化的说法里。
+ */
+function invalidationReason(before: CommentScope, after: CommentScope): string {
+  const rangeMoved =
+    before.worktree !== after.worktree ||
+    before.baselineOid !== after.baselineOid ||
+    before.headOid !== after.headOid ||
+    before.rangeVersion !== after.rangeVersion;
+  if (rangeMoved) return SCOPE_CHANGED_REASON;
+  if (before.generation !== after.generation) {
+    return (
+      "任务范围没变，但工作区在这次读取之后又被改过（读取代次 " +
+      before.generation +
+      " → " +
+      after.generation +
+      "），这批意见挂的行可能已经不是原来那一行，不会自动对应到新行号。"
+    );
+  }
+  return SCOPE_CHANGED_REASON;
+}
+
+/**
+ * 读到一个新的任务范围时同步：范围或读取代次真的变了才把上一批意见标为失效。
+ * 同一范围、同一代次重复读取（重复渲染、无关刷新）不会清空正在写的意见。
  */
 export function adoptCommentScope(scope: CommentScope): void {
   const key = commentScopeKey(scope);
   const previous = store.active[scope.reviewId];
-  if (previous === key) return;
-  const known = Object.hasOwn(store.batches, previous ?? "") ? store.batches[previous!] ?? [] : [];
-  store.active = { ...store.active, [scope.reviewId]: key };
-  if (previous && known.length > 0) {
+  const previousKey = previous ? commentScopeKey(previous) : null;
+  if (previousKey === key) return;
+  const known = previousKey !== null && Object.hasOwn(store.batches, previousKey) ? store.batches[previousKey] ?? [] : [];
+  store.active = { ...store.active, [scope.reviewId]: scope };
+  if (previousKey !== null && known.length > 0 && previous) {
     const entry: StaleCommentBatch = {
       scope,
       comments: known,
-      reason: "任务范围（起点、HEAD 或工作区）已经变化，这批意见不会自动对应到新行号。",
+      reason: invalidationReason(previous, scope),
     };
     store.stale = { ...store.stale, [scope.reviewId]: [entry, ...(store.stale[scope.reviewId] ?? [])].slice(0, 4) };
     const batches = { ...store.batches };
-    delete batches[previous];
+    delete batches[previousKey];
     store.batches = batches;
   }
 }

@@ -95,8 +95,13 @@
     onOpenUnstaged?: (path: string) => void;
     /** 回到改动视图的提交区：提交只按真实暂存范围执行。 */
     onOpenChanges?: () => void;
-    /** 任务范围解析成功/撤下：外壳据此绑定快照 token 与进度记录。 */
-    onSnapshot?: (scope: { worktree: string; baselineOid: string; headOid: string; rangeVersion: string } | null) => void;
+    /**
+     * 任务范围解析成功/撤下：外壳据此绑定快照 token 与进度记录。`generation` 是这次读取
+     * 被校验过的仓库代次——范围形状不变、内容被改写时只有它前进。
+     */
+    onSnapshot?: (
+      scope: { worktree: string; baselineOid: string; headOid: string; rangeVersion: string; generation: number } | null,
+    ) => void;
     /** 当前任务文件：命令面板的标记/暂存动作作用在这里。 */
     onSelection?: (path: string | null) => void;
     /** 未审阅队列状态：与改动视图共用同一套命令与按钮。 */
@@ -557,7 +562,13 @@
       failure = null;
       invalidRange = false;
       // 范围身份交给外壳：任务快照 token 与已审阅记录都绑定这份解析结果。
-      onSnapshot?.({ worktree: result.worktree, baselineOid: result.baselineOid, headOid: result.headOid, rangeVersion: result.rangeVersion });
+      onSnapshot?.({
+        worktree: result.worktree,
+        baselineOid: result.baselineOid,
+        headOid: result.headOid,
+        rangeVersion: result.rangeVersion,
+        generation: result.generation,
+      });
       // 刷新后按路径保留仍然存在的选择；消失的文件让位给列表第一个。
       const keptFocus = keep(selected);
       const keptSet = selectedSet.flatMap((item) => {

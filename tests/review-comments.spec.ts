@@ -37,6 +37,7 @@ function scope(overrides: Partial<CommentScope> = {}): CommentScope {
     baselineOid: "a".repeat(40),
     headOid: "c".repeat(40),
     rangeVersion: "range-7",
+    generation: 4,
     ...overrides,
   };
 }
@@ -126,6 +127,42 @@ describe("范围身份与失效", () => {
     expect(stale[0].reason).toMatch(/不会自动对应到新行号/);
     // 旧范围自己也不再持有意见：它们只作为失效记录存在。
     expect(commentsIn(before)).toEqual([]);
+  });
+
+  it("内容变化但范围形状不变：读取代次前进后旧意见同样整批失效", () => {
+    const before = scope();
+    addComment(before, anchor(), "内容变之前的意见");
+    adoptCommentScope(before);
+    // 同一个范围形状（起点、HEAD、rangeVersion 都没变）重复读取：意见还在。
+    adoptCommentScope(scope());
+    expect(commentsIn(scope())).toHaveLength(1);
+
+    // 已修改文件只改了内容：状态形状不变，所以 rangeVersion 不变，只有代次前进。
+    const reread = scope({ generation: 5 });
+    adoptCommentScope(reread);
+    expect(commentsIn(reread)).toEqual([]);
+    const stale = staleBatches(REVIEW);
+    expect(stale).toHaveLength(1);
+    expect(stale[0].comments.map((comment) => comment.body)).toEqual(["内容变之前的意见"]);
+    // 说明必须讲清是「内容被重新读过」，不能含糊成范围变化。
+    expect(stale[0].reason).toContain("任务范围没变");
+    expect(stale[0].reason).toContain("读取代次 4 → 5");
+    expect(stale[0].reason).toContain("不会自动对应到新行号");
+  });
+
+  it("失效批次不再属于当前范围，不能被当成交接内容送出", () => {
+    const before = scope();
+    addComment(before, anchor(), "过期意见");
+    addComment(before, anchor({ kind: "del", oldNo: 4, newNo: null }), "另一条过期意见");
+    adoptCommentScope(before);
+    const reread = scope({ generation: 5 });
+    adoptCommentScope(reread);
+    // 准备送回读的就是当前范围：批量为空，等于没有可送的内容。
+    expect(feedbackComments(reread)).toEqual([]);
+    expect(previewText(reread)).toBe("");
+    expect(commentLines(reread).size).toBe(0);
+    // 失效批次只保留说明，不回到任何可送出的路径。
+    expect(staleBatches(REVIEW)[0].comments).toHaveLength(2);
   });
 
   it("关闭来源时丢掉它的意见与失效记录", () => {

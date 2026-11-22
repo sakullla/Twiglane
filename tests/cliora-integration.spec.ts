@@ -1120,6 +1120,32 @@ describe("feedback-v1 准备送回", () => {
     expect(document.body.textContent).not.toContain("已发送");
   });
 
+  it("文件只改内容、范围形状不变：代次前进后旧意见失效，准备按钮不再送出过期批次", async () => {
+    await openTaskWithDiff();
+    await composeComment("这条意见绑在旧内容的那一行上。");
+    await waitFor(() => expect(document.body.textContent).toContain("1 条意见"));
+
+    // 工作区内容被改写：起点、HEAD 与未提交状态形状都没变（rangeVersion 不变），
+    // 只有仓库代次前进——文件监听把任务页重读一次。
+    mocks.api.refreshStatus.mockResolvedValue({ ...snapshot, generation: 5 });
+    mocks.api.taskReview.mockResolvedValue({ ...taskFor(BASELINE), generation: 5 });
+    const changed = mocks.listenEvent.mock.calls.find(([name]) => name === "repo-changed")![1] as (event: {
+      path: string;
+      generation: number;
+      degraded: boolean;
+    }) => void;
+    changed({ path: WORKTREE, generation: 5, degraded: false });
+
+    // 旧批次整体失效：界面上说清是内容被重新读过，而不是含糊成范围变化。
+    await waitFor(() => expect(document.body.textContent).toContain("任务范围没变"), { timeout: 8000 });
+    expect(document.body.textContent).toContain("不会自动对应到新行号");
+    await waitFor(() => expect(document.body.textContent).toContain("还没有意见"));
+    const prepare = screen.getByRole("button", { name: "准备把这批意见送回原任务" });
+    expect((prepare as HTMLButtonElement).disabled, "过期批次没有可送的内容").toBe(true);
+    expect(mocks.api.prepareReviewFeedback).not.toHaveBeenCalled();
+    expect(mocks.api.terminalWrite).not.toHaveBeenCalled();
+  });
+
   it("准备失败时不唤起 cliora，意见与提示都保留并可以再试", async () => {
     mocks.api.prepareReviewFeedback.mockRejectedValueOnce({
       code: "feedback_write_failed",

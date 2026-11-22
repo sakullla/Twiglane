@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::error::AppError;
+use crate::error::{AppError, SyncEffect};
 use crate::git::advice::{classify_problem, problem_error};
 use crate::git::command::{
     check_tag_command, create_tag_command, delete_tag_command, ls_remote_tags_command,
@@ -181,9 +181,17 @@ pub async fn push_tag(
     )
     .await?;
     if scheduled.output.exit_code != 0 {
-        return Err(tag_failure("tag_push_failed", &scheduled.output, scheduled.generation, "没有推送标签，远程未被强行改写。"));
+        let error = tag_failure("tag_push_failed", &scheduled.output, scheduled.generation, "标签推送没有全部完成。");
+        return Err(if crate::git::sync::push_ref_updated(&scheduled.output) {
+            error.after_sync_effect(SyncEffect::PushRefsUpdated)
+        } else if scheduled.output.stdout_truncated {
+            error.after_unconfirmed_write()
+        } else {
+            error
+        });
     }
     settle_read!(backend, &root, scheduled.generation, |current| load_tags(backend, &root, current, internal_request_id()).await)
+        .map_err(|error| error.after_sync_effect(SyncEffect::Completed))
 }
 
 async fn load_tags(

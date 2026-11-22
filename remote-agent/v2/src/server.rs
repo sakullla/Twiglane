@@ -2086,21 +2086,25 @@ impl Context {
         let (key, value) = match self.execute(op, fields, &session, generation).await {
             Ok(written) => written,
             Err(error) => {
-                match error.sync_effect {
+                let phase = match error.sync_effect {
                     Some(SyncEffect::Completed) => {
                         receipt.readback_error = Some(error.code.clone());
                         let current = self.backend.scheduler.current_generation(&session.key);
                         let receipt = store.complete(receipt, None, None, current)?;
                         return Ok(json!({"repo": session.key, "receipt": receipt}));
                     }
-                    Some(SyncEffect::Fetched) => {
-                        let receipt = store.partial(receipt, "fetched", &error.code)?;
-                        return Ok(json!({
-                            "repo": session.key, "receipt": receipt,
-                            "effectError": {"code": error.code, "message": error.message},
-                        }));
-                    }
-                    None => {}
+                    Some(SyncEffect::Fetched) => Some("fetched"),
+                    Some(SyncEffect::PushRefsUpdated) => Some("refs_pushed"),
+                    Some(SyncEffect::Pushed) => Some("pushed"),
+                    None => None,
+                };
+                if let Some(phase) = phase {
+                    receipt.generation = self.backend.scheduler.current_generation(&session.key);
+                    let receipt = store.partial(receipt, phase, &error.code)?;
+                    return Ok(json!({
+                        "repo": session.key, "receipt": receipt,
+                        "effectError": {"code": error.code, "message": error.message},
+                    }));
                 }
                 if remote_write_unconfirmed(op, &error) {
                     // 取消、超时、网络中断：远端可能已经收到这次请求，按「结果未知」登记，

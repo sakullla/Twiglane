@@ -477,11 +477,17 @@ pub async fn pull_fast_forward(
     )
     .await?;
     if scheduled.output.exit_code != 0 {
-        return Err(finish_remote(
+        let error = finish_remote(
             "pull_failed",
             &scheduled,
             "拉取没有完成，工作区保持原样。",
-        ));
+        );
+        // Git reaches this error in the integration phase, after fetch.
+        return Err(if error.code == "diverged" {
+            error.after_sync_effect(SyncEffect::Fetched)
+        } else {
+            error
+        });
     }
     backend.remote_checks.note(&key, now_ms());
     settle_read!(backend, &root, scheduled.generation, |current| snapshot_at(
@@ -1144,7 +1150,7 @@ pub async fn delete_remote_branch(
     let (program, args) = delete_remote_branch_command(&git.path, &root, remote, name);
     let scheduled = remote_write_repo(backend, &root, generation, request_id, program, args).await?;
     if scheduled.output.exit_code != 0 {
-        return Err(finish_remote(
+        return Err(finish_push(
             "delete_failed",
             &scheduled,
             "没有删除远程分支。",
@@ -1198,7 +1204,7 @@ async fn push_with_upstream(
     )
     .await?;
     if scheduled.output.exit_code != 0 {
-        return Err(finish_remote(
+        return Err(finish_push(
             "push_failed",
             &scheduled,
             "推送没有完成，没有强行推送。",
@@ -1244,7 +1250,7 @@ async fn publish_to(
     )
     .await?;
     if scheduled.output.exit_code != 0 {
-        return Err(finish_remote(
+        return Err(finish_push(
             "publish_failed",
             &scheduled,
             "没有发布分支，也没有强行推送。",
@@ -1435,18 +1441,56 @@ mod push_continuation {
             return Err(changed());
         }
         let (program, args) = crate::git::command::push_continuation_command(
-            &git.path, root, &destination.remote, branch, oid, &destination.remote_ref, destination.publish,
+            &git.path, root, &destination.remote, oid, &destination.remote_ref,
         );
         let scheduled =
             remote_write_repo(backend, root, generation, internal_request_id(), program, args).await?;
         if scheduled.output.exit_code != 0 {
-            return Err(finish_remote("push_failed", &scheduled, "推送没有完成，没有强行推送。"));
+            if push_ref_updated(&scheduled.output) {
+                return Err(tracking_unfinished(scheduled.generation));
+            }
+            return Err(finish_push("push_failed", &scheduled, "推送没有完成，没有强行推送。"));
         }
         backend.remote_checks.note(&key, now_ms());
-        settle_read!(backend, root, scheduled.generation, |current| snapshot_at(
+        let after = settle_read!(backend, root, scheduled.generation, |current| snapshot_at(
+            backend, root, current, internal_request_id()
+        ).await)
+        .map_err(|error| {
+            if destination.publish { tracking_unfinished(error.generation.unwrap_or(scheduled.generation)) }
+            else { sync_readback(error) }
+        })?;
+        if !destination.publish {
+            return Ok(after);
+        }
+        let upstream = format!("{}/{}", destination.remote, branch);
+        if after.branch.name.as_deref() != Some(branch) || after.branch.head_oid.as_deref() != Some(oid) {
+            return Err(tracking_unfinished(after.generation));
+        }
+        match after.branch.upstream.as_deref() {
+            Some(found) if found == upstream => return Ok(after),
+            Some(_) => return Err(tracking_unfinished(after.generation)),
+            None => {}
+        }
+        let (program, args) = set_upstream_to_command(&git.path, root, &upstream, branch);
+        let linked = write_repo(backend, root, after.generation, internal_request_id(), program, args)
+            .await
+            .map_err(|error| tracking_unfinished(error.generation.unwrap_or(after.generation)))?;
+        if linked.output.exit_code != 0 {
+            return Err(tracking_unfinished(linked.generation));
+        }
+        settle_read!(backend, root, linked.generation, |current| snapshot_at(
             backend, root, current, internal_request_id()
         ).await)
         .map_err(sync_readback)
+    }
+
+    fn tracking_unfinished(generation: u64) -> AppError {
+        AppError::new(
+            "push_tracking_unfinished",
+            "请刷新分支列表并核对上游。如需建立跟踪，请从分支列表设置。",
+        )
+        .with_generation(generation)
+        .after_sync_effect(SyncEffect::Pushed)
     }
 }
 
@@ -1810,7 +1854,7 @@ pub async fn push_to_remote(
     )
     .await?;
     if scheduled.output.exit_code != 0 {
-        return Err(finish_remote(
+        return Err(finish_push(
             "push_failed",
             &scheduled,
             &format!("没有推送到 {remote}，也没有强行推送。"),
@@ -2056,7 +2100,7 @@ pub async fn push_local_branch(
     reject_force(&args)?;
     let scheduled = remote_write_repo(backend, &root, generation, internal_request_id(), program, args).await?;
     if scheduled.output.exit_code != 0 {
-        return Err(finish_remote(
+        return Err(finish_push(
             "push_failed",
             &scheduled,
             &format!("{name} 没有推送，也没有强行推送。"),
@@ -2095,6 +2139,33 @@ fn finish_remote(code: &str, scheduled: &ScheduledOutput, fallback: &str) -> App
         git_failure(code, &scheduled.output, fallback)
     };
     error.with_generation(scheduled.generation)
+}
+
+pub(super) fn push_ref_updated(output: &ProcessOutput) -> bool {
+    // Only Git's porcelain status records prove an effect. '=' is already up
+    // to date and '!' is a rejection. The destination is a full refname.
+    output.stdout.split(|byte| *byte == b'\n').any(|line| {
+        let mut fields = line.splitn(3, |byte| *byte == b'\t');
+        matches!(fields.next(), Some(b" " | b"+" | b"-" | b"*"))
+            && fields.next().is_some_and(|refspec| {
+                refspec
+                    .splitn(2, |byte| *byte == b':')
+                    .nth(1)
+                    .is_some_and(|target| target.starts_with(b"refs/"))
+            })
+            && fields.next().is_some_and(|summary| !summary.is_empty())
+    })
+}
+
+fn finish_push(code: &str, scheduled: &ScheduledOutput, fallback: &str) -> AppError {
+    if push_ref_updated(&scheduled.output) {
+        finish_remote(code, scheduled, "还有远程引用未能更新。")
+            .after_sync_effect(SyncEffect::PushRefsUpdated)
+    } else if scheduled.output.stdout_truncated {
+        finish_remote(code, scheduled, "推送回执不完整。").after_unconfirmed_write()
+    } else {
+        finish_remote(code, scheduled, fallback)
+    }
 }
 
 fn clone_failure(destination: &Path, error: AppError) -> AppError {

@@ -17,6 +17,9 @@ pub struct AppError {
 pub(crate) enum SyncEffect {
     Completed,
     Fetched,
+    PushRefsUpdated,
+    #[allow(dead_code)]
+    Pushed,
 }
 
 impl AppError {

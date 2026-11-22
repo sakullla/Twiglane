@@ -562,6 +562,9 @@ fn remote_error(code: &str) -> AppError {
         "hook_failed" => "远端的 Git hook 拒绝了此次提交。",
         "upstream_missing" => "远程还没有对应分支。可以选择已有上游或发布当前分支。",
         "upstream_failed" | "upstream_unconfirmed" => "Git 未确认上游关联，请在分支列表核对。",
+        "diverged" => "当前分支和上游已分叉，请选择合并或变基。",
+        "push_rejected" => "Git 拒绝更新部分或全部远程引用，请核对最新远程状态。",
+        "push_tracking_unfinished" => "请刷新分支列表并核对上游。如需建立跟踪，请从分支列表设置。",
         "push_target_changed" => "原推送目标已变化。请恢复提交时的远程地址和上游分支后再重试。",
         "push_intent_changed" => "原提交回执与当前分支或提交不符，请重新打开仓库核对。",
         _ => {
@@ -1327,7 +1330,8 @@ fn update_push_continuations(
 ) -> Result<Vec<PushContinuation>> {
     let path = session.push_continuation_path(base);
     let mut intents = read_push_continuations(&path)?;
-    if result["state"] != "completed" {
+    let pushed = pending.op == "resumePush" && result["state"] == "partial" && result["phase"] == "pushed";
+    if result["state"] != "completed" && !pushed {
         return Ok(intents);
     }
     let changed = if let Some(push) = push {
@@ -2124,14 +2128,22 @@ async fn finish_write(
                     let error = remote_error(reason);
                     json!({"state":"failed","operationId":pending.operation_id,"code":reason,"message":error.message})
                 }
-                "partial" if pending.op == "associateUpstream" && proof.phase == Some("fetched") => {
-                    let reason = proof.reason.unwrap_or("upstream_failed");
+                "partial" => {
+                    let (phase, detail) = match (pending.op.as_str(), proof.phase) {
+                        ("associateUpstream", Some("fetched")) => ("fetched", "已获取远程引用，上游关联尚未确认。"),
+                        ("pull", Some("fetched")) => ("fetched", "已获取远程引用，当前分支未快进。"),
+                        ("resumePush", Some("pushed")) => ("pushed", "原提交已推送，上游跟踪尚未确认。"),
+                        ("push" | "publishBranch" | "pushToRemote" | "branchPublish" | "deleteRemoteBranch" | "tagPush", Some("refs_pushed")) =>
+                            ("refs_pushed", "部分远程引用已更新。"),
+                        _ => return Ok(pending_unknown(pending)),
+                    };
+                    let reason = proof.reason.unwrap_or("ssh_failed");
                     let message = response["effectError"]["message"].as_str()
                         .map(str::to_owned)
                         .unwrap_or_else(|| remote_error(reason).message);
                     json!({
-                        "state":"partial", "operationId":pending.operation_id, "code":reason, "phase":"fetched",
-                        "message":format!("已获取远程引用，上游关联尚未确认。{message}"),
+                        "state":"partial", "operationId":pending.operation_id, "code":reason, "phase":phase,
+                        "message":format!("{detail}{message}"),
                     })
                 }
                 _ => return Ok(unknown(&pending.operation_id)),
@@ -2584,7 +2596,8 @@ input.on("line", line => {
         operation.op = "resumePush".into();
         operation.push_commit_id = Some(first);
         assert_eq!(update_push_continuations(dir.path(), &session, &operation, &json!({"state":"failed"}), None).unwrap().len(), 2);
-        assert_eq!(update_push_continuations(dir.path(), &session, &operation, &completed, None).unwrap().len(), 1);
+        let tracking_unfinished = json!({"state":"partial", "phase":"pushed"});
+        assert_eq!(update_push_continuations(dir.path(), &session, &operation, &tracking_unfinished, None).unwrap().len(), 1);
         let remaining = read_push_continuations(&path).unwrap();
         assert_eq!(remaining[0].commit_operation_id.as_deref(), Some(second.as_str()));
         session.agent.close().await;

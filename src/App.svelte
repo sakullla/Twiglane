@@ -3133,16 +3133,19 @@
       if (remote && !api.remoteRepositoryState(current.summary.path)?.pushContinuation) {
         throw { code: "stale", message: "当前分支或提交与待推送记录不同，请先切回相应提交。" };
       }
-      const snapshot = remote
+      const outcome = remote
         ? await api.retryRemotePush(current.summary.path, current.generation)
-        : current.snapshot.branch.upstream
-          ? await api.pushBranch(current.summary.path, current.generation, nextId())
-          : await api.publishBranch(current.summary.path, "", current.generation, nextId());
+        : {
+            snapshot: current.snapshot.branch.upstream
+              ? await api.pushBranch(current.summary.path, current.generation, nextId())
+              : await api.publishBranch(current.summary.path, "", current.generation, nextId()),
+            warning: null,
+          };
       if (opened?.summary.path !== current.summary.path) return;
-      applySnapshot(snapshot);
+      applySnapshot(outcome.snapshot);
       pushRetry = false;
       pushFailure = null;
-      phaseNote = "推送已完成。没有再次创建提交。";
+      phaseNote = outcome.warning ?? "推送已完成。没有再次创建提交。";
       banner = null;
       live = phaseNote;
     } catch (error) {
@@ -3220,7 +3223,9 @@
           ? "请重新打开仓库核对远端回执。"
           : remoteKey && name === "associate" && failure.message === remoteRepoState?.recoveryNotice
             ? "可在分支列表选择已获取的上游，或发布尚不存在的远程分支。"
-            : context?.next;
+            : remoteKey && failure.message === remoteRepoState?.recoveryNotice
+              ? "请核对 Git 状态后再处理剩余操作。"
+              : context?.next;
         handleMutationError(failure, context?.stage, next);
       }
     } finally {

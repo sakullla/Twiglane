@@ -824,14 +824,20 @@ function currentPushContinuation(session: RemoteRepositorySession): RemotePushCo
   ) ?? null;
 }
 
-async function retryRemotePush(path: string, generation: number): Promise<StatusSnapshot> {
+async function retryRemotePush(path: string, generation: number): Promise<{ snapshot: StatusSnapshot; warning: string | null }> {
   const session = remoteBridgeSession(path, generation);
   const commitOperationId = currentPushContinuation(session)?.commitOperationId;
   if (!commitOperationId) {
     throw remoteError("push_intent_changed", "当前分支和提交没有可核对的待推送记录。", generation);
   }
-  const snapshot = await remoteBridgeWrite(session, generation, "resumePush", { commitOperationId });
-  return remoteStatus(snapshot, session.generation);
+  try {
+    const snapshot = await remoteBridgeWrite(session, generation, "resumePush", { commitOperationId });
+    return { snapshot: remoteStatus(snapshot, session.generation), warning: null };
+  } catch (error) {
+    const failure = normalizeError(error);
+    if (failure.code !== "push_tracking_unfinished" || failure.message !== session.recoveryNotice) throw error;
+    return { snapshot: remoteStatus(session.latest, session.generation), warning: failure.message };
+  }
 }
 
 /**
@@ -3427,6 +3433,7 @@ const remoteOverrides: Record<string, unknown> = {
     const oid = committed.head;
     if (!oid) throw remoteError("remote_protocol", "远端提交回执缺少提交身份。", session.generation);
     let pushError: string | null = null;
+    let trackingWarning: string | null = null;
     try {
       if (result.pushTargetError) {
         throw remoteError(result.pushTargetError, "提交时无法确定推送目标。请核对远程和分支后单独推送。", session.generation);
@@ -3434,7 +3441,7 @@ const remoteOverrides: Record<string, unknown> = {
       if (currentPushContinuation(session)?.head !== oid) {
         throw remoteError("stale", "当前分支或提交与待推送记录不同，请先切回相应提交。", session.generation);
       }
-      await retryRemotePush(path, session.generation);
+      trackingWarning = (await retryRemotePush(path, session.generation)).warning;
     } catch (error) {
       checkRemoteResponse(session);
       pushError = normalizeError(error).message;
@@ -3446,7 +3453,7 @@ const remoteOverrides: Record<string, unknown> = {
       committed: true, pushed: pushError === null, retryPush: pushError !== null && currentPushContinuation(session) !== null,
       pushUnconfirmed: session.pending !== null,
       oid, branch: committed.branch ?? "", pushError,
-      summary: pushError === null ? `已创建远端提交 ${short}，推送已完成。` : `已创建远端提交 ${short}。`,
+      summary: trackingWarning ?? (pushError === null ? `已创建远端提交 ${short}，推送已完成。` : `已创建远端提交 ${short}。`),
       generation: session.generation,
       snapshot: remoteStatus(session.latest, session.generation),
     };

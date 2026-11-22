@@ -524,7 +524,7 @@ pub fn pull_ff_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
 
 pub fn push_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, false);
-    args.push(OsString::from("push"));
+    args.extend(["push", "--porcelain"].map(OsString::from));
     (git.to_path_buf(), args)
 }
 
@@ -536,6 +536,7 @@ pub fn push_to_upstream_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsStri
         OsString::from("-c"),
         OsString::from("push.default=upstream"),
         OsString::from("push"),
+        OsString::from("--porcelain"),
     ]);
     (git.to_path_buf(), args)
 }
@@ -549,6 +550,7 @@ pub fn publish_command(
     let mut args = repo_prefix(root, false);
     args.extend([
         OsString::from("push"),
+        OsString::from("--porcelain"),
         OsString::from("--set-upstream"),
         OsString::from("--"),
         OsString::from(remote),
@@ -576,29 +578,20 @@ pub(crate) fn push_continuation_command(
     git: &Path,
     root: &Path,
     remote: &str,
-    branch: &str,
     oid: &str,
     destination: &str,
-    publish: bool,
 ) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, false);
     args.extend([
         OsString::from("-c"),
         OsString::from(format!("remote.{remote}.mirror=false")),
         OsString::from("push"),
+        OsString::from("--porcelain"),
         OsString::from("--no-follow-tags"),
         OsString::from("--recurse-submodules=no"),
-    ]);
-    let source = if publish {
-        args.push(OsString::from("--set-upstream"));
-        format!("refs/heads/{branch}")
-    } else {
-        oid.to_owned()
-    };
-    args.extend([
         OsString::from("--"),
         OsString::from(remote),
-        OsString::from(format!("{source}:{destination}")),
+        OsString::from(format!("{oid}:{destination}")),
     ]);
     (git.to_path_buf(), args)
 }
@@ -628,6 +621,7 @@ pub fn delete_remote_branch_command(
     let mut args = repo_prefix(root, false);
     args.extend([
         OsString::from("push"),
+        OsString::from("--porcelain"),
         OsString::from("--delete"),
         OsString::from("--"),
         OsString::from(remote),
@@ -823,6 +817,7 @@ pub fn push_branch_to_command(
     let mut args = repo_prefix(root, false);
     args.extend([
         OsString::from("push"),
+        OsString::from("--porcelain"),
         OsString::from("--"),
         OsString::from(remote),
         OsString::from(format!("refs/heads/{name}:{remote_ref}")),
@@ -896,6 +891,7 @@ pub fn push_tag_command(
     let mut args = repo_prefix(root, false);
     args.extend([
         OsString::from("push"),
+        OsString::from("--porcelain"),
         OsString::from("--"),
         OsString::from(remote),
         OsString::from(format!("refs/tags/{name}")),
@@ -1561,6 +1557,7 @@ pub fn push_to_remote_command(
     let mut args = repo_prefix(root, false);
     args.extend([
         OsString::from("push"),
+        OsString::from("--porcelain"),
         OsString::from("--"),
         OsString::from(remote),
         OsString::from(format!("refs/heads/{branch}:refs/heads/{branch}")),

@@ -255,7 +255,7 @@ export type RemoteCallResult = RemoteWriteResult | Record<string, unknown>;
 
 export type RemoteWriteResult =
   | { state: "completed"; operationId: string; snapshot: RemoteWorktreeSnapshot; head?: string | null; reviewOutcome?: RemoteReviewOutcome | null; pushContinuations?: RemotePushContinuation[]; pushTargetError?: string; edit?: RepositoryEditSnapshot; delete?: BatchDeleteResult }
-  | { state: "partial"; operationId: string; code: string; phase: "fetched"; message: string; pushContinuations?: RemotePushContinuation[] }
+  | { state: "partial"; operationId: string; code: string; phase: "fetched" | "pushed" | "refs_pushed"; message: string; pushContinuations?: RemotePushContinuation[] }
   // Return "failed" only when the outcome is verified and the write had no effect.
   | { state: "failed" | "unknown"; operationId: string; op?: RemotePendingWrite["op"]; message: string; code?: string; pushContinuations?: RemotePushContinuation[] };
 

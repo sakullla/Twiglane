@@ -518,6 +518,39 @@ describe("远端仓库在主窗口：写入与仓库键隔离", () => {
     expect(port.status).toHaveBeenCalledTimes(1);
   });
 
+  it("reports a completed push even when its upstream still needs to be linked", async () => {
+    const repo = await openHost();
+    const head = "c".repeat(40);
+    const committed = snapshot({ head, generation: "g2" });
+    port.write.mockResolvedValueOnce({
+      state: "completed", operationId: "commit1", snapshot: committed,
+      pushContinuations: [{ head, branch: "feature", commitOperationId: "commit1" }],
+    });
+    const warning = "原提交已推送，上游跟踪尚未确认。请从分支列表设置。";
+    port.call.mockResolvedValueOnce({
+      state: "partial", operationId: "push1", code: "push_tracking_unfinished", phase: "pushed",
+      message: warning, pushContinuations: [],
+    });
+    port.status.mockResolvedValueOnce(committed);
+    const result = await api.commitAndPush(keyA, "publish", repo.generation, 1);
+    expect(result).toMatchObject({ committed: true, pushed: true, retryPush: false, pushError: null, summary: warning });
+    expect(remoteRepositoryState(keyA)).toMatchObject({ pushContinuation: null, recoveryNotice: warning });
+    await expect(api.retryRemotePush(keyA, result.generation)).rejects.toMatchObject({ code: "push_intent_changed" });
+    expect(port.call).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows an incomplete push after some remote refs were updated", async () => {
+    const repo = await openHost();
+    const message = "部分远程引用已更新。Git 拒绝了其他引用。";
+    port.call.mockResolvedValueOnce({
+      state: "partial", operationId: "push1", code: "push_rejected", phase: "refs_pushed", message,
+    });
+    port.status.mockResolvedValueOnce(snapshot({ generation: "g2" }));
+    await expect(api.pushBranch(keyA, repo.generation, 1)).rejects.toMatchObject({ code: "push_rejected", message });
+    expect(remoteRepositoryState(keyA)).toMatchObject({ pending: false, recoveryNotice: message });
+    expect(port.call).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps linked-worktree actions on the active SSH host and checks the deletion preview", async () => {
     const repo = await openHost();
     const target = "/srv/other";

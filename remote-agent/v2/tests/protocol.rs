@@ -1990,6 +1990,96 @@ fn publish_with_an_empty_remote_uses_the_only_configured_destination() {
     );
 }
 
+fn diverged_origin(fixture: &Fixture) -> PathBuf {
+    fixture.init();
+    fixture.write("a.txt", "initial\n");
+    fixture.commit_all("base");
+    let base = base_of(fixture);
+    let origin = base.join("origin.git");
+    git(&base, &fixture.config, &["init", "--bare", "origin.git"]);
+    git(&fixture.repo, &fixture.config, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(&fixture.repo, &fixture.config, &["push", "-u", "origin", "main"]);
+
+    let other = base.join("other");
+    git(&base, &fixture.config, &["clone", "-b", "main", origin.to_str().unwrap(), "other"]);
+    std::fs::write(other.join("upstream.txt"), "upstream commit\n").unwrap();
+    git(&other, &fixture.config, &["add", "upstream.txt"]);
+    git(&other, &fixture.config, &["commit", "-m", "upstream commit"]);
+    git(&other, &fixture.config, &["push", "origin", "main"]);
+    fixture.write("local.txt", "local commit\n");
+    fixture.commit_all("local commit");
+    origin
+}
+
+#[test]
+fn a_configured_push_can_update_one_ref_and_fail_another() {
+    let fixture = Fixture::new("push-partial");
+    let origin = diverged_origin(&fixture);
+    let upstream_main = git(&origin, &fixture.config, &["rev-parse", "refs/heads/main"]);
+    git(&fixture.repo, &fixture.config, &["switch", "-c", "topic", "HEAD^"]);
+    git(&fixture.repo, &fixture.config, &["push", "origin", "topic"]);
+    fixture.write("topic.txt", "topic commit\n");
+    fixture.commit_all("topic commit");
+    let local_topic = git(&fixture.repo, &fixture.config, &["rev-parse", "refs/heads/topic"]);
+    git(&fixture.repo, &fixture.config, &["switch", "main"]);
+    for mapping in ["refs/heads/main:refs/heads/main", "refs/heads/topic:refs/heads/topic"] {
+        git(&fixture.repo, &fixture.config, &["config", "--add", "remote.origin.push", mapping]);
+    }
+
+    let repo = fixture.repo_str();
+    let mut agent = fixture.agent();
+    let state = open(&mut agent, &repo);
+    let fields = json!({
+        "repo": repo, "operationId": "op-push-partial", "stateToken": state["stateToken"],
+    });
+    let result = agent.ok("push-partial", "push", fields.clone());
+    assert_eq!(result["receipt"]["state"], "partial");
+    assert_eq!(result["receipt"]["phase"], "refs_pushed");
+    assert_eq!(result["receipt"]["reason"], "push_rejected");
+    assert_eq!(git(&origin, &fixture.config, &["rev-parse", "refs/heads/main"]), upstream_main);
+    assert_eq!(git(&origin, &fixture.config, &["rev-parse", "refs/heads/topic"]), local_topic);
+    let replay = agent.ok("replay-push-partial", "push", fields);
+    assert_eq!(replay["receipt"], result["receipt"]);
+    assert_eq!(replay["replayed"], true);
+
+    let latest = agent.ok("state-after-partial", "status", json!({"repo": repo}));
+    let code = agent.error_code("try-remaining", "push", json!({
+        "repo": repo, "operationId": "op-push-rejected", "stateToken": latest["stateToken"],
+    }));
+    assert_eq!(code, "push_rejected");
+    let failed = agent.ok("read-rejected", "receipt", json!({
+        "repo": repo, "operationId": "op-push-rejected",
+    }));
+    assert_eq!(failed["receipt"]["state"], "failed");
+    assert!(failed["receipt"]["phase"].is_null());
+}
+
+#[test]
+fn a_divergent_pull_keeps_its_fetch_effect_without_advancing_the_checkout() {
+    let fixture = Fixture::new("pull-partial");
+    let origin = diverged_origin(&fixture);
+    let local_head = git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD"]);
+    let upstream = git(&origin, &fixture.config, &["rev-parse", "refs/heads/main"]);
+    let old_tracking = git(&fixture.repo, &fixture.config, &["rev-parse", "refs/remotes/origin/main"]);
+    assert_ne!(old_tracking, upstream);
+    let repo = fixture.repo_str();
+    let mut agent = fixture.agent();
+    let state = open(&mut agent, &repo);
+    let fields = json!({
+        "repo": repo, "operationId": "op-divergent-pull", "stateToken": state["stateToken"],
+    });
+    let result = agent.ok("pull-diverged", "pull", fields.clone());
+    assert_eq!(result["receipt"]["state"], "partial");
+    assert_eq!(result["receipt"]["phase"], "fetched");
+    assert_eq!(result["receipt"]["reason"], "diverged");
+    assert_eq!(git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD"]), local_head);
+    assert_eq!(git(&fixture.repo, &fixture.config, &["rev-parse", "refs/remotes/origin/main"]), upstream);
+    assert!(!fixture.repo.join("upstream.txt").exists());
+    let replay = agent.ok("replay-pull", "pull", fields);
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(replay["receipt"], result["receipt"]);
+}
+
 #[test]
 fn resumed_pushes_use_each_original_commit_and_effective_push_destination() {
     let fixture = Fixture::new("resume-push");
@@ -2054,6 +2144,114 @@ fn resumed_pushes_use_each_original_commit_and_effective_push_destination() {
     assert_eq!(pushed["result"]["snapshot"]["branch"]["upstream"], "origin/topic");
     assert_eq!(git(&origin, &fixture.config, &["rev-parse", "refs/heads/topic"]).trim(), second);
     assert_eq!(git(&fixture.repo, &fixture.config, &["rev-list", "--count", "HEAD"]).trim(), "2");
+}
+
+fn saved_first_publish_intent(fixture: &Fixture) -> (PathBuf, String) {
+    fixture.init();
+    fixture.write("a.txt", "initial\n");
+    fixture.commit_all("init");
+    let base = base_of(fixture);
+    let origin = base.join("origin.git");
+    git(&base, &fixture.config, &["init", "--bare", "origin.git"]);
+    git(&fixture.repo, &fixture.config, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(&fixture.repo, &fixture.config, &["switch", "-c", "topic"]);
+    fixture.write("topic.txt", "publish this commit\n");
+    git(&fixture.repo, &fixture.config, &["add", "topic.txt"]);
+    let repo = fixture.repo_str();
+    let mut agent = fixture.agent();
+    let state = open(&mut agent, &repo);
+    let committed = agent.ok("commit-for-publish", "commit", json!({
+        "repo": repo, "operationId": "op-first-publish", "stateToken": state["stateToken"],
+        "recordPushIntent": true, "message": "commit to publish",
+    }));
+    assert_eq!(committed["receipt"]["state"], "completed");
+    assert!(committed["receipt"]["pushDestination"].is_string());
+    (origin, committed["receipt"]["head"].as_str().unwrap().to_owned())
+}
+
+#[test]
+fn first_publish_keeps_the_pushed_effect_when_upstream_config_is_locked() {
+    let fixture = Fixture::new("publish-locked-config");
+    let (origin, planned) = saved_first_publish_intent(&fixture);
+    let lock = fixture.repo.join(".git/config.lock");
+    std::fs::write(&lock, b"external config lock").unwrap();
+    let repo = fixture.repo_str();
+    let mut agent = fixture.agent();
+    let state = open(&mut agent, &repo);
+    let fields = json!({
+        "repo": repo, "operationId": "op-publish-tracking-lock", "stateToken": state["stateToken"],
+        "commitOperationId": "op-first-publish",
+    });
+    let result = agent.ok("publish-with-lock", "resumePush", fields.clone());
+    assert_eq!(result["receipt"]["state"], "partial");
+    assert_eq!(result["receipt"]["phase"], "pushed");
+    assert_eq!(result["receipt"]["reason"], "push_tracking_unfinished");
+    assert_eq!(git(&origin, &fixture.config, &["rev-parse", "refs/heads/topic"]).trim(), planned);
+    let upstream = git(&fixture.repo, &fixture.config, &["for-each-ref", "--format=%(upstream:short)", "refs/heads/topic"]);
+    assert!(upstream.trim().is_empty());
+    std::fs::remove_file(&lock).unwrap();
+    let replay = agent.ok("publish-receipt-replay", "resumePush", fields);
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(replay["receipt"], result["receipt"]);
+    let state = agent.ok("read-before-tracking", "status", json!({"repo": repo}));
+    let tracking = agent.ok("only-set-tracking", "setUpstream", json!({
+        "repo": repo, "operationId": "op-set-tracking-after-push", "stateToken": state["stateToken"], "upstream": "origin/topic",
+    }));
+    assert_eq!(tracking["branches"]["snapshot"]["branch"]["upstream"], "origin/topic");
+    assert_eq!(git(&origin, &fixture.config, &["rev-parse", "refs/heads/topic"]).trim(), planned);
+}
+
+#[cfg(unix)]
+#[test]
+fn first_publish_pins_the_commit_even_if_the_branch_advances_during_planning() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new("publish-moving-branch");
+    let (origin, planned) = saved_first_publish_intent(&fixture);
+    let tree = git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD^{tree}"]);
+    let later = git(&fixture.repo, &fixture.config, &[
+        "commit-tree", tree.trim(), "-p", &planned, "-m", "later commit",
+    ]);
+    let base = base_of(&fixture);
+    let marker = base.join("advance-publish-source");
+    let executable = base.join("git-with-moving-branch");
+    std::fs::write(&executable, r#"#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = get-url ] && [ -f "$TWIGLANE_TEST_ADVANCE" ]; then
+    git -C "$TWIGLANE_TEST_REPO" update-ref refs/heads/topic "$TWIGLANE_TEST_LATER" "$TWIGLANE_TEST_PLANNED" || exit $?
+    rm -- "$TWIGLANE_TEST_ADVANCE" || exit $?
+    break
+  fi
+done
+exec git "$@"
+"#).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let settings = fixture.state.join("twiglane/agent/v2/settings.json");
+    let mut data: Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+    data["gitExecutable"] = json!(executable);
+    std::fs::write(settings, data.to_string()).unwrap();
+    let repo = fixture.repo_str();
+    let extra = [
+        ("TWIGLANE_TEST_ADVANCE", marker.to_str().unwrap()),
+        ("TWIGLANE_TEST_REPO", repo.as_str()),
+        ("TWIGLANE_TEST_LATER", later.trim()),
+        ("TWIGLANE_TEST_PLANNED", planned.as_str()),
+    ];
+    let mut agent = Agent::start_with(&fixture.state, &fixture.config, &extra);
+    let state = open(&mut agent, &repo);
+    std::fs::write(&marker, b"armed").unwrap();
+    let fields = json!({
+        "repo": repo, "operationId": "op-publish-moving-branch", "stateToken": state["stateToken"],
+        "commitOperationId": "op-first-publish",
+    });
+    let result = agent.ok("publish-moving-branch", "resumePush", fields.clone());
+    assert_eq!(result["receipt"]["state"], "partial");
+    assert_eq!(result["receipt"]["phase"], "pushed");
+    assert!(!marker.exists(), "the branch must advance during destination resolution");
+    assert_eq!(git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD"]), later);
+    assert_eq!(git(&origin, &fixture.config, &["rev-parse", "refs/heads/topic"]).trim(), planned);
+    let replay = agent.ok("replay-moving-branch", "resumePush", fields);
+    assert_eq!(replay["receipt"], result["receipt"]);
 }
 
 #[test]

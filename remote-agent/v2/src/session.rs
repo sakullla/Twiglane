@@ -8,13 +8,13 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::error::AppError;
 use crate::git::ops::RepoState;
-use crate::identity::WorktreeIdentity;
+use crate::identity::{DirectoryIdentity, WorktreeIdentity};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DiffView {
     Staged,
@@ -22,7 +22,7 @@ pub enum DiffView {
     Task,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Selection {
     pub path: String,
     pub original: Option<String>,
@@ -42,6 +42,7 @@ pub struct Session {
     pub key: String,
     /// common Git dir：跨进程写锁和持久回执都放在这里。
     pub git_dir: PathBuf,
+    pub git_dir_identity: DirectoryIdentity,
     pub identity: WorktreeIdentity,
     pub baseline: Option<String>,
     state: Arc<Mutex<RepoState>>,
@@ -56,16 +57,18 @@ impl Session {
         state: RepoState,
         identity: WorktreeIdentity,
         baseline: Option<String>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, AppError> {
+        let git_dir_identity = DirectoryIdentity::read(&git_dir)?;
+        Ok(Self {
             root,
             key,
             git_dir,
+            git_dir_identity,
             identity,
             baseline,
             state: Arc::new(Mutex::new(state)),
             diff: Arc::new(DiffTracker::default()),
-        }
+        })
     }
 
     pub fn state(&self) -> RepoState {

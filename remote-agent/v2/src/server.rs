@@ -31,7 +31,7 @@ use crate::git::sync;
 use crate::git::tags;
 use crate::git::task;
 use crate::git::worktree as worktree_ops;
-use crate::identity::WorktreeIdentity;
+use crate::identity::{worktree_changed, WorktreeIdentity};
 use crate::model::{DiffLineSelection, RepositorySearchScope, TaskReview};
 use crate::protocol::{self, Request, CAPABILITIES, MAX_IN_FLIGHT, MAX_REQUEST_BYTES, PROTOCOL};
 use crate::pty::{self, FrameEvents};
@@ -43,6 +43,7 @@ use crate::terminal::{TerminalManager, TerminalProfile, TerminalSnapshot};
 
 const AGENT_NAME: &str = "twiglane-agent/2";
 const MAX_FIELD: usize = 4096;
+const MAX_DIFF_CURSOR_BYTES: usize = 256;
 const MAX_PATHS: usize = 500;
 const DEFAULT_DIFF_LINES: u32 = 200;
 const MAX_DIFF_LINES: u32 = 2000;
@@ -628,7 +629,7 @@ impl Context {
             state.clone(),
             identity,
             baseline,
-        );
+        )?;
         let review = self.bound_task_review(&session, opened.generation).await?;
         check_cancel(cancel)?;
         // 变化事件源与仓库同生命周期：watch 不可用时如实降级，不启动任何轮询。
@@ -675,14 +676,13 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         check_bound_baseline(&session, fields)?;
         let generation = match optional_u64_field(fields, "generation")? {
             Some(generation) => generation,
             None => self.backend.scheduler.current_generation(&session.key),
         };
         check_cancel(cancel)?;
-        self.check_identity(&session).await?;
         let snapshot = ops::refresh_status(
             &self.backend,
             &session.key,
@@ -728,9 +728,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
-        check_cancel(cancel)?;
-        self.check_identity(&session).await?;
+        let session = self.repo_session(fields).await?;
         check_cancel(cancel)?;
         Ok(json!({
             "repo": session.key,
@@ -768,10 +766,9 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         check_bound_baseline(&session, fields)?;
         check_cancel(cancel)?;
-        self.check_identity(&session).await?;
         let generation = self.backend.scheduler.current_generation(&session.key);
         let review = self
             .bound_task_review(&session, generation)
@@ -786,7 +783,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let path = string_field(fields, "path")?;
         let mut original = optional_string_field(fields, "original")?;
         let view = match string_field(fields, "view")?.as_str() {
@@ -820,7 +817,6 @@ impl Context {
         let task_range = if view == DiffView::Task {
             check_bound_baseline(&session, fields)?;
             let baseline = session.baseline.as_deref().ok_or_else(invalid_baseline)?;
-            self.check_identity(&session).await?;
             let state =
                 ops::state_token(&self.backend, &session.root, internal_request_id()).await?;
             Some((baseline, state))
@@ -839,7 +835,7 @@ impl Context {
         let token = task_range
             .as_ref()
             .map_or_else(|| session.token(), |(_, state)| state.token.clone());
-        let query = CursorBody {
+        let query = DiffQuery {
             repo: session.key.clone(),
             identity: session.identity.digest.clone(),
             baseline: session.baseline.clone(),
@@ -902,7 +898,7 @@ impl Context {
         let consumed = diff.offset + diff.lines.len() as u32;
         let token = query.token.clone();
         let next = (consumed < diff.total_lines).then(|| {
-            Cursor(CursorBody {
+            Cursor::for_query(&DiffQuery {
                 offset: consumed,
                 ..query
             })
@@ -925,7 +921,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let request = history_request(fields)?;
         let generation = self.backend.scheduler.current_generation(&session.key);
         check_cancel(cancel)?;
@@ -955,7 +951,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let relative = string_field(fields, "path")?;
         let request = history_request(fields)?;
         let generation = self.backend.scheduler.current_generation(&session.key);
@@ -987,7 +983,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let oid = string_field(fields, "oid")?;
         let parent = optional_text_field(fields, "parent")?;
         let generation = self.backend.scheduler.current_generation(&session.key);
@@ -1015,7 +1011,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let oid = string_field(fields, "oid")?;
         let parent = optional_text_field(fields, "parent")?;
         let relative = string_field(fields, "path")?;
@@ -1058,7 +1054,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let head = string_field(fields, "head")?;
         let base = optional_text_field(fields, "base")?;
         let generation = self.backend.scheduler.current_generation(&session.key);
@@ -1086,7 +1082,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let generation = self.backend.scheduler.current_generation(&session.key);
         check_cancel(cancel)?;
         let listing = sync::branch_list(
@@ -1105,7 +1101,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let generation = self.backend.scheduler.current_generation(&session.key);
         check_cancel(cancel)?;
         let state = tags::tag_state(
@@ -1124,7 +1120,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let generation = self.backend.scheduler.current_generation(&session.key);
         check_cancel(cancel)?;
         let state = sync::remote_state(
@@ -1143,7 +1139,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let include_untracked = field(fields, "includeUntracked")
             .map(|value| value.as_bool().unwrap_or(true))
             .unwrap_or(true);
@@ -1167,7 +1163,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let source = string_field(fields, "source")?;
         let target = optional_text_field(fields, "target")?;
         let generation = self.backend.scheduler.current_generation(&session.key);
@@ -1190,7 +1186,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let generation = self.backend.scheduler.current_generation(&session.key);
         check_cancel(cancel)?;
         let merge = resolve::merge_session(
@@ -1209,7 +1205,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let relative = string_field(fields, "path")?;
         let generation = self.backend.scheduler.current_generation(&session.key);
         check_cancel(cancel)?;
@@ -1231,7 +1227,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let paths = match field(fields, "paths") {
             Some(_) => paths_field(fields)?,
             None => vec![session.key.clone()],
@@ -1248,7 +1244,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let generation = self.backend.scheduler.current_generation(&session.key);
         check_cancel(cancel)?;
         let tracking = sync::branch_tracking(
@@ -1268,7 +1264,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let generation = self.backend.scheduler.current_generation(&session.key);
         check_cancel(cancel)?;
         let state = sync::branch_state(
@@ -1288,7 +1284,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let remote = string_field(fields, "remote")?;
         check_cancel(cancel)?;
         let tags = tags::tag_remote_state(&self.backend, &session.key, &remote).await?;
@@ -1302,7 +1298,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let oid = string_field(fields, "oid")?;
         let generation = self.backend.scheduler.current_generation(&session.key);
         check_cancel(cancel)?;
@@ -1325,7 +1321,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let base = optional_text_field(fields, "base")?.unwrap_or_default();
         let head = string_field(fields, "head")?;
         let relative = string_field(fields, "path")?;
@@ -1368,7 +1364,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let relative = optional_text_field(fields, "relative")?.unwrap_or_default();
         let include_ignored = bool_field(fields, "includeIgnored");
         let generation = self.backend.scheduler.current_generation(&session.key);
@@ -1396,7 +1392,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let relative = string_field(fields, "relative")?;
         let offset = optional_u64_field(fields, "offset")?.unwrap_or(0);
         let limit = optional_u64_field(fields, "limit")?
@@ -1427,7 +1423,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let source: crate::git::preview::PreviewSource = deserialize_field(fields, "source")?;
         let download = bool_field(fields, "download");
         let generation = self.backend.scheduler.current_generation(&session.key);
@@ -1454,7 +1450,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let mut source: DocumentSource = deserialize_field(fields, "source")?;
         // 来源绑定到当前打开的仓库：另一棵工作树的 source 不能被当成本仓库的文件。
         if source.repository.is_none() {
@@ -1492,7 +1488,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let mut source: DocumentSource = deserialize_field(fields, "source")?;
         if source.repository.is_none() {
             source.repository = Some(session.key.clone());
@@ -1521,7 +1517,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let url = string_field(fields, "url")?;
         // 只接受明确的 http(s) 外链：validate_web_url 同时拒绝其它协议与本机路径。
         document::validate_web_url(&url)?;
@@ -1541,7 +1537,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let query = optional_text_field(fields, "query")?.unwrap_or_default();
         let directory = optional_text_field(fields, "directory")?;
         let include_ignored = bool_field(fields, "includeIgnored");
@@ -1573,7 +1569,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let query = optional_text_field(fields, "query")?.unwrap_or_default();
         let scope: RepositorySearchScope = deserialize_field(fields, "scope")?;
         let include_ignored = bool_field(fields, "includeIgnored");
@@ -1605,7 +1601,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let relative = string_field(fields, "relative")?;
         let generation = self.backend.scheduler.current_generation(&session.key);
         check_cancel(cancel)?;
@@ -1631,7 +1627,7 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let relative = string_field(fields, "relative")?;
         let generation = self.backend.scheduler.current_generation(&session.key);
         check_cancel(cancel)?;
@@ -1693,7 +1689,7 @@ impl Context {
 
     /// 新建终端会话：在远端仓库根解析登录 shell，客户端不能指定程序与本机路径。
     async fn terminal_create(&self, fields: &Map<String, Value>) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let profile = optional_text_field(fields, "profile")?;
         let manager = Arc::clone(&self.terminal);
         let path = session.key.clone();
@@ -1755,7 +1751,7 @@ impl Context {
 
     /// 重启：只对已退出的会话生效，仍在运行时拒绝，避免替换正在跑的命令。
     async fn terminal_restart(&self, fields: &Map<String, Value>) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.repo_session(fields).await?;
         let id = string_field(fields, "sessionId")?;
         self.check_terminal_owner(&self.terminal.repo_of(&id)?, &session.key)?;
         let manager = Arc::clone(&self.terminal);
@@ -1768,7 +1764,8 @@ impl Context {
 
     /// 关闭：先终止 shell 及其子进程，确认结束后才移除会话；重复关闭是幂等的。
     async fn terminal_close(&self, fields: &Map<String, Value>) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        // An orphaned session must remain closable after its worktree disappears.
+        let session = self.session_by_key(fields)?;
         let id = string_field(fields, "sessionId")?;
         // 关闭也是跨仓库可达的破坏性操作：先确认会话属于当前打开的工作树。
         // 会话已不存在时按幂等处理（重复关闭仍然是 `closed: true`），不在这里报未知。
@@ -1846,6 +1843,7 @@ impl Context {
         }
         let request_digest = request_digest(op, fields);
         let expected = string_field(fields, "stateToken")?;
+        session.git_dir_identity.check(&session.git_dir)?;
         // 跨进程写锁：同一 common Git dir 在任一时刻只有一个 agent 在写。
         let lock = {
             let git_dir = session.git_dir.clone();
@@ -1856,6 +1854,7 @@ impl Context {
                 })??
         };
         self.check_identity(&session).await?;
+        session.git_dir_identity.check(&session.git_dir)?;
         let store = ReceiptStore::new(&session.git_dir);
         if let Some(existing) = store.read(&operation_id)? {
             if existing.request_digest != request_digest || existing.op != op.name() {
@@ -2509,7 +2508,10 @@ impl Context {
     }
 
     fn receipt(&self, fields: &Map<String, Value>) -> Result<Value, AppError> {
-        let session = self.session(fields)?;
+        let session = self.session_by_key(fields)?;
+        // worktreeRemove can delete the root while its common Git directory
+        // still holds the operation's receipt.
+        session.git_dir_identity.check(&session.git_dir)?;
         let operation_id = string_field(fields, "operationId")?;
         let store = ReceiptStore::new(&session.git_dir);
         // 回执文件存在但读不出来时不能回答「没有记录」：那会让客户端以为可以重发。
@@ -2574,7 +2576,19 @@ impl Context {
         }
     }
 
+    async fn repo_session(&self, fields: &Map<String, Value>) -> Result<Session, AppError> {
+        let session = self.session(fields)?;
+        self.check_identity(&session).await?;
+        Ok(session)
+    }
+
     fn session(&self, fields: &Map<String, Value>) -> Result<Session, AppError> {
+        let session = self.session_by_key(fields)?;
+        session.identity.check_root(&session.root)?;
+        Ok(session)
+    }
+
+    fn session_by_key(&self, fields: &Map<String, Value>) -> Result<Session, AppError> {
         let repo = string_field(fields, "repo")?;
         let slot = self
             .session
@@ -2619,8 +2633,8 @@ impl Context {
     }
 }
 /// 一次性差异游标：绑定仓库、状态令牌、查询与下一页偏移。
-#[derive(Serialize, Deserialize, PartialEq)]
-struct CursorBody {
+#[derive(Serialize)]
+struct DiffQuery {
     repo: String,
     identity: String,
     baseline: Option<String>,
@@ -2631,25 +2645,41 @@ struct CursorBody {
     context: u32,
 }
 
-struct Cursor(CursorBody);
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+struct Cursor {
+    offset: u32,
+    query_digest: String,
+}
 
 impl Cursor {
+    fn for_query(query: &DiffQuery) -> Self {
+        use sha2::{Digest, Sha256};
+        // Keep the entire query binding independent of path length. The
+        // desktop can still read the next offset from the cursor.
+        let bytes = serde_json::to_vec(query).expect("a diff query is always serializable");
+        Self {
+            offset: query.offset,
+            query_digest: format!("{:x}", Sha256::digest(bytes)),
+        }
+    }
+
     fn encode(&self) -> String {
-        let bytes = serde_json::to_vec(&self.0).unwrap_or_default();
+        let bytes = serde_json::to_vec(self).expect("a diff cursor is always serializable");
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
     }
 
     fn decode(raw: &str) -> Result<Self, AppError> {
+        if raw.len() > MAX_DIFF_CURSOR_BYTES {
+            return Err(cursor_expired());
+        }
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(raw.as_bytes())
-            .map_err(|_| AppError::new("cursor_expired", "差异游标无效，请重新读取第一页。"))?;
-        let body: CursorBody = serde_json::from_slice(&bytes)
-            .map_err(|_| AppError::new("cursor_expired", "差异游标无效，请重新读取第一页。"))?;
-        Ok(Self(body))
+            .map_err(|_| cursor_expired())?;
+        serde_json::from_slice(&bytes).map_err(|_| cursor_expired())
     }
 
-    fn check(&self, query: &CursorBody) -> Result<(), AppError> {
-        if &self.0 == query {
+    fn check(&self, query: &DiffQuery) -> Result<(), AppError> {
+        if self == &Self::for_query(query) {
             Ok(())
         } else {
             Err(cursor_expired())
@@ -2693,13 +2723,6 @@ fn review_file_paths(review: Option<&TaskReview>) -> Option<Vec<&str>> {
         paths.sort_unstable();
         paths
     })
-}
-
-fn worktree_changed() -> AppError {
-    AppError::new(
-        "target_changed",
-        "远端工作树身份已变化，请从原任务重新打开。",
-    )
 }
 
 fn cursor_expired() -> AppError {

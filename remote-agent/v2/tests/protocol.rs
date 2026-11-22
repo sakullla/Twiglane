@@ -1205,6 +1205,128 @@ fn review_binding_rejects_bad_baselines_and_a_different_worktree() {
 }
 
 #[test]
+#[cfg(unix)]
+fn requests_reject_replacing_an_open_worktree_at_the_same_path() {
+    for with_baseline in [false, true] {
+        let fixture = Fixture::new("original-identity");
+        fixture.init();
+        fixture.write("note.txt", "original working tree\n");
+        fixture.commit_all("original history");
+        let replacement = Fixture::new("replacement-identity");
+        replacement.init();
+        replacement.write("note.txt", "replacement working tree\n");
+        replacement.commit_all("replacement history");
+
+        let mut agent = fixture.agent();
+        let opened = open(&mut agent, &fixture.repo_str());
+        let repo = &opened["repo"];
+        if with_baseline {
+            let head = &opened["snapshot"]["branch"]["headOid"];
+            agent.ok(
+                "bound-open",
+                "open",
+                json!({ "path": fixture.repo_str(), "baseline": head,
+                    "worktreeIdentity": opened["worktreeIdentity"] }),
+            );
+        }
+        std::fs::rename(&fixture.repo, fixture.repo.with_file_name("moved")).unwrap();
+        std::fs::rename(&replacement.repo, &fixture.repo).unwrap();
+
+        for (op, request) in [
+            ("status", json!({ "repo": repo })),
+            ("history", json!({ "repo": repo })),
+            ("fileContent", json!({ "repo": repo, "relative": "note.txt" })),
+            ("receipt", json!({ "repo": repo, "operationId": "old-action" })),
+        ] {
+            assert_eq!(agent.error_code("replacement", op, request), "target_changed");
+        }
+        let cancelled = agent.ok("cancel-after-move", "cancel", json!({ "targetId": "old-request" }));
+        assert_eq!(cancelled["cancelled"], json!(false));
+        let closed = agent.ok(
+            "close-after-move",
+            "terminalClose",
+            json!({ "repo": repo, "sessionId": "already-closed" }),
+        );
+        assert_eq!(closed["closed"], json!(true));
+
+        agent.ok("direct-reopen", "open", json!({ "path": fixture.repo_str() }));
+        let current = agent.ok("current-file", "fileContent", json!({ "repo": repo, "relative": "note.txt" }));
+        assert_eq!(current["content"]["lines"], json!(["replacement working tree"]));
+    }
+}
+
+#[test]
+fn requests_verify_git_identity_when_the_worktree_root_stays_in_place() {
+    let fixture = Fixture::new("original-gitdir");
+    fixture.init();
+    fixture.write("note.txt", "original\n");
+    fixture.commit_all("original");
+    let replacement = Fixture::new("replacement-gitdir");
+    replacement.init();
+    replacement.write("note.txt", "replacement\n");
+    replacement.commit_all("replacement");
+
+    let linked = fixture.repo.with_file_name("linked");
+    let linked_path = linked.to_str().unwrap();
+    git(
+        &fixture.repo,
+        &fixture.config,
+        &["worktree", "add", "--detach", linked_path],
+    );
+    let mut agent = fixture.agent();
+    let opened = open(&mut agent, linked_path);
+    let repo = &opened["repo"];
+    std::fs::write(
+        linked.join(".git"),
+        format!("gitdir: {}\n", replacement.repo.join(".git").display()),
+    )
+    .unwrap();
+
+    assert_eq!(
+        agent.error_code("redirected-history", "history", json!({ "repo": repo })),
+        "target_changed",
+    );
+    assert_eq!(
+        agent.error_code("redirected-content", "fileContent", json!({ "repo": repo, "relative": "note.txt" })),
+        "target_changed",
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn task_diff_cursors_round_trip_with_a_long_path() {
+    let fixture = Fixture::new("long-diff-path");
+    fixture.init();
+    let directory = vec!["a".repeat(218); 14].join("/");
+    let path = format!("{directory}/note.txt");
+    assert!(path.len() > 3000);
+    fixture.write(&path, "old\n");
+    fixture.commit_all("base");
+    let head = git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD"]);
+    fixture.write(&path, "one\ntwo\nthree\n");
+
+    let mut agent = fixture.agent();
+    let opened = agent.ok(
+        "long-open",
+        "open",
+        json!({ "path": fixture.repo_str(), "baseline": head.trim() }),
+    );
+    let mut request = json!({ "repo": opened["repo"], "path": path, "view": "task", "limit": 1 });
+    let first = agent.ok("long-first", "diff", request.clone());
+    let cursor = first["nextCursor"].as_str().expect("next page cursor");
+    assert!(cursor.len() <= 256);
+    request["offset"] = json!(1);
+    request["cursor"] = json!(cursor);
+    let second = agent.ok("long-next", "diff", request.clone());
+    assert_eq!(second["diff"]["offset"], json!(1));
+    assert_eq!(second["diff"]["lines"].as_array().unwrap().len(), 1);
+    request["context"] = json!(0);
+    assert_eq!(agent.error_code("changed-query", "diff", request.clone()), "cursor_expired");
+    request["cursor"] = json!("x".repeat(257));
+    assert_eq!(agent.error_code("oversized-cursor", "diff", request), "cursor_expired");
+}
+
+#[test]
 fn history_search_file_history_and_commit_diff_page_the_selected_range() {
     let fixture = Fixture::new("history");
     fixture.init();
@@ -2058,6 +2180,12 @@ fn linked_worktrees_are_listed_and_removable_from_the_agent() {
     );
     assert_eq!(removed["receipt"]["state"], json!("completed"));
     assert!(!linked.exists());
+    let receipt = second.ok(
+        "removed-worktree-receipt",
+        "receipt",
+        json!({ "repo": linked_str, "operationId": "op-worktree-remove-1" }),
+    );
+    assert_eq!(receipt["receipt"], removed["receipt"]);
 
     let refused = agent.error_code(
         "worktree-remove-main",

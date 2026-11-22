@@ -12,6 +12,7 @@ use crate::git::schedule::{internal_request_id, JobKind};
 pub struct WorktreeIdentity {
     pub path: String,
     pub digest: String,
+    root: DirectoryIdentity,
 }
 
 impl WorktreeIdentity {
@@ -50,8 +51,8 @@ impl WorktreeIdentity {
         let git_dir = dunce::canonicalize(Path::new(raw)).map_err(|_| unavailable())?;
         let path = wire_path(root)?;
         let git_path = wire_path(&git_dir)?;
-        let (root_device, root_file) = directory_identity(root)?;
-        let (git_device, git_file) = directory_identity(&git_dir)?;
+        let root = DirectoryIdentity::read(root)?;
+        let git = DirectoryIdentity::read(&git_dir)?;
         let host = gethostname::gethostname()
             .into_string()
             .map_err(|_| unavailable())?;
@@ -66,8 +67,8 @@ impl WorktreeIdentity {
         // Preserve the wire bytes produced by the Cliora source and the v1 agent.
         let wire = json!([
             host,
-            [path, root_device, root_file],
-            [git_path, git_device, git_file]
+            [path, root.0, root.1],
+            [git_path, git.0, git.1]
         ]);
         let mut ascii = String::new();
         for character in wire.to_string().chars() {
@@ -81,8 +82,33 @@ impl WorktreeIdentity {
             }
         }
         let digest = format!("{:x}", Sha256::digest(ascii.as_bytes()));
-        Ok(Self { path, digest })
+        Ok(Self { path, digest, root })
     }
+
+    pub fn check_root(&self, root: &Path) -> Result<(), AppError> {
+        self.root.check(root)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct DirectoryIdentity(u64, u64);
+
+impl DirectoryIdentity {
+    pub fn read(path: &Path) -> Result<Self, AppError> {
+        directory_identity(path)
+    }
+
+    pub fn check(self, path: &Path) -> Result<(), AppError> {
+        if Self::read(path).ok() == Some(self) {
+            Ok(())
+        } else {
+            Err(worktree_changed())
+        }
+    }
+}
+
+pub fn worktree_changed() -> AppError {
+    AppError::new("target_changed", "远端工作树身份已变化，请重新打开。")
 }
 
 fn unavailable() -> AppError {
@@ -114,18 +140,18 @@ fn wire_path(path: &Path) -> Result<String, AppError> {
 }
 
 #[cfg(unix)]
-fn directory_identity(path: &Path) -> Result<(u64, u64), AppError> {
+fn directory_identity(path: &Path) -> Result<DirectoryIdentity, AppError> {
     use std::os::unix::fs::MetadataExt;
 
     let metadata = std::fs::metadata(path).map_err(|_| unavailable())?;
     if !metadata.is_dir() {
         return Err(unavailable());
     }
-    Ok((metadata.dev(), metadata.ino()))
+    Ok(DirectoryIdentity(metadata.dev(), metadata.ino()))
 }
 
 #[cfg(windows)]
-fn directory_identity(path: &Path) -> Result<(u64, u64), AppError> {
+fn directory_identity(path: &Path) -> Result<DirectoryIdentity, AppError> {
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
@@ -147,5 +173,5 @@ fn directory_identity(path: &Path) -> Result<(u64, u64), AppError> {
         return Err(unavailable());
     }
     let file = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
-    Ok((u64::from(info.dwVolumeSerialNumber), file))
+    Ok(DirectoryIdentity(u64::from(info.dwVolumeSerialNumber), file))
 }

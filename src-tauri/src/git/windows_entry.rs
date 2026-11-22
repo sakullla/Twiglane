@@ -3,6 +3,7 @@
 
 use super::windows_trash::{final_path, identity, info, pin_parents, verify_tree, Identity};
 use super::*;
+use std::io::Write;
 use std::mem::{offset_of, size_of};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::OpenOptionsExt;
@@ -22,13 +23,137 @@ use windows_sys::Wdk::Storage::FileSystem::{
 };
 use windows_sys::Win32::Foundation::{RtlNtStatusToDosError, OBJ_CASE_INSENSITIVE, UNICODE_STRING};
 use windows_sys::Win32::Storage::FileSystem::{
-    DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
-    FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
+    ReplaceFileW, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, SYNCHRONIZE,
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
 static COPY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn open_edit_file(path: &Path, share: u32, delete_access: bool) -> Result<fs::File, AppError> {
+    let file = fs::OpenOptions::new()
+        .access_mode(FILE_GENERIC_READ | if delete_access { DELETE } else { 0 })
+        .share_mode(share)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(|_| changed_edit_target())?;
+    if info(&file)?.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+        != 0
+    {
+        return Err(changed_edit_target());
+    }
+    Ok(file)
+}
+
+pub(super) fn replace_edit_file(
+    boundary: &EditBoundary,
+    relative: &Path,
+    expected: &str,
+    bytes: &[u8],
+    observe: &mut impl FnMut(EditSaveStage),
+) -> Result<(), AppError> {
+    let destination = Destination::bind(boundary, relative)?;
+    let share = FILE_SHARE_READ | FILE_SHARE_DELETE;
+    let original = open_edit_file(&destination.path, share | FILE_SHARE_WRITE, false)?;
+    let original_path = final_path(&original)?;
+    ensure_editable_location(boundary, &original_path)?;
+    let original_id = identity(&original)?;
+    verify_edit_digest(&original, expected)?;
+
+    let temporary_name = format!(
+        ".twiglane-edit-{}-{}",
+        std::process::id(),
+        COPY_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+    );
+    let temporary = relative.with_file_name(&temporary_name);
+    let stage_path = destination.path.with_file_name(&temporary_name);
+    let staged = create_relative(
+        destination.parent(),
+        OsStr::new(&temporary_name),
+        true,
+        true,
+    )?;
+    let mut draft = match create_relative(&staged, OsStr::new("draft"), false, true) {
+        Ok(file) => file,
+        Err(error) => return Err(rollback(staged, Vec::new(), error)),
+    };
+    let prepared = (|| {
+        draft.write_all(bytes).map_err(edit_io_error)?;
+        draft.sync_all().map_err(edit_io_error)?;
+        observe(EditSaveStage::Prepared);
+        // Deny data writers on the verified file while Windows replaces its
+        // name. Delete sharing allows ReplaceFileW to retain the displaced file.
+        let current = open_edit_file(&destination.path, share, false)?;
+        if identity(&current)? != original_id || final_path(&current)? != original_path {
+            return Err(changed_edit_target());
+        }
+        verify_edit_digest(&current, expected)?;
+        Ok(current)
+    })();
+    let current = match prepared {
+        Ok(current) => current,
+        Err(error) => return Err(rollback(staged, vec![draft], error)),
+    };
+    observe(EditSaveStage::Publishing);
+    drop(draft);
+    let wide_path = |path: &Path| {
+        path.as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>()
+    };
+    let replaced = wide_path(&destination.path);
+    let replacement = wide_path(&stage_path.join("draft"));
+    let original_backup = stage_path.join("original");
+    let backup = wide_path(&original_backup);
+    // SAFETY: all paths are live NUL-terminated buffers. The destination's
+    // ancestors and the exclusively created staging directory remain pinned.
+    if unsafe {
+        ReplaceFileW(
+            replaced.as_ptr(),
+            replacement.as_ptr(),
+            backup.as_ptr(),
+            0,
+            ptr::null(),
+            ptr::null(),
+        )
+    } == 0
+    {
+        // ReplaceFileW can fail after moving the original name. Keep both
+        // possible versions so the caller can verify the actual result.
+        return Err(edit_needs_reconciliation(&temporary));
+    }
+    observe(EditSaveStage::Published);
+    let preserve = || {
+        let mut error = edit_needs_reconciliation(&temporary);
+        let name = OsStr::new("draft-recovery");
+        if let Ok(mut file) = create_relative(&staged, name, false, true) {
+            if file.write_all(bytes).and_then(|()| file.sync_all()).is_ok() {
+                let path = temporary.join(name);
+                error
+                    .message
+                    .push_str(&format!("本次编辑草稿另保留在 {}。", display_path(&path)));
+            } else {
+                let _ = dispose(file);
+            }
+        }
+        error
+    };
+    let displaced = open_edit_file(&original_backup, share, true).map_err(|_| preserve())?;
+    if identity(&displaced).ok() != Some(original_id)
+        || verify_edit_digest(&displaced, expected).is_err()
+    {
+        return Err(preserve());
+    }
+    drop(current);
+    drop(original);
+    if !dispose(displaced) || !dispose(staged) {
+        return Err(edit_needs_reconciliation(&temporary));
+    }
+    Ok(())
+}
 
 pub(super) fn validate_name(name: &OsStr) -> Result<(), AppError> {
     if is_git_metadata_name(name) {
@@ -168,6 +293,9 @@ fn create_relative(
         };
     let mut handle = ptr::null_mut();
     let mut status_block = IO_STATUS_BLOCK::default();
+    // ReplaceFileW opens the directory containing its backup for changes.
+    // The pinned directory allows this access while still excluding rename.
+    let share = FILE_SHARE_READ | if directory { FILE_SHARE_WRITE } else { 0 };
     // SAFETY: the parent, one-component UTF-16 name and output buffers live
     // through this synchronous call. FILE_CREATE cannot open an existing name.
     let status = unsafe {
@@ -178,7 +306,7 @@ fn create_relative(
             &mut status_block,
             ptr::null(),
             FILE_ATTRIBUTE_NORMAL,
-            FILE_SHARE_READ,
+            share,
             FILE_CREATE,
             options,
             ptr::null(),
@@ -390,6 +518,7 @@ fn cleanup_failed() -> AppError {
         "entry_cleanup_failed",
         "复制目标未发布，部分临时条目无法清理。",
     )
+    .after_unconfirmed_write()
 }
 
 pub(super) fn move_entry(
@@ -411,6 +540,87 @@ mod tests {
     use super::*;
 
     #[test]
+    fn late_reparse_target_does_not_redirect_the_edit() {
+        let workspace = tempfile::tempdir().unwrap();
+        let base = dunce::canonicalize(workspace.path()).unwrap();
+        let root = base.join("repo");
+        fs::create_dir(&root).unwrap();
+        let boundary = EditBoundary {
+            root: root.clone(),
+            git_dirs: vec![],
+        };
+        let target = root.join("note.txt");
+        let outside = base.join("outside.txt");
+        fs::write(&outside, b"outside\n").unwrap();
+        fs::write(&target, b"original\n").unwrap();
+        let probe = root.join("probe");
+        if let Err(error) = std::os::windows::fs::symlink_file(&outside, &probe) {
+            assert_eq!(error.raw_os_error(), Some(1314), "{error}");
+            eprintln!("Windows account lacks file symlink permission; reparse race not executed");
+            return;
+        }
+        fs::remove_file(probe).unwrap();
+
+        let error = replace_edit_file(
+            &boundary,
+            Path::new("note.txt"),
+            &sha256_hex(b"original\n"),
+            b"draft\n",
+            &mut |stage| {
+                if stage == EditSaveStage::Publishing {
+                    fs::rename(&target, root.join("earlier.txt")).unwrap();
+                    std::os::windows::fs::symlink_file(&outside, &target).unwrap();
+                }
+            },
+        )
+        .unwrap_err();
+        assert!(error.write_unconfirmed);
+        assert!(fs::symlink_metadata(&target).unwrap().is_symlink());
+        assert_eq!(fs::read(&outside).unwrap(), b"outside\n");
+    }
+
+    #[test]
+    fn editing_preserves_the_file_acl_and_named_streams() {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(workspace.path()).unwrap();
+        let boundary = EditBoundary {
+            root: root.clone(),
+            git_dirs: vec![],
+        };
+        let target = root.join("note.txt");
+        let stream = root.join("note.txt:twiglane-test");
+        fs::write(&target, b"alpha\n").unwrap();
+        fs::write(&stream, b"secondary stream").unwrap();
+        let acl = |extra: &[&str]| {
+            let result = std::process::Command::new("icacls.exe")
+                .arg(&target)
+                .args(extra)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            result.stdout
+        };
+        acl(&["/grant", "*S-1-5-32-545:R"]);
+        let original_acl = acl(&[]);
+
+        replace_edit_file(
+            &boundary,
+            Path::new("note.txt"),
+            &sha256_hex(b"alpha\n"),
+            b"updated\n",
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"updated\n");
+        assert_eq!(acl(&[]), original_acl);
+        assert_eq!(fs::read(stream).unwrap(), b"secondary stream");
+    }
+
+    #[test]
     fn publishing_through_the_bound_handle_preserves_a_late_target() {
         let workspace = tempfile::tempdir().unwrap();
         let root = dunce::canonicalize(workspace.path()).unwrap();
@@ -420,7 +630,8 @@ mod tests {
         };
         let target = Destination::bind(&boundary, Path::new("target.txt")).unwrap();
         ensure_unoccupied(&target.path).unwrap();
-        let prepared = create_relative(target.parent(), OsStr::new("staging"), false, true).unwrap();
+        let prepared =
+            create_relative(target.parent(), OsStr::new("staging"), false, true).unwrap();
         fs::write(&target.path, "另一个进程已创建目标").unwrap();
         assert!(publish(&prepared, &target.path).is_err());
         assert_eq!(

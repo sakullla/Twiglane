@@ -3445,6 +3445,102 @@ fn a_large_file_preview_requires_the_file_reply_budget() {
 }
 
 #[test]
+#[cfg(unix)]
+fn file_edit_preserves_bom_crlf_and_unix_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new("edit-unix-format");
+    fixture.init();
+    let target = fixture.repo.join("note.txt");
+    std::fs::write(&target, b"\xef\xbb\xbfalpha\r\nbeta\r\n").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+    fixture.commit_all("init");
+    let mut agent = fixture.agent();
+    let repo = fixture.repo_str();
+    let opened = open(&mut agent, &repo);
+    let edit = agent.ok("unix-read", "editSnapshot", json!({"repo": repo, "relative": "note.txt"}));
+    assert_eq!(edit["edit"]["bom"], json!(true));
+    assert_eq!(edit["edit"]["lineEnding"], json!("crlf"));
+    let saved = agent.ok("unix-save", "editSave", json!({
+        "repo": repo, "stateToken": opened["stateToken"], "operationId": "op-unix-edit-format",
+        "path": "note.txt", "expectedDigest": edit["edit"]["digest"], "content": "alpha\nupdated\n",
+    }));
+    assert_eq!(saved["receipt"]["state"], json!("completed"));
+    assert_eq!(std::fs::read(&target).unwrap(), b"\xef\xbb\xbfalpha\r\nupdated\r\n");
+    assert_eq!(std::fs::metadata(target).unwrap().permissions().mode() & 0o777, 0o640);
+}
+
+#[test]
+#[cfg(unix)]
+fn file_effects_survive_failed_status_refreshes_with_pending_receipts() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for op in ["createEntry", "editSave"] {
+        let fixture = Fixture::new("pending-file-post-write");
+        fixture.init();
+        if op == "editSave" {
+            fixture.write("note.txt", "original\n");
+            fixture.commit_all("init");
+        }
+        let marker = fixture.root.path().join("fail-post-write-status");
+        std::fs::write(&marker, b"enabled").unwrap();
+        let watch = fixture.repo.join("note.txt");
+        let executable = fixture.root.path().join("git-with-failing-status");
+        std::fs::write(&executable, r#"#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = status ] && [ -f "$TWIGLANE_TEST_FAIL_STATUS" ] && [ -f "$TWIGLANE_TEST_FILE" ]; then
+    if [ "$TWIGLANE_TEST_WRITE" = createEntry ] || grep -qx 'draft' "$TWIGLANE_TEST_FILE"; then
+      echo 'injected failure after the file mutation' >&2
+      exit 1
+    fi
+  fi
+done
+exec git "$@"
+"#).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let settings = fixture.state.join("twiglane/agent/v2/settings.json");
+        {
+            let mut agent = fixture.agent();
+            open(&mut agent, &fixture.repo_str());
+        }
+        let mut data: Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+        data["gitExecutable"] = json!(executable);
+        std::fs::write(settings, data.to_string()).unwrap();
+        let extra = [
+            ("TWIGLANE_TEST_FAIL_STATUS", marker.to_str().unwrap()),
+            ("TWIGLANE_TEST_FILE", watch.to_str().unwrap()),
+            ("TWIGLANE_TEST_WRITE", op),
+        ];
+        let repo = fixture.repo_str();
+        let operation_id = "op-file-post-write";
+        let fields = {
+            let mut agent = Agent::start_with(&fixture.state, &fixture.config, &extra);
+            let opened = open(&mut agent, &repo);
+            let mut fields = json!({
+                "repo": repo, "operationId": operation_id, "stateToken": opened["stateToken"], "path": "note.txt",
+            });
+            if op == "editSave" {
+                let edit = agent.ok("post-edit", "editSnapshot", json!({"repo": repo, "relative": "note.txt"}));
+                fields["expectedDigest"] = edit["edit"]["digest"].clone();
+                fields["content"] = json!("draft\n");
+            } else {
+                fields["kind"] = json!("file");
+            }
+            assert_eq!(agent.error_code("post-write", op, fields.clone()), "operation_pending");
+            assert_eq!(std::fs::read(&watch).unwrap(), if op == "editSave" { b"draft\n".as_slice() } else { b"".as_slice() });
+            fields
+        };
+        std::fs::remove_file(&marker).unwrap();
+        let mut reconnected = Agent::start_with(&fixture.state, &fixture.config, &extra);
+        open(&mut reconnected, &repo);
+        let receipt = reconnected.ok("read-pending", "receipt", json!({"repo": repo, "operationId": operation_id}));
+        assert_eq!(receipt["receipt"]["state"], json!("pending"));
+        assert_eq!(receipt["receipt"]["reason"], json!("status_failed"));
+        assert_eq!(reconnected.error_code("replay-pending", op, fields), "operation_pending");
+    }
+}
+
+#[test]
 fn saving_a_file_requires_the_expected_content_version() {
     let fixture = Fixture::new("io-save");
     fixture.init();
@@ -3477,6 +3573,9 @@ fn saving_a_file_requires_the_expected_content_version() {
         }),
     );
     assert_eq!(stale, "edit_conflict");
+    let rejected = agent.ok("read-conflict", "receipt", json!({"repo": repo, "operationId": "op-io-save-stale"}));
+    assert_eq!(rejected["receipt"]["state"], json!("failed"));
+    assert_eq!(rejected["receipt"]["reason"], json!("edit_conflict"));
     assert_eq!(
         std::fs::read_to_string(fixture.repo.join("notes/a.txt")).unwrap(),
         "alpha\n",

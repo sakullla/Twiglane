@@ -2446,11 +2446,58 @@ fn edit_conflict(message: &str) -> AppError {
     AppError::new("edit_conflict", message)
 }
 
+fn changed_edit_target() -> AppError {
+    edit_conflict("文件在编辑期间已被外部修改，保存未写入，未覆盖外部内容。")
+}
+
+fn edit_io_error(error: std::io::Error) -> AppError {
+    AppError::new("edit_write_failed", format!("无法准备文件保存。{}", crate::redact::redact_error_text(&error.to_string())))
+}
+
+fn verify_edit_digest(file: &fs::File, expected: &str) -> Result<(), AppError> {
+    let metadata = file.metadata().map_err(edit_io_error)?;
+    if !metadata.is_file() || metadata.len() > MAX_EDIT_BYTES as u64 {
+        return Err(changed_edit_target());
+    }
+    if metadata.permissions().readonly() {
+        return Err(AppError::new("edit_write_failed", "文件是只读的，保存未写入任何内容。"));
+    }
+    let mut input = file;
+    input.seek(SeekFrom::Start(0)).map_err(edit_io_error)?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    input.take(MAX_EDIT_BYTES as u64 + 1).read_to_end(&mut bytes).map_err(edit_io_error)?;
+    if bytes.len() > MAX_EDIT_BYTES || sha256_hex(&bytes) != expected {
+        return Err(changed_edit_target());
+    }
+    Ok(())
+}
+
+fn edit_needs_reconciliation(backup: &Path) -> AppError {
+    AppError::new("edit_verify", format!("无法确认保存结果。请核对工作区目标和保留的临时内容：{}。", display_path(backup)))
+        .after_unconfirmed_write()
+}
+
+#[derive(PartialEq, Eq)]
+enum EditSaveStage {
+    Prepared,
+    Publishing,
+    Published,
+}
+
+struct EditSaveInput<'a> {
+    path: &'a str,
+    relative: &'a str,
+    expected_digest: &'a str,
+    content: &'a str,
+    generation: u64,
+    request_id: u64,
+}
+
 /// 编辑保存：在仓库写锁内复核 generation、路径能力与 expectedDigest，
 /// 只有全部吻合才用同目录临时文件原子替换目标工作区文件。
 ///
 /// 不运行 Git 写命令：不暂存、不提交、不推送、不合入。成功后 generation 前进，
-/// 返回重新读取的新快照；失败时原文件保持不变。
+/// 返回重新读取的新快照；发布后无法核对时保留待确认结果。
 pub async fn repository_edit_save(
     backend: &Backend,
     path: &str,
@@ -2460,6 +2507,17 @@ pub async fn repository_edit_save(
     generation: u64,
     request_id: u64,
 ) -> Result<RepositoryEditSnapshot, AppError> {
+    repository_edit_save_with(backend, EditSaveInput {
+        path, relative, expected_digest, content, generation, request_id,
+    }, |_| {}).await
+}
+
+async fn repository_edit_save_with(
+    backend: &Backend,
+    input: EditSaveInput<'_>,
+    mut observe: impl FnMut(EditSaveStage),
+) -> Result<RepositoryEditSnapshot, AppError> {
+    let EditSaveInput { path, relative, expected_digest, content, generation, request_id } = input;
     let root = canonical_existing(&validate_input_path(path)?)?;
     let relative_path = review_path(relative)?;
     let relative_text = display_path(&relative_path);
@@ -2499,9 +2557,7 @@ pub async fn repository_edit_save(
         ));
     }
     if current.digest.as_deref() != Some(expected.as_str()) {
-        return Err(edit_conflict(
-            "文件在编辑期间已被外部修改，保存未写入，未覆盖外部内容。",
-        ));
+        return Err(changed_edit_target());
     }
     let bytes = encode_edit_text(content, current.bom, current.line_ending);
     if bytes.len() > MAX_EDIT_BYTES {
@@ -2510,45 +2566,19 @@ pub async fn repository_edit_save(
             format!("保存后的内容超过 {MAX_EDIT_BYTES} 字节上限，未写入任何文件。"),
         ));
     }
-    // 写锁内再解析一次目标：父目录在读取后被换成符号链接时也不能写到仓库外。
-    let target = canonical_existing(&root.join(&relative_path))?;
-    if !target.starts_with(&root) {
-        return Err(edit_conflict("文件路径已不再安全，保存未写入。"));
-    }
-    ensure_editable_location(&boundary, &target)?;
-    let metadata = fs::metadata(&target).map_err(|error| {
-        AppError::new(
-            "edit_write_failed",
-            format!(
-                "无法确认文件状态，未写入任何内容。{}",
-                crate::redact::redact_error_text(&error.to_string())
-            ),
-        )
-    })?;
-    if metadata.permissions().readonly() {
-        return Err(AppError::new(
-            "edit_write_failed",
-            "文件是只读的，保存未写入任何内容。",
-        ));
-    }
-    if let Err(error) = crate::atomic::atomic_write_preserving_permissions(&target, &bytes) {
-        let detail = crate::redact::redact_error_text(&error.to_string());
-        if fs::symlink_metadata(&target).is_ok() {
-            return Err(AppError::new(
-                "edit_write_failed",
-                format!("无法写入文件，原文件保持不变。{detail}"),
-            ));
+    if let Err(error) = replace_edit_file(&boundary, &relative_path, &expected, &bytes, &mut observe) {
+        if error.write_unconfirmed {
+            guard.mark_written();
+            return Err(error.with_generation(guard.finish()));
         }
-        // 极少数替换失败会先移除原文件：如实告知，新内容保留在错误中指出的临时文件里。
-        guard.mark_written();
-        return Err(AppError::new(
-            "edit_write_failed",
-            format!("替换文件失败且原文件已被移除，新内容保留在临时文件中。{detail}"),
-        ));
+        return Err(error);
     }
     guard.mark_written();
 
-    let written = read_edit_file(&boundary, &relative_path, &Shutdown::new())?;
+    let written = match read_edit_file(&boundary, &relative_path, &Shutdown::new()) {
+        Ok(written) => written,
+        Err(error) => return Err(error.after_unconfirmed_write().with_generation(guard.finish())),
+    };
     let expected_after = sha256_hex(&bytes);
     if written.state != RepositoryEditState::Editable
         || written.digest.as_deref() != Some(expected_after.as_str())
@@ -2556,10 +2586,22 @@ pub async fn repository_edit_save(
         return Err(AppError::new(
             "edit_verify",
             "文件已写入，但保存后的内容无法确认，请重新读取。",
-        ));
+        ).after_unconfirmed_write().with_generation(guard.finish()));
     }
     let new_generation = guard.finish();
     Ok(edit_snapshot(new_generation, &relative_text, written))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use secure_entry_ops::replace_edit_file;
+#[cfg(windows)]
+use windows_entry::replace_edit_file;
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn replace_edit_file(
+    _: &EditBoundary, _: &Path, _: &str, _: &[u8], _: &mut impl FnMut(EditSaveStage),
+) -> Result<(), AppError> {
+    Err(platform_entry_unsupported())
 }
 
 /// 新建项目的封闭类型；前端不能用任意文件类型或永久删除选项扩大命令能力。
@@ -2674,7 +2716,8 @@ struct BoundTrashTarget;
 mod secure_entry_ops {
     use super::*;
     use std::ffi::{CStr, CString, OsString};
-    use std::os::fd::{FromRawFd, RawFd};
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, FromRawFd, RawFd};
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
@@ -3296,6 +3339,120 @@ mod secure_entry_ops {
         }
     }
 
+    fn exchange_edit_names(directory: &Directory, draft: &OsStr, target: &OsStr) -> std::io::Result<()> {
+        let draft = c_string(draft)?;
+        let target = c_string(target)?;
+        // SAFETY: the directory descriptor is pinned and both C strings are live.
+        #[cfg(target_os = "linux")]
+        let result = unsafe {
+            libc::renameat2(directory.fd, draft.as_ptr(), directory.fd, target.as_ptr(), libc::RENAME_EXCHANGE)
+        };
+        #[cfg(target_os = "macos")]
+        let result = unsafe {
+            libc::renameatx_np(directory.fd, draft.as_ptr(), directory.fd, target.as_ptr(), libc::RENAME_SWAP)
+        };
+        if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+    }
+
+    fn open_edit_at(directory: &Directory, name: &OsStr) -> Result<(fs::File, NodeStat), AppError> {
+        let fd = open_at(directory.fd, name, libc::O_RDONLY | libc::O_NONBLOCK)
+            .map_err(|_| changed_edit_target())?;
+        // SAFETY: open_at returned a uniquely owned file descriptor.
+        let file = unsafe { fs::File::from_raw_fd(fd) };
+        let stat = stat_fd(file.as_raw_fd()).map_err(edit_io_error)?;
+        if stat.kind() != Some(OrdinaryEntryKind::File) {
+            return Err(changed_edit_target());
+        }
+        Ok((file, stat))
+    }
+
+    fn preserve_ambiguous_edit(
+        directory: &Directory, backup: &Path, bytes: &[u8],
+    ) -> AppError {
+        let mut error = edit_needs_reconciliation(backup);
+        let Ok((mut recovery, mut draft)) = TemporaryEntry::file(directory) else {
+            return error;
+        };
+        if draft.set_permissions(fs::Permissions::from_mode(0o600))
+            .and_then(|()| draft.write_all(bytes))
+            .and_then(|()| draft.sync_all()).is_ok()
+        {
+            recovery.active = false;
+            let path = backup.with_file_name(&recovery.name);
+            error.message.push_str(&format!("本次编辑草稿另保留在 {}。", display_path(&path)));
+            // SAFETY: the descriptor is owned by directory and remains live.
+            let _ = unsafe { libc::fsync(directory.fd) };
+        }
+        error
+    }
+
+    pub(super) fn replace_edit_file(
+        boundary: &EditBoundary, relative: &Path, expected: &str, bytes: &[u8], observe: &mut impl FnMut(EditSaveStage),
+    ) -> Result<(), AppError> {
+        let parent = SecureRoot::open(boundary)?.parent(relative, true)?;
+        let (original, original_stat) = open_edit_at(&parent.directory, &parent.name)?;
+        verify_edit_digest(&original, expected)?;
+        let (mut temporary, mut draft) = TemporaryEntry::file(&parent.directory).map_err(edit_io_error)?;
+        let backup = relative.with_file_name(&temporary.name);
+        let draft_stat = match stat_fd(draft.as_raw_fd()) {
+            Ok(stat) => stat,
+            Err(_) => {
+                temporary.active = false;
+                return Err(edit_needs_reconciliation(&backup));
+            }
+        };
+        let at = |name: &OsStr| stat_at(parent.directory.fd, name).ok().map(|stat| stat.identity);
+        let preparation = (|| {
+            draft.set_permissions(fs::Permissions::from_mode(original_stat.mode)).map_err(edit_io_error)?;
+            draft.write_all(bytes).map_err(edit_io_error)?;
+            draft.sync_all().map_err(edit_io_error)?;
+            observe(EditSaveStage::Prepared);
+            let current_parent = SecureRoot::open(boundary)?.parent(relative, true)?;
+            if current_parent.ancestors != parent.ancestors {
+                return Err(changed_edit_target());
+            }
+            let (current, stat) = open_edit_at(&parent.directory, &parent.name)?;
+            if stat != original_stat {
+                return Err(changed_edit_target());
+            }
+            verify_edit_digest(&current, expected)
+        })();
+        if at(&temporary.name) != Some(draft_stat.identity) {
+            temporary.active = false;
+            return Err(edit_needs_reconciliation(&backup));
+        }
+        if let Err(error) = preparation {
+            return finish_temporary(&mut temporary, Err(error));
+        }
+        observe(EditSaveStage::Publishing);
+        if let Err(error) = exchange_edit_names(&parent.directory, &temporary.name, &parent.name) {
+            if at(&temporary.name) == Some(draft_stat.identity)
+                && at(&parent.name) == Some(original_stat.identity)
+            {
+                return finish_temporary(&mut temporary, Err(edit_io_error(error)));
+            }
+            temporary.active = false;
+            return Err(edit_needs_reconciliation(&backup));
+        }
+        // The temporary name now holds the displaced object. Keep it on
+        // any ambiguity. Swapping back could replace a third writer's work.
+        temporary.active = false;
+        observe(EditSaveStage::Published);
+        let (displaced, stat) = open_edit_at(&parent.directory, &temporary.name)
+            .map_err(|_| preserve_ambiguous_edit(&parent.directory, &backup, bytes))?;
+        if stat != original_stat
+            || verify_edit_digest(&displaced, expected).is_err()
+            || at(&temporary.name) != Some(stat.identity)
+            || at(&parent.name) != Some(draft_stat.identity)
+        {
+            return Err(preserve_ambiguous_edit(&parent.directory, &backup, bytes));
+        }
+        unlink_at(&parent.directory, &temporary.name, 0).map_err(|_| edit_needs_reconciliation(&backup))?;
+        // SAFETY: the descriptor is owned by parent.directory and remains live.
+        let _ = unsafe { libc::fsync(parent.directory.fd) };
+        Ok(())
+    }
+
     fn rename_exclusive(
         source: &Directory,
         source_name: &OsStr,
@@ -3450,7 +3607,7 @@ mod secure_entry_ops {
             Err(std::io::Error::new(ErrorKind::AlreadyExists, "temporary names exhausted"))
         }
 
-        fn directory(parent: &'a Directory) -> std::io::Result<Self> {
+        fn directory(parent: &'a Directory) -> Result<Self, AppError> {
             for _ in 0..100 {
                 let name = Self::candidate();
                 match mkdir_at(parent, &name) {
@@ -3460,8 +3617,9 @@ mod secure_entry_ops {
                             Err(error) => {
                                 // mkdir 已成功但打开失败时也必须清掉这个空临时目录。
                                 return match unlink_at(parent, &name, libc::AT_REMOVEDIR) {
-                                    Ok(()) => Err(error),
-                                    Err(cleanup) => Err(cleanup),
+                                    Ok(()) => Err(entry_io_error(error, "无法安全打开临时目录。")),
+                                    Err(_) => Err(AppError::new("entry_cleanup_failed", "临时目录已创建，无法确认清理结果。")
+                                        .after_unconfirmed_write()),
                                 };
                             }
                         };
@@ -3473,10 +3631,10 @@ mod secure_entry_ops {
                         });
                     }
                     Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
-                    Err(error) => return Err(error),
+                    Err(error) => return Err(entry_io_error(error, "无法创建临时目录。")),
                 }
             }
-            Err(std::io::Error::new(ErrorKind::AlreadyExists, "temporary names exhausted"))
+            Err(AppError::new("entry_exists", "临时目录名称已被占用。"))
         }
 
         fn publish(&mut self, target_name: &OsStr) -> std::io::Result<()> {
@@ -3548,7 +3706,7 @@ mod secure_entry_ops {
                         "{} 本次临时内容也未能完全清理；最终目标未发布，请检查临时项。",
                         error.message
                     ),
-                )),
+                ).after_unconfirmed_write()),
             },
         }
     }
@@ -3606,8 +3764,7 @@ mod secure_entry_ops {
                 return finish_temporary(&mut temporary, result);
             }
             OrdinaryEntryKind::Directory => {
-                let temporary = TemporaryEntry::directory(&target.directory)
-                    .map_err(|error| entry_io_error(error, "无法创建复制临时目录。"))?;
+                let temporary = TemporaryEntry::directory(&target.directory)?;
                 // 临时目录已落盘：即使后续内容复制失败，也属写锁内已发生的部分写入。
                 *wrote = true;
                 temporary
@@ -4119,8 +4276,7 @@ mod secure_entry_ops {
                 let (fd, opened) =
                     open_bound_source(target, libc::O_RDONLY | libc::O_DIRECTORY)?;
                 let source = Directory { fd };
-                let mut temporary = TemporaryEntry::directory(files)
-                    .map_err(|error| entry_io_error(error, "无法在回收站创建临时目录。"))?;
+                let mut temporary = TemporaryEntry::directory(files)?;
                 let result = (|| {
                     let destination = temporary
                         .directory
@@ -4659,15 +4815,15 @@ where
     // 的部分写入，必须推进代次；纯校验失败（未落盘）则不推进。
     let mut wrote = false;
     let result = operation(&boundary, &mut wrote);
-    if wrote {
+    if wrote || result.as_ref().is_err_and(|error| error.write_unconfirmed) {
         guard.mark_written();
     }
     let new_generation = guard.finish();
     match result {
         Ok(()) => settle_read!(backend, &root, new_generation, |current| {
             crate::git::ops::refresh_status(backend, path, current, internal_request_id()).await
-        }),
-        Err(error) if wrote => Err(error.with_generation(new_generation)),
+        }).map_err(AppError::after_unconfirmed_write),
+        Err(error) if wrote || error.write_unconfirmed => Err(error.with_generation(new_generation)),
         Err(error) => Err(error),
     }
 }
@@ -5149,6 +5305,7 @@ pub async fn repository_delete_entries(
     let mut deleted: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
     let mut failures: Vec<BatchDeleteFailure> = Vec::new();
+    let mut unconfirmed = false;
     let mut removed_under: Vec<PathBuf> = Vec::new();
     for target in &targets {
         if removed_under.iter().any(|parent| target.starts_with(parent)) {
@@ -5165,15 +5322,25 @@ pub async fn repository_delete_entries(
                 deleted.push(relative);
             }
             Ok(false) => skipped.push(relative),
-            Err(error) => failures.push(BatchDeleteFailure {
-                path: relative,
-                code: error.code,
-                message: error.message,
-            }),
+            Err(error) => {
+                if error.write_unconfirmed {
+                    guard.mark_written();
+                    unconfirmed = true;
+                }
+                failures.push(BatchDeleteFailure {
+                    path: relative,
+                    code: error.code,
+                    message: error.message,
+                });
+            }
         }
     }
 
     let generation = guard.finish();
+    if unconfirmed {
+        return Err(AppError::new(mode.error_code(), "部分删除效果无法核对，请先检查工作树。")
+            .after_unconfirmed_write().with_generation(generation));
+    }
     // 只刷新一次状态：部分失败也要把真实结果交给界面，而不是让它停在旧列表上。
     // 刷新失败时仍返回新代次，调用方据此重新同步，绝不把失败改写成成功。
     match crate::git::ops::refresh_status(backend, path, generation, internal_request_id()).await {
@@ -5187,7 +5354,7 @@ pub async fn repository_delete_entries(
             mode.error_code(),
             format!("已删除 {} 项，但状态刷新失败；请手动刷新。", deleted.len()),
         )
-        .with_generation(generation)),
+        .after_unconfirmed_write().with_generation(generation)),
         Err(_) => Err(AppError::new(
             "batch_delete_failed",
             "删除没有完成，状态也未能刷新；未执行任何删除。",
@@ -5199,18 +5366,25 @@ pub async fn repository_delete_entries(
 /// 单条删除：目标已不在工作区返回 `Ok(false)`，其余错误原样上抛。
 fn delete_entry_once(boundary: &EditBoundary, relative: &Path, mode: DeleteMode) -> Result<bool, AppError> {
     let outcome = match mode {
-        DeleteMode::Trash => trash_entry(boundary, relative, move_to_system_trash).map(|(_, state)| state),
-        DeleteMode::Permanent => trash_entry(boundary, relative, permanently_delete_entry).map(|(_, state)| state),
+        DeleteMode::Trash => trash_entry(boundary, relative, move_to_system_trash),
+        DeleteMode::Permanent => trash_entry(boundary, relative, permanently_delete_entry),
     };
     match outcome {
-        Ok(EntryTargetState::Missing) => Ok(true),
-        Ok(EntryTargetState::Present) | Ok(EntryTargetState::Unknown) => Err(AppError::new(
-            mode.error_code(),
-            match mode {
-                DeleteMode::Trash => "回收站没有移除目标；内容仍在原处。",
-                DeleteMode::Permanent => "永久删除没有移除目标；内容仍保留。",
-            },
-        )),
+        Ok((Ok(()), EntryTargetState::Missing)) => Ok(true),
+        Ok((adapter, state)) => {
+            if state != EntryTargetState::Present
+                || adapter.as_ref().is_err_and(|error| mode.permanent() || error.write_unconfirmed)
+            {
+                return Err(AppError::new(mode.error_code(), "无法核对目标及其内容是否仍在原处。").after_unconfirmed_write());
+            }
+            Err(AppError::new(
+                mode.error_code(),
+                match mode {
+                    DeleteMode::Trash => "回收站没有移除目标；内容仍在原处。",
+                    DeleteMode::Permanent => "永久删除没有移除目标；内容仍保留。",
+                },
+            ))
+        }
         // 选择之后、删除之前已经不在工作区的条目：打开目标时就会以缺失报告。
         Err(error) if error.code == "path_missing" || error.code == "entry_missing" => Ok(false),
         Err(error) => Err(error),
@@ -7958,6 +8132,106 @@ mod tests {
         assert_eq!(fs::read(root.join("note.txt")).unwrap(), b"mines\n");
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    #[tokio::test]
+    async fn edit_save_rechecks_digest_and_identity_after_the_draft_is_synced() {
+        for replace_identity in [false, true] {
+            let fixture = crate::test_support::git_fixture("repository-edit-publication-conflict");
+            let root = fixture.repo("repo");
+            git(&root, &["init", "-b", "main"]);
+            let backend = fixture.backend();
+            let target = root.join("note.txt");
+            fs::write(&target, b"alpha\n").unwrap();
+            let error = repository_edit_save_with(&backend, EditSaveInput {
+                path: root.to_str().unwrap(), relative: "note.txt",
+                expected_digest: &sha256_hex(b"alpha\n"), content: "draft\n", generation: 1, request_id: 1,
+            }, |stage| {
+                assert!(stage == EditSaveStage::Prepared);
+                assert!(fs::read_dir(&root).unwrap().filter_map(Result::ok)
+                    .any(|entry| entry.file_name().to_string_lossy().starts_with(".twiglane-")));
+                if replace_identity {
+                    fs::rename(&target, root.join("earlier.txt")).unwrap();
+                    fs::write(&target, b"alpha\n").unwrap();
+                } else {
+                    fs::write(&target, b"bravo\n").unwrap();
+                }
+            }).await.unwrap_err();
+            assert_eq!(error.code, "edit_conflict");
+            assert!(!error.write_unconfirmed);
+            assert_eq!(fs::read(&target).unwrap(), if replace_identity { b"alpha\n" } else { b"bravo\n" });
+            assert!(!fs::read_dir(&root).unwrap().filter_map(Result::ok)
+                .any(|entry| entry.file_name().to_string_lossy().starts_with(".twiglane-")));
+            assert_eq!(backend.scheduler.current_generation(&repo_key(&root)), 1);
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    #[tokio::test]
+    async fn edit_save_keeps_both_versions_when_publication_displaces_a_late_writer() {
+        let fixture = crate::test_support::git_fixture("repository-edit-publication-race");
+        let root = fixture.repo("repo");
+        git(&root, &["init", "-b", "main"]);
+        let backend = fixture.backend();
+        let target = root.join("note.txt");
+        fs::write(&target, b"alpha\n").unwrap();
+        let error = repository_edit_save_with(&backend, EditSaveInput {
+            path: root.to_str().unwrap(), relative: "note.txt",
+            expected_digest: &sha256_hex(b"alpha\n"), content: "draft\n", generation: 1, request_id: 1,
+        }, |stage| {
+            match stage {
+                EditSaveStage::Publishing => {
+                    fs::rename(&target, root.join("earlier.txt")).unwrap();
+                    fs::write(&target, b"later\n").unwrap();
+                }
+                EditSaveStage::Published => fs::write(&target, b"third\n").unwrap(),
+                EditSaveStage::Prepared => {}
+            }
+        }).await.unwrap_err();
+        assert_eq!(error.code, "edit_verify");
+        assert!(error.write_unconfirmed);
+        assert_eq!(error.generation, Some(2));
+        let mut versions = vec![fs::read(&target).unwrap()];
+        for entry in fs::read_dir(&root).unwrap().map(Result::unwrap) {
+            if !entry.file_name().to_string_lossy().starts_with(".twiglane-") {
+                continue;
+            }
+            assert!(error.message.contains(&*entry.file_name().to_string_lossy()));
+            if entry.file_type().unwrap().is_dir() {
+                for version in fs::read_dir(entry.path()).unwrap().map(Result::unwrap) {
+                    versions.push(fs::read(version.path()).unwrap());
+                }
+            } else {
+                versions.push(fs::read(entry.path()).unwrap());
+            }
+        }
+        assert!(versions.iter().any(|version| version == b"later\n"), "{versions:?}");
+        assert!(versions.iter().any(|version| version == b"draft\n"), "{versions:?}");
+        assert_eq!(fs::read(&target).unwrap(), b"third\n");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+    #[tokio::test]
+    async fn edit_save_marks_failed_post_publication_verification_as_unconfirmed() {
+        let fixture = crate::test_support::git_fixture("repository-edit-post-publication");
+        let root = fixture.repo("repo");
+        git(&root, &["init", "-b", "main"]);
+        let backend = fixture.backend();
+        let target = root.join("note.txt");
+        fs::write(&target, b"alpha\n").unwrap();
+        let error = repository_edit_save_with(&backend, EditSaveInput {
+            path: root.to_str().unwrap(), relative: "note.txt",
+            expected_digest: &sha256_hex(b"alpha\n"), content: "draft\n", generation: 1, request_id: 1,
+        }, |stage| {
+            if stage == EditSaveStage::Published {
+                fs::write(&target, b"next\n").unwrap();
+            }
+        }).await.unwrap_err();
+        assert_eq!(error.code, "edit_verify");
+        assert!(error.write_unconfirmed);
+        assert_eq!(error.generation, Some(2));
+        assert_eq!(fs::read(&target).unwrap(), b"next\n");
+    }
+
     #[tokio::test]
     async fn edit_save_rejects_files_that_stop_being_editable_after_the_snapshot() {
         let fixture = crate::test_support::git_fixture("repository-edit-save-capability");
@@ -8458,7 +8732,7 @@ mod tests {
         );
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     #[test]
     fn platforms_without_descriptor_relative_writes_fail_closed() {
         let boundary = EditBoundary {
@@ -8485,8 +8759,8 @@ mod tests {
         }
     }
 
-    /// 未实现的结构命令仍须失败关闭；Windows 回收站另有真实操作回归覆盖。
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    /// 未实现的结构命令仍须失败关闭。
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     #[tokio::test]
     async fn entry_commands_fail_closed_without_descriptor_relative_primitives() {
         let fixture = crate::test_support::git_fixture("repository-entry-unsupported-platform");

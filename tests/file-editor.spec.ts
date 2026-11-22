@@ -331,6 +331,21 @@ describe("编辑会话", () => {
     expect(mocks.api.repositoryEditSave.mock.calls.map((call) => call[2])).toEqual([DIGEST, DIGEST]);
   });
 
+  it("写入结果待确认时保留草稿和基线，且不会自动重发", async () => {
+    const editor = createFileEditor();
+    await editor.open(REPO, "src/app.ts", context());
+    const original = editor.session(REPO, "src/app.ts")!.baseDigest;
+    editor.input(REPO, "src/app.ts", "draft\n");
+    mocks.api.repositoryEditSave.mockRejectedValueOnce({
+      code: "write_pending",
+      message: "请核对工作区目标和保留的临时内容。",
+    });
+    const failed = await editor.save(REPO, "src/app.ts", context());
+    expect(failed).toMatchObject({ ok: false, code: "write_pending" });
+    expect(editor.session(REPO, "src/app.ts")).toMatchObject({ draft: "draft\n", baseDigest: original });
+    expect(mocks.api.repositoryEditSave).toHaveBeenCalledOnce();
+  });
+
   it("外部修改：干净会话换到新基线，dirty 草稿只标冲突；外部改回原样时冲突解除", async () => {
     const editor = createFileEditor();
     await editor.open(REPO, "src/app.ts", context());

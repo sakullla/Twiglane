@@ -1971,6 +1971,9 @@ impl Context {
                     // 取消、超时、网络中断：远端可能已经收到这次请求，按「结果未知」登记，
                     // 客户端据此核对而不是当成失败重发。
                     store.pending(receipt, &error.code)?;
+                    if error.write_unconfirmed {
+                        return Err(AppError::new("operation_pending", error.message));
+                    }
                 } else {
                     store.fail(receipt, &error.code)?;
                 }
@@ -1981,9 +1984,14 @@ impl Context {
         //
         // 读不到新状态不等于写入失败：worktreeRemove 删掉的正是被读取的那个工作区。
         // 这种情况仍然如实登记为 completed，只是不附令牌，由客户端重新打开仓库。
-        let state = ops::state_token(&self.backend, &session.root, internal_request_id())
-            .await
-            .ok();
+        let state = match ops::state_token(&self.backend, &session.root, internal_request_id()).await {
+            Ok(state) => Some(state),
+            Err(error) if matches!(op, WriteOp::EditSave | WriteOp::CreateEntry | WriteOp::CopyEntry | WriteOp::MoveEntry | WriteOp::DeleteEntries) => {
+                store.pending(receipt, error.code)?;
+                return Err(AppError::new("operation_pending", "文件操作已执行，写入后的状态无法核对。请重新连接并检查工作树。"));
+            }
+            Err(_) => None,
+        };
         if let Some(state) = state.as_ref() {
             session.set_state(state.clone());
         }
@@ -2851,6 +2859,9 @@ fn reject_undeclared(
 /// 远程写入在取消、超时、网络中断时结果未知：远端可能已经收到请求。
 /// 这类错误不能记成 failed，否则客户端会把一次可能成功的写入当成可重发。
 fn remote_write_unconfirmed(op: WriteOp, error: &AppError) -> bool {
+    if error.write_unconfirmed {
+        return true;
+    }
     matches!(
         op,
         WriteOp::Fetch

@@ -1838,6 +1838,7 @@ fn definitive_error(code: &str) -> bool {
             | "invalid_operation"
             | "invalid_patch"
             | "edit_conflict"
+            | "edit_write_failed"
             | "edit_digest"
             | "edit_content"
             | "entry_exists"
@@ -1955,6 +1956,11 @@ async fn finish_write(
                 }
                 _ => return Ok(unknown(&pending.operation_id)),
             }
+        }
+        Err(error) if !receipt_lookup && error.code == "operation_pending" => {
+            let mut result = pending_unknown(pending);
+            result["message"] = json!(error.message);
+            return Ok(result);
         }
         Err(error) if !receipt_lookup && definitive_error(&error.code) => {
             json!({"state":"failed","operationId":pending.operation_id,"code":error.code,"message":error.message})

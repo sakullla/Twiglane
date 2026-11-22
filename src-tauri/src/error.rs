@@ -7,6 +7,8 @@ pub struct AppError {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generation: Option<u64>,
+    #[serde(skip)]
+    pub(crate) write_unconfirmed: bool,
 }
 
 impl AppError {
@@ -15,11 +17,17 @@ impl AppError {
             code: code.into(),
             message: message.into(),
             generation: None,
+            write_unconfirmed: false,
         }
     }
 
     pub fn with_generation(mut self, generation: u64) -> Self {
         self.generation = Some(generation);
+        self
+    }
+
+    pub(crate) fn after_unconfirmed_write(mut self) -> Self {
+        self.write_unconfirmed = true;
         self
     }
 }

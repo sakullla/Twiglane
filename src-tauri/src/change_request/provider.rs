@@ -323,9 +323,8 @@ fn scrub(error: AppError, token: &str) -> AppError {
         return error;
     }
     AppError {
-        code: error.code,
         message: error.message.replace(token, "[令牌已隐藏]"),
-        generation: error.generation,
+        ..error
     }
 }
 

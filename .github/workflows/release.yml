@@ -75,17 +75,98 @@ jobs:
             });
             const params = { ...context.repo, tag_name: tag, target_commitish: sha,
               name: `Twiglane ${tag}`, draft: true, prerelease: false,
-              body: `${notes.body}\n\nWindows x64: NSIS 安装包；macOS Apple Silicon: DMG；Linux x64: deb/AppImage。\n\n各安装包内置 Linux x86_64 的远端 Git v2 组件。\n\n测试分发：Windows 未签名；macOS 使用固定自签证书，未经过 Apple 公证。需要系统 Git；Windows 缺少 WebView2 时安装器会联网下载。` };
+              body: `${notes.body}\n\nWindows x64: NSIS 安装包；macOS Apple Silicon: DMG；Linux x64: deb/AppImage。\n\n各安装包内置 Linux 和 macOS 的 x86_64、ARM64，以及 Windows x64 的已签名远端 Git 组件。\n\n测试分发：Windows 未签名；macOS 使用固定自签证书，未经过 Apple 公证。需要系统 Git；Windows 缺少 WebView2 时安装器会联网下载。` };
             const { data: release } = existing
               ? await github.rest.repos.updateRelease({ ...params, release_id: existing.id })
               : await github.rest.repos.createRelease(params);
             core.setOutput('release-id', release.id);
 
-  remote-agent-v2:
-    name: Build signed Linux x86_64 remote agent
+  remote-agent-v2-build:
+    name: Build remote agent (${{ matrix.target }})
     needs: gate
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            folder: Linux-x86_64
+            system: linux
+            arch: x86_64
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            folder: Linux-aarch64
+            system: linux
+            arch: aarch64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            folder: macOS-x86_64
+            system: macos
+            arch: x86_64
+          - os: macos-15
+            target: aarch64-apple-darwin
+            folder: macOS-aarch64
+            system: macos
+            arch: aarch64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            folder: Windows-x86_64
+            system: windows
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: remote-agent/v2 -> target
+          cache-bin: false
+      - name: Run protocol tests on the Linux release baseline
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo test --locked --manifest-path remote-agent/v2/Cargo.toml --test protocol
+      - name: Build and identify the target agent
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          AGENT_FOLDER: ${{ matrix.folder }}
+          AGENT_SYSTEM: ${{ matrix.system }}
+          AGENT_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --target "$TARGET" --manifest-path remote-agent/v2/Cargo.toml
+          binary=twiglane-agent-v2
+          if [ "$AGENT_SYSTEM" = windows ]; then binary+=.exe; fi
+          folder="agent-v2-staging/$AGENT_FOLDER"
+          mkdir -p "$folder"
+          cp "remote-agent/v2/target/$TARGET/release/$binary" "$folder/$binary"
+          "$folder/$binary" --probe | node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const probe = JSON.parse(readFileSync(0, "utf8"));
+            const version = /^version = "([^"]+)"/m.exec(readFileSync("remote-agent/v2/Cargo.toml", "utf8"))?.[1];
+            if (!version || probe.version !== version || probe.protocol !== 2 ||
+                probe.os !== process.env.AGENT_SYSTEM || probe.arch !== process.env.AGENT_ARCH) {
+              throw new Error(`Unexpected remote agent identity: ${JSON.stringify(probe)}`);
+            }'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: remote-agent-v2-part-${{ matrix.folder }}
+          path: agent-v2-staging/
+          if-no-files-found: error
+
+  remote-agent-v2:
+    name: Sign and assemble all remote agents
+    needs: [gate, remote-agent-v2-build]
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
         with:
@@ -95,27 +176,37 @@ jobs:
         with:
           node-version: 26
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: swatinem/rust-cache@v2
-        with:
-          workspaces: remote-agent/v2 -> target
-          cache-bin: false
-      - run: cargo test --locked --manifest-path remote-agent/v2/Cargo.toml --test protocol
-      - run: cargo build --locked --release --manifest-path remote-agent/v2/Cargo.toml
       - run: npm ci --prefer-offline --no-audit --no-fund
-      - name: Sign agent and verify its manifest
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: remote-agent-v2-part-*
+          merge-multiple: true
+          path: src-tauri/agent-v2/
+      - name: Install Minisign verifier
+        run: sudo apt-get update && sudo apt-get install -y minisign
+      - name: Sign and verify every binary and its digest statement
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
           agent_dir=src-tauri/agent-v2
-          agent="$agent_dir/Linux-x86_64/twiglane-agent-v2"
-          install -D -m 0755 remote-agent/v2/target/release/twiglane-agent-v2 "$agent"
-          version=$("$agent" --probe | jq -er '.version')
-          npm run tauri -- signer sign "$agent"
-          node scripts/remote-worktree/agent-v2-manifest.mjs --write "$agent_dir" --version "$version"
-          node scripts/remote-worktree/agent-v2-manifest.mjs --check "$agent_dir"
+          version=$(sed -nE 's/^version = "([^"]+)"$/\1/p' remote-agent/v2/Cargo.toml)
+          pubkey=$(node -p "Buffer.from(require('./src-tauri/tauri.conf.json').plugins.updater.pubkey, 'base64').toString().trim().split('\n').at(-1)")
+          for agent in "$agent_dir"/{Linux-x86_64,Linux-aarch64,macOS-x86_64,macOS-aarch64}/twiglane-agent-v2 "$agent_dir"/Windows-x86_64/twiglane-agent-v2.exe; do
+            digest=$(sha256sum "$agent" | cut -d' ' -f1)
+            statement="$RUNNER_TEMP/twiglane-agent-v2-digest.txt"
+            printf 'twiglane-agent-v2 sha256:%s\n' "$digest" > "$statement"
+            npm run tauri -- signer sign --app-version "$version" "$agent"
+            npm run tauri -- signer sign --app-version "$version" "$statement"
+            base64 --decode "$agent.sig" > "$RUNNER_TEMP/twiglane-agent-v2.minisig"
+            minisign -Vm "$agent" -P "$pubkey" -x "$RUNNER_TEMP/twiglane-agent-v2.minisig"
+            base64 --decode "$statement.sig" > "$RUNNER_TEMP/twiglane-agent-v2.minisig"
+            minisign -Vm "$statement" -P "$pubkey" -x "$RUNNER_TEMP/twiglane-agent-v2.minisig"
+            mv "$statement.sig" "$agent.digest.sig"
+          done
+          node scripts/remote-worktree/agent-v2-manifest.mjs --write "$agent_dir" --version "$version" --require-all
+          node scripts/remote-worktree/agent-v2-manifest.mjs --check "$agent_dir" --version "$version" --require-all
       - uses: actions/upload-artifact@v7
         with:
           name: remote-agent-v2
@@ -175,8 +266,8 @@ jobs:
           name: remote-agent-v2
           path: src-tauri/agent-v2/
       - name: Check bundled remote agent manifest
-        run: node scripts/remote-worktree/agent-v2-manifest.mjs --check src-tauri/agent-v2
-      - name: Sign the bundled remote agent
+        run: node scripts/remote-worktree/agent-v2-manifest.mjs --check src-tauri/agent-v2 --require-all
+      - name: Sign the bundled legacy remote agent
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}

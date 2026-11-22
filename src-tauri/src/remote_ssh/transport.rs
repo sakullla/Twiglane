@@ -1,9 +1,84 @@
-//! 远端命令：一条 POSIX sh 命令串，不拼接任何用户输入（只有校验过的十六进制摘要）。
-//!
-//! 不用 `sh -s` + 脚本管道，因为安装要从标准输入读产物；把脚本写成单条命令串后，
-//! 标准输入可以专用于产物字节，远端 shell 也只解析一次。
+//! 固定的 POSIX sh 和 Windows PowerShell 远端命令。标准输入专用于产物或协议字节。
+
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 use crate::error::AppError;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Shell {
+    Posix,
+    Windows,
+}
+
+pub(crate) const READY: &[u8] = b"twiglane-ready\n";
+pub(crate) const CONTINUE: &[u8] = b"T\n";
+
+const WINDOWS_COMMON: &str = include_str!("windows-agent.ps1");
+const WINDOWS_PROBE: &str = include_str!("windows-probe.ps1");
+const WINDOWS_INSTALL: &str = include_str!("windows-install.ps1");
+const WINDOWS_CONNECT: &str = include_str!("windows-connect.ps1");
+const WINDOWS_GATE: &str = r#"
+    [Console]::Write("twiglane-ready`n")
+    $gate = [Console]::OpenStandardInput()
+    if ($gate.ReadByte() -ne 84 -or $gate.ReadByte() -ne 10) { exit 7 }
+"#;
+const POSIX_GATE: &str =
+    "printf 'twiglane-ready\\n'; IFS= read -r gate && [ \"$gate\" = T ] || exit 7; ";
+
+fn windows_command(script: &str, digest: Option<&str>, gated: bool) -> String {
+    let mut command = String::new();
+    if let Some(digest) = digest {
+        command.push_str("$digest='");
+        command.push_str(digest);
+        command.push_str("'\n");
+    }
+    let gate = if gated { WINDOWS_GATE } else { "" };
+    for line in gate
+        .lines()
+        .chain(WINDOWS_COMMON.lines())
+        .chain(script.lines())
+    {
+        let line = line.trim();
+        if !line.is_empty() && !line.starts_with('#') {
+            command.push_str(line);
+            command.push('\n');
+        }
+    }
+    let encoded = STANDARD.encode(
+        command
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    );
+    format!("powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}")
+}
+
+impl Shell {
+    pub(crate) fn probe(self) -> String {
+        match self {
+            Self::Posix => probe(),
+            Self::Windows => windows_command(WINDOWS_PROBE, None, false),
+        }
+    }
+
+    pub(crate) fn install(self, digest: &str, gated: bool) -> Result<String, AppError> {
+        match self {
+            Self::Posix => install(digest).map(|cmd| {
+                if gated { format!("{POSIX_GATE}{cmd}") } else { cmd }
+            }),
+            Self::Windows => Ok(windows_command(WINDOWS_INSTALL, Some(checked_hex(digest)?), gated)),
+        }
+    }
+
+    pub(crate) fn connect(self, digest: &str, gated: bool) -> Result<String, AppError> {
+        match self {
+            Self::Posix => connect(digest).map(|cmd| {
+                if gated { format!("{POSIX_GATE}{cmd}") } else { cmd }
+            }),
+            Self::Windows => Ok(windows_command(WINDOWS_CONNECT, Some(checked_hex(digest)?), gated)),
+        }
+    }
+}
 
 fn hex(value: &str) -> bool {
     value.len() == 64
@@ -109,7 +184,7 @@ impl ProbeFields {
         if fields.system.is_empty() || fields.architecture.is_empty() {
             return Err(AppError::new(
                 "remote_unsupported",
-                "无法识别远端系统与架构（uname 未返回预期结果）。",
+                "无法识别远端系统与架构（探测命令未返回预期结果）。",
             ));
         }
         Ok(fields)
@@ -121,10 +196,10 @@ impl ProbeFields {
 pub(crate) fn host_keys(stderr: &str) -> Vec<String> {
     let mut keys: Vec<String> = Vec::new();
     for line in stderr.lines() {
-        let Some(rest) = line.split_once("Server host key: ") else {
+        let Some(rest) = line.strip_prefix("debug1: Server host key: ") else {
             continue;
         };
-        let key = rest.1.trim();
+        let key = rest.trim();
         if !key.is_empty() && !keys.iter().any(|seen| seen == key) {
             keys.push(key.to_string());
         }
@@ -181,5 +256,88 @@ mod tests {
             ProbeFields::parse("git=git version 2").unwrap_err().code,
             "remote_unsupported"
         );
+    }
+
+    #[test]
+    fn windows_commands_fit_the_default_cmd_shell_and_validate_digest_arguments() {
+        let digest = "a".repeat(64);
+        assert!(Shell::Windows.install("not a digest", true).is_err());
+        assert!(Shell::Windows.connect("not a digest", true).is_err());
+        for command in [
+            Shell::Windows.probe(),
+            Shell::Windows.install(&digest, true).unwrap(),
+            Shell::Windows.connect(&digest, true).unwrap(),
+        ] {
+            // cmd.exe 的总限制为 8191 字符，还需留出 OpenSSH 的 shell 参数。
+            assert!(command.len() < 8150, "command length: {}", command.len());
+            assert!(command.is_ascii());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_default_shell_installs_exact_bytes_and_preserves_the_old_digest() {
+        use sha2::{Digest, Sha256};
+        use std::io::Write;
+        use std::os::windows::process::CommandExt;
+        use std::process::{Command, Stdio};
+
+        let directory = tempfile::Builder::new()
+            .prefix("Twiglane remote 组件 ")
+            .tempdir_in(std::env::var_os("LOCALAPPDATA").unwrap())
+            .unwrap();
+        let run = |command: &str, input: &[u8]| {
+            let mut child = Command::new("cmd.exe")
+                .args(["/D", "/C"])
+                .raw_arg(command)
+                .env("LOCALAPPDATA", directory.path())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(input).unwrap();
+            child.wait_with_output().unwrap()
+        };
+        let output = run(&Shell::Windows.probe(), b"");
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            ProbeFields::parse(&String::from_utf8(output.stdout).unwrap())
+                .unwrap()
+                .system,
+            "Windows"
+        );
+        let agent_dir = directory.path().join("Twiglane/agent/v2");
+        assert!(!agent_dir.exists(), "探测不能创建安装目录");
+
+        let mut bytes = (0..=u8::MAX).cycle().take(201_537).collect::<Vec<_>>();
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        let install = Shell::Windows.install(&digest, true).unwrap();
+        let output = run(&install, &[CONTINUE, bytes.as_slice()].concat());
+        assert!(output.status.success(), "{output:?}");
+        assert!(output.stdout.starts_with(READY), "{output:?}");
+        let old = agent_dir.join(format!("twiglane-agent-v2-{digest}.exe"));
+        let pointer = agent_dir.join("current.sha256");
+        assert_eq!(std::fs::read(&old).unwrap(), bytes);
+        assert_eq!(std::fs::read_to_string(&pointer).unwrap(), digest);
+
+        let output = run(&install, b"T\nshort upload");
+        assert!(!output.status.success(), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("agent_digest_mismatch"));
+        assert_eq!(std::fs::read_to_string(&pointer).unwrap(), digest);
+        assert_eq!(std::fs::read(&old).unwrap(), bytes);
+
+        bytes.push(42);
+        let next = format!("{:x}", Sha256::digest(&bytes));
+        let install = Shell::Windows.install(&next, true).unwrap();
+        let output = run(&install, &[CONTINUE, bytes.as_slice()].concat());
+        assert!(output.status.success(), "{output:?}");
+        assert!(old.is_file(), "升级为不同摘要时不改写旧组件");
+        assert_eq!(std::fs::read_to_string(&pointer).unwrap(), next);
+        assert_eq!(
+            std::fs::read(agent_dir.join(format!("twiglane-agent-v2-{next}.exe"))).unwrap(),
+            bytes
+        );
+        assert_eq!(agent_dir.read_dir().unwrap().count(), 3);
     }
 }

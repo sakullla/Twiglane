@@ -1,4 +1,7 @@
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 /* ------------------------------------------------------------------ *
@@ -90,6 +93,52 @@ describe("远程 SSH 的命令边界", () => {
     expect(credential).toContain("pub fn remote_ssh()");
     const ssh = read("src-tauri/src/remote_ssh/mod.rs");
     expect(ssh).toContain("KeyringStore::remote_ssh()");
+  });
+});
+
+describe("远端组件发行清单", () => {
+  it("逐平台要求二进制和两种签名，并检查 Windows exe 的摘要", () => {
+    const root = mkdtempSync(join(tmpdir(), "twiglane-agent-manifest-"));
+    const run = (action: "--write" | "--check") =>
+      spawnSync(process.execPath, [
+        "scripts/remote-worktree/agent-v2-manifest.mjs", action, root,
+        "--version", "1.2.3", "--require-all",
+      ], { encoding: "utf8" });
+    try {
+      const unixTargets = ["Linux-x86_64", "Linux-aarch64", "macOS-x86_64", "macOS-aarch64"];
+      const windows = join(root, "Windows-x86_64", "twiglane-agent-v2.exe");
+      const writeArtifact = (path: string) => {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, Buffer.from([0, 10, 13, 127, 255]));
+        writeFileSync(`${path}.sig`, "c2ln");
+        writeFileSync(`${path}.digest.sig`, "YXR0");
+      };
+      for (const target of unixTargets) writeArtifact(join(root, target, "twiglane-agent-v2"));
+      const missing = run("--write");
+      expect(missing.status).toBe(1);
+      expect(missing.stderr).toContain("Windows-x86_64/twiglane-agent-v2.exe");
+      writeArtifact(windows);
+      expect(run("--write").status).toBe(0);
+      expect(run("--check").status).toBe(0);
+      const manifest = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8"));
+      expect(manifest.artifacts).toHaveLength(5);
+      expect(manifest.artifacts.find((entry: { system: string }) => entry.system === "Windows")).toMatchObject({
+        file: "Windows-x86_64/twiglane-agent-v2.exe",
+        architecture: "x86_64",
+        version: "1.2.3",
+        signature: "c2ln",
+        digestSignature: "YXR0",
+      });
+      writeFileSync(windows, "tampered");
+      expect(run("--check").status).toBe(1);
+      writeArtifact(windows);
+      unlinkSync(`${windows}.digest.sig`);
+      const missingSignature = run("--check");
+      expect(missingSignature.status).toBe(1);
+      expect(missingSignature.stderr).toContain(".exe.digest.sig");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

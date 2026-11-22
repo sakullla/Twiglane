@@ -87,6 +87,7 @@ if [ \"$has_g\" = 1 ]; then\n\
 fi\n\
 for last; do :; done\n\
 printf 'debug1: Server host key: ssh-ed25519 %s\\n' \"$STUB_HOST_KEY\" >&2\n\
+printf 'debug1: Sending command: %.900s\\n' \"$last\" >&2\n\
 exec sh -c \"$last\"\n";
 
 fn target() -> SshTarget {
@@ -359,6 +360,7 @@ async fn install_streams_the_signed_artifact_and_replaces_atomically() {
             file: "linux-x86_64/twiglane-agent-v2".into(),
             sha256: digest.clone(),
             signature: "c2lnbmF0dXJl".into(),
+            digest_signature: String::new(),
         }],
     };
     fs::write(
@@ -369,9 +371,10 @@ async fn install_streams_the_signed_artifact_and_replaces_atomically() {
 
     let credentials = FakeStore::default();
     let context = harness.context(&credentials);
+    let probe = probe_target(&context, &target()).await.unwrap();
     let offer = InstallOffer {
         target_id: "host-a".into(),
-        peer_revision: "f".repeat(64),
+        peer_revision: probe.peer_revision.clone(),
         digest: digest.clone(),
         version: "0.3.40".into(),
     };
@@ -381,7 +384,7 @@ async fn install_streams_the_signed_artifact_and_replaces_atomically() {
         *recorder.lock().unwrap() += 1;
         Ok(())
     });
-    upload(&context, &target(), &offer, &progress)
+    upload(&context, &target(), &offer, &probe, &progress)
         .await
         .unwrap();
 
@@ -419,6 +422,29 @@ async fn a_mismatched_upload_never_replaces_the_existing_agent() {
         before,
         "摘要不符不得替换已有组件"
     );
+}
+
+#[tokio::test]
+async fn a_changed_ssh_peer_never_receives_the_installation_gate() {
+    let harness = Harness::new("ssh-install-peer");
+    let credentials = FakeStore::default();
+    let mut context = harness.context(&credentials);
+    let probe = probe_target(&context, &target()).await.unwrap();
+    context
+        .exec
+        .env
+        .iter_mut()
+        .find(|(key, _)| key == "STUB_HOST_KEY")
+        .unwrap()
+        .1 = "SHA256:a-different-key".into();
+
+    let install = probe.shell.install(&"a".repeat(64), true).unwrap();
+    let error = spawn_connection(&context, &target(), &install, Some(&probe.peer_revision))
+        .await
+        .err()
+        .expect("变更的主机密钥必须拒绝写入");
+    assert_eq!(error.code, "target_changed");
+    assert!(!harness.agent_dir().exists());
 }
 
 #[tokio::test]

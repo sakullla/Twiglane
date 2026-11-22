@@ -18,7 +18,7 @@ mod transport;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -28,13 +28,14 @@ use sha2::{Digest, Sha256};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::Command;
+use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
 use uuid::Uuid;
 
 use crate::change_request::credential::validate_ssh_password;
 use crate::change_request::{CredentialStore, KeyringStore};
 use crate::error::AppError;
 use crate::git::ops::Backend;
+use crate::remote_worktree_transport::ScopedChild;
 use crate::state::{AppStore, SshTarget};
 
 use config::Snapshot;
@@ -275,6 +276,8 @@ pub struct Probe {
     /// 远端组件自述（`--probe` 的 JSON）。只给进程内使用，不进前端契约。
     #[serde(skip)]
     agent_probe: Option<Value>,
+    #[serde(skip)]
+    shell: transport::Shell,
     hops: Vec<String>,
 }
 
@@ -452,6 +455,24 @@ fn ssh_error(stderr: &str, code: Option<i32>) -> AppError {
             "远端还没有安装 Twiglane 远端组件，请先安装。",
         );
     }
+    for (reason, message) in [
+        (
+            "agent_probe_failed",
+            "无法读取 Windows 远端组件的安装状态。请检查登录账号的配置和目录权限。",
+        ),
+        (
+            "agent_install_failed",
+            "Windows 远端组件安装未完成。请检查登录账号的目录权限和磁盘空间后重试。",
+        ),
+        (
+            "agent_start_failed",
+            "无法启动 Windows 远端组件。请检查远端执行权限和已安装的组件。",
+        ),
+    ] {
+        if stderr.lines().any(|line| line.trim() == reason) {
+            return AppError::new(reason, message);
+        }
+    }
     match code {
         Some(code) => AppError::new(
             "ssh_failed",
@@ -463,36 +484,18 @@ fn ssh_error(stderr: &str, code: Option<i32>) -> AppError {
 
 async fn probe_target(context: &Context<'_>, target: &SshTarget) -> Result<Probe> {
     let snapshot = context.snapshot(target).await?;
-    let folder = Context::private_dir()?;
-    let mut command = context.build(
-        target,
-        &snapshot,
-        folder.path(),
-        &transport::probe(),
-        true,
-    )?;
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn().map_err(|_| ssh_unavailable())?;
-    let stdout = child.stdout.take().ok_or_else(ssh_failed)?;
-    let stderr = child.stderr.take().ok_or_else(ssh_failed)?;
-    let joined = async {
-        let stdout = read_bounded(stdout, DIAGNOSTIC_BYTES);
-        let stderr = read_bounded(stderr, DIAGNOSTIC_BYTES);
-        let wait = async { child.wait().await.map_err(|_| ssh_failed()) };
-        let (stdout, stderr, status) = tokio::try_join!(stdout, stderr, wait)?;
-        Ok::<_, AppError>((stdout, stderr, status))
-    };
-    let (stdout, stderr, status) = tokio::time::timeout(PROBE_TIMEOUT, joined)
-        .await
-        .map_err(|_| timed_out("探测"))??;
-    let stderr = stdout_text(&stderr);
+    // PowerShell 的调用只含 ASCII 参数。在 POSIX shell 中找不到它时再发 POSIX
+    // 探测。避免让 Windows 默认的 cmd.exe 解释 Unix 的重定向和管道。
+    let mut shell = transport::Shell::Windows;
+    let (mut stdout, mut stderr, mut status) = run_probe(context, target, &snapshot, shell).await?;
+    if status.code() == Some(127) {
+        shell = transport::Shell::Posix;
+        (stdout, stderr, status) = run_probe(context, target, &snapshot, shell).await?;
+    }
     if !status.success() {
         return Err(ssh_error(&stderr, status.code()));
     }
-    let fields = transport::ProbeFields::parse(&stdout_text(&stdout))?;
+    let fields = transport::ProbeFields::parse(&stdout)?;
     let (revision, identity) = peer_revision(&snapshot.revision, &transport::host_keys(&stderr))?;
     let agent = fields.agent.as_ref();
     let compatible = agent.is_some_and(|value| {
@@ -523,6 +526,7 @@ async fn probe_target(context: &Context<'_>, target: &SshTarget) -> Result<Probe
         agent_digest: fields.digest,
         agent_compatible: compatible,
         agent_probe: agent.cloned(),
+        shell,
         hops: snapshot
             .hops
             .iter()
@@ -531,15 +535,146 @@ async fn probe_target(context: &Context<'_>, target: &SshTarget) -> Result<Probe
     })
 }
 
+async fn run_probe(
+    context: &Context<'_>,
+    target: &SshTarget,
+    snapshot: &Snapshot,
+    shell: transport::Shell,
+) -> Result<(String, String, ExitStatus)> {
+    let folder = Context::private_dir()?;
+    let mut command = context.build(target, snapshot, folder.path(), &shell.probe(), true)?;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = ScopedChild::spawn(&mut command).map_err(|_| ssh_unavailable())?;
+    let stdout = child.take_stdout().ok_or_else(ssh_failed)?;
+    let stderr = child.take_stderr().ok_or_else(ssh_failed)?;
+    let joined = async {
+        let stdout = read_bounded(stdout, DIAGNOSTIC_BYTES);
+        let stderr = read_bounded(stderr, DIAGNOSTIC_BYTES);
+        let wait = async { child.wait().await.map_err(|_| ssh_failed()) };
+        let (stdout, stderr, status) = tokio::try_join!(stdout, stderr, wait)?;
+        Ok::<_, AppError>((stdout, stderr, status))
+    };
+    let (stdout, stderr, status) = tokio::time::timeout(PROBE_TIMEOUT, joined)
+        .await
+        .map_err(|_| timed_out("探测"))??;
+    Ok((stdout_text(&stdout), stdout_text(&stderr), status))
+}
+
+/// 同一个 SSH 子进程的登录确认和数据通道。发送继续字节后仍持有这组管道。
+pub(crate) struct AgentConnection {
+    pub(crate) child: ScopedChild,
+    pub(crate) stdin: ChildStdin,
+    pub(crate) stdout: ChildStdout,
+    pub(crate) stderr: ChildStderr,
+    pub(crate) folder: tempfile::TempDir,
+}
+
+async fn spawn_connection(
+    context: &Context<'_>,
+    target: &SshTarget,
+    remote: &str,
+    expected_peer_revision: Option<&str>,
+) -> Result<AgentConnection> {
+    let snapshot = context.snapshot(target).await?;
+    let folder = Context::private_dir()?;
+    let mut command = context.build(
+        target,
+        &snapshot,
+        folder.path(),
+        remote,
+        expected_peer_revision.is_some(),
+    )?;
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = ScopedChild::spawn(&mut command).map_err(|_| ssh_unavailable())?;
+    let mut stdin = child.take_stdin().ok_or_else(ssh_failed)?;
+    let mut stdout = child.take_stdout().ok_or_else(ssh_failed)?;
+    let mut stderr = child.take_stderr().ok_or_else(ssh_failed)?;
+    if let Some(expected) = expected_peer_revision {
+        let verify = async {
+            let verify_stderr = check_connection_peer(&mut stderr, &snapshot, remote, expected);
+            let wait_ready = async {
+                let mut ready = [0u8; transport::READY.len()];
+                stdout
+                    .read_exact(&mut ready)
+                    .await
+                    .map_err(|_| ssh_failed())?;
+                if ready != transport::READY {
+                    return Err(AppError::new(
+                        "remote_protocol",
+                        "远端未返回预期的 SSH 握手。",
+                    ));
+                }
+                Ok(())
+            };
+            // 身份校验和握手并行排空，以免带跳板的 SSH 诊断阻塞标准输出。
+            let (verified, ready) = tokio::join!(verify_stderr, wait_ready);
+            verified?;
+            ready?;
+            stdin
+                .write_all(transport::CONTINUE)
+                .await
+                .map_err(|_| ssh_failed())
+        };
+        tokio::time::timeout(PROBE_TIMEOUT, verify)
+            .await
+            .map_err(|_| timed_out("身份校验"))??;
+    }
+    Ok(AgentConnection {
+        child,
+        stdin,
+        stdout,
+        stderr,
+        folder,
+    })
+}
+
+async fn check_connection_peer(
+    stderr: &mut ChildStderr,
+    snapshot: &Snapshot,
+    remote: &str,
+    expected: &str,
+) -> Result<()> {
+    // OpenSSH 会转义反斜杠并截断命令日志。匹配固定命令开头未转义的 ASCII。
+    let prefix = remote.split('\\').next().unwrap_or_default();
+    let sending = format!("debug1: Sending command: {}", &prefix[..prefix.len().min(96)]);
+    let mut log = Vec::new();
+    let mut start = 0;
+    while (log.len() as u64) < DIAGNOSTIC_BYTES {
+        let Ok(byte) = stderr.read_u8().await else {
+            return Err(ssh_error(&stdout_text(&log), None));
+        };
+        log.push(byte);
+        if byte == b'\n' {
+            let line = String::from_utf8_lossy(&log[start..]);
+            if line.starts_with(&sending) {
+                let keys = transport::host_keys(&stdout_text(&log));
+                let (actual, _) = peer_revision(&snapshot.revision, &keys)?;
+                return (actual == expected).then_some(()).ok_or_else(changed);
+            }
+            start = log.len();
+        }
+    }
+    Err(AppError::new("remote_protocol", "SSH 身份校验输出超过限制。"))
+}
+
 /// 传输一次安装：产物按摘要从本机清单取，进度经 Channel 回传前端。
 async fn upload(
     context: &Context<'_>,
     target: &SshTarget,
     offer: &InstallOffer,
+    probe: &Probe,
     progress: &Channel<InstallProgress>,
 ) -> Result<()> {
     let bytes = offer_bytes(context, &offer.digest)?;
-    upload_bytes(context, target, &offer.digest, &bytes, &|sent, total| {
+    let command = probe.shell.install(&offer.digest, true)?;
+    let connection = spawn_connection(context, target, &command, Some(&offer.peer_revision)).await?;
+    upload_bytes(connection, &offer.digest, &bytes, &|sent, total| {
         let _ = progress.send(InstallProgress {
             phase: "installing",
             sent_bytes: sent,
@@ -549,31 +684,20 @@ async fn upload(
     .await
 }
 
-/// 传输产物：标准输入只放产物字节，进度按已写入字节上报。
+/// 完成连接握手后发送产物字节，进度按已写入字节上报。
 async fn upload_bytes(
-    context: &Context<'_>,
-    target: &SshTarget,
+    connection: AgentConnection,
     digest: &str,
     bytes: &[u8],
     progress: &(dyn Fn(u64, u64) + Send + Sync),
 ) -> Result<()> {
-    let snapshot = context.snapshot(target).await?;
-    let folder = Context::private_dir()?;
-    let mut command = context.build(
-        target,
-        &snapshot,
-        folder.path(),
-        &transport::install(digest)?,
-        false,
-    )?;
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn().map_err(|_| ssh_unavailable())?;
-    let mut stdin = child.stdin.take().ok_or_else(ssh_failed)?;
-    let stdout = child.stdout.take().ok_or_else(ssh_failed)?;
-    let stderr = child.stderr.take().ok_or_else(ssh_failed)?;
+    let AgentConnection {
+        mut child,
+        mut stdin,
+        stdout,
+        stderr,
+        folder: _folder,
+    } = connection;
     let total = bytes.len() as u64;
     progress(0, total);
     let write = async {
@@ -593,16 +717,23 @@ async fn upload_bytes(
         let read_out = read_bounded(stdout, DIAGNOSTIC_BYTES);
         let read_err = read_bounded(stderr, DIAGNOSTIC_BYTES);
         let wait = async { child.wait().await.map_err(|_| ssh_failed()) };
-        let ((), stdout, stderr, status) = tokio::try_join!(write, read_out, read_err, wait)?;
+        let (stdout, stderr, status) = tokio::try_join!(read_out, read_err, wait)?;
         Ok::<_, AppError>((stdout, stderr, status))
     };
-    let (stdout, stderr, status) = tokio::time::timeout(INSTALL_TIMEOUT, joined)
-        .await
-        .map_err(|_| timed_out("传输"))??;
+    let (written, (stdout, stderr, status)) = tokio::time::timeout(INSTALL_TIMEOUT, async {
+        let (written, result) = tokio::join!(write, joined);
+        Ok::<_, AppError>((written, result?))
+    })
+    .await
+    .map_err(|_| timed_out("传输"))??;
     let stderr = stdout_text(&stderr);
     if !status.success() {
-        return Err(ssh_error(&stderr, status.code()));
+        return Err(ssh_error(
+            &format!("{stderr}\n{}", stdout_text(&stdout)),
+            status.code(),
+        ));
     }
+    written?;
     let receipt: Value = serde_json::from_slice(&stdout).map_err(|_| {
         AppError::new(
             "remote_protocol",
@@ -809,8 +940,9 @@ pub async fn remote_ssh_install_agent(
         if probe.peer_revision != request.peer_revision {
             return Err(changed());
         }
-        if probe.agent_compatible {
-            // 复用已安装组件：握手成功说明协议与目标都匹配，不再传输。
+        let artifact = artifact::select(&context.artifacts, &probe.system, &probe.architecture)?;
+        if probe.agent_compatible && probe.agent_digest.as_deref() == Some(&artifact.sha256) {
+            // 只有与本机发行包相同且能握手的组件才复用。
             return Ok(json!({
                 "kind": "reused",
                 "version": probe.agent_version,
@@ -819,7 +951,6 @@ pub async fn remote_ssh_install_agent(
                 "architecture": probe.architecture,
             }));
         }
-        let artifact = artifact::select(&context.artifacts, &probe.system, &probe.architecture)?;
         let offer = InstallOffer {
             target_id: target.id.clone(),
             peer_revision: probe.peer_revision.clone(),
@@ -866,7 +997,7 @@ pub async fn remote_ssh_install_agent(
         {
             return Err(changed());
         }
-        upload(&context, &target, &confirmed, &on_progress).await?;
+        upload(&context, &target, &confirmed, &probe, &on_progress).await?;
         Ok(json!({
             "kind": "installed",
             "version": confirmed.version,
@@ -897,6 +1028,9 @@ pub(crate) struct AgentArtifact {
     /// 发布签名随产物一起带出；安装脚本只核对摘要，因此这里不做密码学复核。
     #[allow(dead_code)]
     pub(crate) signature: String,
+    /// 对 `twiglane-agent-v2 sha256:<digest>\n` 的发布签名，供连接器复核。
+    #[allow(dead_code)] // 仓库会话接入 Cliora v2 连接器时消费。
+    pub(crate) digest_signature: String,
     pub(crate) version: String,
 }
 
@@ -919,6 +1053,13 @@ pub(crate) struct AgentProbe {
     pub(crate) digest: Option<String>,
     /// 远端组件自述（`--probe` 的 JSON）：协议、os/arch 与版本。
     pub(crate) agent: Option<Value>,
+    /// 原探测使用的 SSH 配置和实际对端主机密钥。
+    #[allow(dead_code)] // 仓库会话接入验证后的连接时消费。
+    pub(crate) peer_revision: String,
+    #[allow(dead_code)] // 仓库会话的持久工作树身份与它绑定。
+    pub(crate) peer_identity: String,
+    #[allow(dead_code)] // 仓库会话接入验证后的连接时消费。
+    shell: transport::Shell,
 }
 
 /// 一条已拉起的 v2 会话：传输 + 本次连接的私有目录。
@@ -967,7 +1108,7 @@ pub(crate) fn shared_target(store: &AppStore, shared_host_id: &str) -> Option<Ss
     })
 }
 
-/// 目标平台规范化：远端 `uname` 给出的 system/architecture 与产物命名对齐。
+/// 目标平台规范化：远端探测的 system/architecture 与产物命名对齐。
 pub(crate) fn platform(system: &str, architecture: &str) -> Option<(String, String)> {
     artifact::normalize(system, architecture)
 }
@@ -979,18 +1120,12 @@ pub(crate) fn manifest_ready(dir: &Path) -> Result<()> {
 
 /// 按远端 system/architecture 选产物；没有匹配项时明确失败，调用方不得开始上传。
 pub(crate) fn select_agent(dir: &Path, system: &str, architecture: &str) -> Result<AgentArtifact> {
-    let manifest = artifact::load_manifest(dir)?;
     let selected = artifact::select(dir, system, architecture)?;
-    let signature = manifest
-        .artifacts
-        .iter()
-        .find(|entry| entry.sha256.eq_ignore_ascii_case(&selected.sha256))
-        .map(|entry| entry.signature.clone())
-        .unwrap_or_default();
     Ok(AgentArtifact {
         bytes: selected.bytes,
         sha256: selected.sha256,
-        signature,
+        signature: selected.signature,
+        digest_signature: selected.digest_signature,
         version: selected.version,
     })
 }
@@ -1008,6 +1143,9 @@ pub(crate) async fn probe_agent(
         architecture: probe.architecture,
         digest: probe.agent_digest,
         agent: probe.agent_probe,
+        peer_revision: probe.peer_revision,
+        peer_identity: probe.peer_identity,
+        shell: probe.shell,
     })
 }
 
@@ -1019,13 +1157,14 @@ pub(crate) async fn open_session(
     digest: &str,
 ) -> Result<AgentSession> {
     let context = Context::new(store, ssh);
+    let probe = probe_target(&context, target).await?;
     let snapshot = context.snapshot(target).await?;
     let folder = Context::private_dir()?;
     let mut command = context.build(
         target,
         &snapshot,
         folder.path(),
-        &transport::connect(digest)?,
+        &probe.shell.connect(digest, false)?,
         false,
     )?;
     let transport = crate::remote_worktree_transport::AgentTransport::spawn_v2(&mut command)
@@ -1034,6 +1173,36 @@ pub(crate) async fn open_session(
         transport,
         folder,
     })
+}
+
+/// 预备通过原探测验证的同一 SSH 连接，供仓库协议接管三条标准管道。
+#[allow(dead_code)] // 仓库会话接入时消费。
+pub(crate) async fn prepare_session(
+    store: &AppStore,
+    ssh: &RemoteSsh,
+    target: &SshTarget,
+    digest: &str,
+    probe: &AgentProbe,
+) -> Result<AgentConnection> {
+    let context = Context::new(store, ssh);
+    let command = probe.shell.connect(digest, true)?;
+    spawn_connection(&context, target, &command, Some(&probe.peer_revision)).await
+}
+
+/// 保留用户确认时的探测，传输产物前验证同一个 SSH 连接。
+#[allow(dead_code)] // 仓库会话接入时消费。
+pub(crate) async fn install_verified_artifact(
+    store: &AppStore,
+    ssh: &RemoteSsh,
+    target: &SshTarget,
+    artifact: &AgentArtifact,
+    probe: &AgentProbe,
+    progress: &(dyn Fn(u64, u64) + Send + Sync),
+) -> Result<()> {
+    let context = Context::new(store, ssh);
+    let command = probe.shell.install(&artifact.sha256, true)?;
+    let connection = spawn_connection(&context, target, &command, Some(&probe.peer_revision)).await?;
+    upload_bytes(connection, &artifact.sha256, &artifact.bytes, progress).await
 }
 
 /// 安装 v2 产物：上传后由远端脚本核对摘要并原子替换，进度按已写入字节回传。
@@ -1045,5 +1214,8 @@ pub(crate) async fn install_artifact(
     progress: &(dyn Fn(u64, u64) + Send + Sync),
 ) -> Result<()> {
     let context = Context::new(store, ssh);
-    upload_bytes(&context, target, &artifact.sha256, &artifact.bytes, progress).await
+    let probe = probe_target(&context, target).await?;
+    let command = probe.shell.install(&artifact.sha256, false)?;
+    let connection = spawn_connection(&context, target, &command, None).await?;
+    upload_bytes(connection, &artifact.sha256, &artifact.bytes, progress).await
 }

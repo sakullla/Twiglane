@@ -4,10 +4,8 @@
 //! 必须在任何远端写入之前明确失败，绝不下载或本机编译一份替代品推上去。
 //!
 //! 发行流水线（`scripts/remote-worktree/agent-v2-manifest.mjs`）为每个产物计算
-//! SHA-256，并用 Twiglane 更新签名私钥对其签名（`--app-version` 绑定版本）；
-//! 清单把摘要、签名与版本一起交给桌面端。运行时这里核对摘要与清单，签名由发布步骤
-//! 用同一把公钥验证——运行时的密码学复核需要 `minisign-verify` 依赖（属 T1 的
-//! Cargo.toml 范围），见 `docs/integrations/remote-worktree.md` 的"已知缺口"。
+//! SHA-256，签署二进制和域分离的摘要声明并核实签名。桌面端按目标选择产物并核对
+//! 清单摘要；交给 Cliora 连接器的摘要声明签名可在连接器独立验证。
 
 use std::path::Path;
 
@@ -29,6 +27,8 @@ pub(crate) struct Entry {
     pub(crate) sha256: String,
     #[serde(default)]
     pub(crate) signature: String,
+    #[serde(default)]
+    pub(crate) digest_signature: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +43,8 @@ pub(crate) struct Artifact {
     pub(crate) bytes: Vec<u8>,
     pub(crate) sha256: String,
     pub(crate) version: String,
+    pub(crate) signature: String,
+    pub(crate) digest_signature: String,
 }
 
 impl std::fmt::Debug for Artifact {
@@ -67,17 +69,17 @@ fn upper_hex(value: &str) -> Option<String> {
         .then(|| value.to_ascii_lowercase())
 }
 
-/// 目标系统与架构的规范化：`uname` 会给出 `Darwin`/`Linux` 与
-/// `arm64`/`aarch64`/`x86_64`/`amd64`，产物按 Rust 三元组命名。
+/// 目标系统与架构的规范化，供 SSH 探测和 Rust 组件自述共同使用。
 pub(crate) fn normalize(system: &str, architecture: &str) -> Option<(String, String)> {
     let system = match system.trim().to_ascii_lowercase().as_str() {
         "linux" => "linux",
         "darwin" | "macos" | "mac os x" => "macos",
+        "windows" => "windows",
         _ => return None,
     };
     let architecture = match architecture.trim().to_ascii_lowercase().as_str() {
         "x86_64" | "amd64" | "x64" => "x86_64",
-        "aarch64" | "arm64" => "aarch64",
+        "aarch64" | "arm64" if system != "windows" => "aarch64",
         _ => return None,
     };
     Some((system.into(), architecture.into()))
@@ -97,7 +99,7 @@ pub(crate) fn select(dir: &Path, system: &str, architecture: &str) -> Result<Art
     let Some((system, architecture)) = normalize(system, architecture) else {
         return Err(AppError::new(
             "agent_artifact_unavailable",
-            format!("不支持远端目标 {system}/{architecture}：Twiglane 只为 Linux 与 macOS 的 x86_64/aarch64 发行远端组件。"),
+            format!("不支持远端目标 {system}/{architecture}：支持 Linux、macOS 的 x86_64/aarch64 和 Windows x64。"),
         ));
     };
     let manifest = load_manifest(dir)?;
@@ -121,14 +123,21 @@ pub(crate) fn select(dir: &Path, system: &str, architecture: &str) -> Result<Art
             "远端组件缺少发布签名，拒绝安装。",
         ));
     }
-    if entry.file.is_empty()
-        || entry.file.contains("..")
-        || entry.file.starts_with('/')
-        || entry.file.chars().any(char::is_control)
+    if entry.file.split('/').any(|part| {
+        part.is_empty()
+            || matches!(part, "." | "..")
+            || !part.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    })
     {
         return Err(manifest_error());
     }
     let path = dir.join(&entry.file);
+    let inside_bundle = std::fs::canonicalize(dir).and_then(|root| {
+        std::fs::canonicalize(&path).map(|path| path.starts_with(root))
+    });
+    if inside_bundle.is_ok_and(|inside| !inside) {
+        return Err(manifest_error());
+    }
     let info = std::fs::metadata(&path).map_err(|_| {
         AppError::new(
             "agent_artifact_missing",
@@ -153,6 +162,8 @@ pub(crate) fn select(dir: &Path, system: &str, architecture: &str) -> Result<Art
         bytes,
         sha256: digest,
         version: entry.version.clone(),
+        signature: entry.signature.clone(),
+        digest_signature: entry.digest_signature.clone(),
     })
 }
 
@@ -183,6 +194,26 @@ mod tests {
     }
 
     #[test]
+    fn windows_amd64_selects_an_executable_and_its_digest_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = "Windows-x86_64/twiglane-agent-v2.exe";
+        write(dir.path(), file, b"windows-agent");
+        manifest(dir.path(), vec![Entry {
+            system: "Windows".into(),
+            architecture: "x86_64".into(),
+            version: "0.3.40".into(),
+            file: file.into(),
+            sha256: digest(b"windows-agent"),
+            signature: "c2ln".into(),
+            digest_signature: "YXR0".into(),
+        }]);
+        let selected = select(dir.path(), "windows", "AMD64").unwrap();
+        assert_eq!(selected.bytes, b"windows-agent");
+        assert_eq!(selected.digest_signature, "YXR0");
+        assert!(normalize("Windows", "ARM64").is_none());
+    }
+
+    #[test]
     fn selects_the_artifact_for_the_probed_target_only() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "linux-x86_64/twiglane-agent-v2", b"linux-agent");
@@ -197,6 +228,7 @@ mod tests {
                     file: "linux-x86_64/twiglane-agent-v2".into(),
                     sha256: digest(b"linux-agent"),
                     signature: "c2lnbmF0dXJl".into(),
+                    digest_signature: String::new(),
                 },
                 Entry {
                     system: "Darwin".into(),
@@ -205,6 +237,7 @@ mod tests {
                     file: "macos-aarch64/twiglane-agent-v2".into(),
                     sha256: digest(b"mac-agent"),
                     signature: "c2lnbmF0dXJl".into(),
+                    digest_signature: String::new(),
                 },
             ],
         );
@@ -229,6 +262,7 @@ mod tests {
                 file: "linux-x86_64/twiglane-agent-v2".into(),
                 sha256: digest(b"linux-agent"),
                 signature: "c2ln".into(),
+                digest_signature: String::new(),
             }],
         );
         let error = select(dir.path(), "Linux", "aarch64").unwrap_err();
@@ -251,6 +285,7 @@ mod tests {
                 file: "linux-x86_64/twiglane-agent-v2".into(),
                 sha256: digest(b"original"),
                 signature: "c2ln".into(),
+                digest_signature: String::new(),
             }],
         );
         assert_eq!(
@@ -267,6 +302,7 @@ mod tests {
                 file: "linux-x86_64/twiglane-agent-v2".into(),
                 sha256: digest(b"replaced"),
                 signature: "  ".into(),
+                digest_signature: String::new(),
             }],
         );
         assert_eq!(
@@ -283,6 +319,7 @@ mod tests {
                 file: "../escape".into(),
                 sha256: digest(b"replaced"),
                 signature: "c2ln".into(),
+                digest_signature: String::new(),
             }],
         );
         assert_eq!(

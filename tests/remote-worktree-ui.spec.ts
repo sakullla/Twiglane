@@ -40,8 +40,11 @@ import { api, openRemoteRepository, remoteRepositoryState } from "../src/lib/api
 import {
   REMOTE_READ_OPS,
   REMOTE_WRITE_OPS,
+  normalizeRemotePath,
   parseRemotePatch,
+  parseRemoteRepositoryKey,
   remoteRepositoryKey,
+  repositoryEndpoint,
 } from "../src/lib/remote-worktree";
 
 const hostA = {
@@ -152,6 +155,53 @@ describe("远端仓库在主窗口：同一套 DTO", () => {
     expect(repository.snapshot.branch).toMatchObject({ name: "feature", detached: false, headOid: "a".repeat(40) });
     // 远端仓库不经过任何本机 Git 命令。
     expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("Windows 盘符路径从打开到最近记录重开都保留中文、空格和保留字符", async () => {
+    const raw = "  c:\\工作 区\\仓库 #50%\\  ";
+    const canonical = "C:/工作 区/仓库 #50%";
+    const path = normalizeRemotePath(raw);
+    if (path === null) throw new Error("应当接受 Windows 绝对路径");
+    expect(path).toBe(canonical);
+    const snap = snapshot({ root: canonical });
+    port.open.mockResolvedValueOnce(opened("session-windows", snap));
+
+    const outcome = await openRemoteRepository({
+      kind: "ssh",
+      hostId: hostA.targetId,
+      hostRevision: hostA.targetRevision,
+      path,
+    });
+    if (outcome.kind !== "opened") throw new Error("应当打开远端工作树");
+    const key = "ssh://host-a?path=" + encodeURIComponent(canonical);
+    expect(outcome.repository.summary).toMatchObject({ name: "仓库 #50%", path: key, remotePath: canonical });
+    expect(repositoryEndpoint(key, hostA.name)).toMatchObject({ kind: "ssh", displayPath: canonical, host: hostA.name });
+    expect(port.open.mock.calls[0][0]).toMatchObject({ targetId: hostA.targetId, path: canonical });
+    expect(invoke).not.toHaveBeenCalled();
+
+    await api.closeRepository();
+    expect(port.close).toHaveBeenCalledWith("session-windows");
+    invoke.mockClear();
+    port.open.mockResolvedValueOnce(opened("session-windows-reopened", snap));
+    const reopened = await api.openRepository(key, 2);
+    expect(reopened.summary).toMatchObject({ path: key, remotePath: canonical });
+    expect(port.open.mock.calls[1][0]).toMatchObject({ targetId: hostA.targetId, path: canonical });
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("Windows 盘符根目录可往返，既有 POSIX 仓库键保持独立", () => {
+    expect(normalizeRemotePath("z:\\")).toBe("Z:/");
+    expect(parseRemoteRepositoryKey(remoteRepositoryKey("host-a", "z:\\"))).toEqual({ hostId: "host-a", path: "Z:/" });
+    expect(normalizeRemotePath("C:repo")).toBeNull();
+    expect(normalizeRemotePath("C:")).toBeNull();
+    expect(normalizeRemotePath("\\\\server\\share")).toBeNull();
+    expect(normalizeRemotePath("C:/invalid\0")).toBeNull();
+    expect(parseRemoteRepositoryKey("ssh://host-a?path=C%ZZ")).toBeNull();
+
+    const posix = "ssh://host-a/C:/repo";
+    expect(remoteRepositoryKey("host-a", "/C:/repo")).toBe(posix);
+    expect(remoteRepositoryKey("host-a", "C:/repo")).not.toBe(posix);
+    expect(parseRemoteRepositoryKey(posix)).toEqual({ hostId: "host-a", path: "/C:/repo" });
   });
 
   it("刷新只在远端状态令牌变化时推进数值代次，旧响应不会被当成新代次", async () => {

@@ -363,12 +363,30 @@ export function hostSyncMessage(result: HostSyncResult): string {
 
 /** 远端仓库键的固定前缀。hostId 是主机记录 id，不是显示名。 */
 export const REMOTE_KEY_SCHEME = "ssh://";
+const REMOTE_DRIVE_PATH = "?path=";
+
+function normalizeRemoteDrivePath(path: string): string | null {
+  if (!/^[A-Za-z]:[\\/]/.test(path) || path.includes("\0")) return null;
+  const tail = path.slice(2).replace(/[\\/]+/g, "/").replace(/\/$/, "");
+  return path[0].toUpperCase() + ":/" + tail.slice(1);
+}
+
+export function normalizeRemotePath(input: string): string | null {
+  const path = input.trim();
+  if (path.includes("\0")) return null;
+  return path.startsWith("/") ? path : normalizeRemoteDrivePath(path);
+}
 
 /**
  * 远端仓库的稳定键：hostId + 规范化远端路径。
  * 不含显示名、连接会话或认证信息，进程重启后仍指向同一个仓库。
  */
 export function remoteRepositoryKey(hostId: string, path: string): string {
+  const drivePath = normalizeRemoteDrivePath(path.trim());
+  if (drivePath !== null) {
+    // A POSIX key always has a literal slash after the host id.
+    return REMOTE_KEY_SCHEME + hostId + REMOTE_DRIVE_PATH + encodeURIComponent(drivePath);
+  }
   const root = path.trim().replace(/\/+$/, "") || "/";
   const suffix = root.startsWith("/") ? root : "/" + root;
   return REMOTE_KEY_SCHEME + hostId + suffix;
@@ -382,9 +400,15 @@ export function parseRemoteRepositoryKey(key: string): { hostId: string; path: s
   if (!isRemoteRepositoryKey(key)) return null;
   const rest = key.slice(REMOTE_KEY_SCHEME.length);
   const slash = rest.indexOf("/");
-  if (slash <= 0) return null;
-  const path = rest.slice(slash);
-  return path.startsWith("/") ? { hostId: rest.slice(0, slash), path } : null;
+  if (slash !== -1) return slash > 0 ? { hostId: rest.slice(0, slash), path: rest.slice(slash) } : null;
+  const separator = rest.lastIndexOf(REMOTE_DRIVE_PATH);
+  if (separator <= 0) return null;
+  try {
+    const path = normalizeRemoteDrivePath(decodeURIComponent(rest.slice(separator + REMOTE_DRIVE_PATH.length)));
+    return path === null ? null : { hostId: rest.slice(0, separator), path };
+  } catch {
+    return null;
+  }
 }
 
 /** 展示身份：内部仓库键与用户路径分开，远端显示真实远端路径与主机。 */

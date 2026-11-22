@@ -156,6 +156,7 @@
   import ViewSwitcher from "./lib/components/ViewSwitcher.svelte";
   import {
     isRemoteRepositoryKey,
+    normalizeRemotePath,
     remoteReviewPort,
     repositoryBaseName,
     type RemoteConnectionProgress,
@@ -3492,12 +3493,12 @@
   }
 
   const remoteTarget = $derived(remotePickerTargets.find((item) => item.targetId === remoteTargetId) ?? null);
-  const remotePathValid = $derived(remotePath.startsWith("/") && !remotePath.includes("\0"));
+  const remoteOpenPath = $derived(normalizeRemotePath(remotePath));
   const remoteOpenReason = $derived(
     remotePickerBusy ? "正在读取主机或连接远端。" :
     !remoteTarget ? "请选择一台 SSH 主机。" :
     remoteTarget.unavailableReason ? remoteTarget.unavailableReason :
-    !remotePathValid ? "请输入远端绝对路径。" : "",
+    remoteOpenPath === null ? "请输入远端绝对路径。" : "",
   );
 
   async function openRemotePicker() {
@@ -3608,7 +3609,8 @@
   /** 从选择层打开：先处理未保存草稿与在途写入，再建立远端连接。 */
   async function openRemoteFromPicker() {
     const target = remoteTarget;
-    if (!target || remoteOpenReason) return;
+    const path = remoteOpenPath;
+    if (!target || path === null || remoteOpenReason) return;
     if (!(await confirmEditorLeave("打开远端仓库"))) return;
     if ((await flushDraft(drafts.path)) === false) return;
     if (switchBlocked(commandState)) {
@@ -3624,7 +3626,7 @@
     await attemptRemoteOpen({
       hostId: target.targetId,
       hostRevision: target.targetRevision,
-      path: remotePath.trim(),
+      path: source?.worktreePath ?? path,
       reviewId: source?.reviewId ?? null,
       source,
     });
@@ -3649,9 +3651,10 @@
       return;
     }
     const target = remoteTarget;
-    if (!target) return;
+    const path = remoteOpenPath;
+    if (!target || path === null) return;
     await attemptRemoteOpen(
-      { hostId: target.targetId, hostRevision: target.targetRevision, path: remotePath.trim(), reviewId: null, source: null },
+      { hostId: target.targetId, hostRevision: target.targetRevision, path, reviewId: null, source: null },
       { allowInstall: true, installConfirmation: offer.confirmationId },
     );
   }
@@ -5939,7 +5942,7 @@
           class="input"
           aria-label="远端路径"
           bind:value={remotePath}
-          placeholder="/srv/repo"
+          placeholder="/srv/repo 或 C:/repo"
           title={remotePickerBusy
             ? "正在连接远端，完成后才能修改路径"
             : remoteReviewSource

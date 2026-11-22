@@ -2481,6 +2481,8 @@ fn edit_needs_reconciliation(backup: &Path) -> AppError {
 enum EditSaveStage {
     Prepared,
     Publishing,
+    #[cfg(target_os = "linux")]
+    Detached,
     Published,
 }
 
@@ -3278,10 +3280,10 @@ mod secure_entry_ops {
         .map(|fd| unsafe { fs::File::from_raw_fd(fd) })
     }
 
-    fn mkdir_at(directory: &Directory, name: &OsStr) -> std::io::Result<()> {
+    fn mkdir_at(directory: &Directory, name: &OsStr, mode: libc::mode_t) -> std::io::Result<()> {
         let name = c_string(name)?;
         // SAFETY: name 有效；mkdirat 只在这个已绑定目录里创建单级目录。
-        if unsafe { libc::mkdirat(directory.fd, name.as_ptr(), 0o777) } == 0 {
+        if unsafe { libc::mkdirat(directory.fd, name.as_ptr(), mode) } == 0 {
             Ok(())
         } else {
             Err(std::io::Error::last_os_error())
@@ -3389,6 +3391,17 @@ mod secure_entry_ops {
     pub(super) fn replace_edit_file(
         boundary: &EditBoundary, relative: &Path, expected: &str, bytes: &[u8], observe: &mut impl FnMut(EditSaveStage),
     ) -> Result<(), AppError> {
+        replace_edit_file_with_exchange(boundary, relative, expected, bytes, observe, exchange_edit_names)
+    }
+
+    fn replace_edit_file_with_exchange(
+        boundary: &EditBoundary,
+        relative: &Path,
+        expected: &str,
+        bytes: &[u8],
+        observe: &mut impl FnMut(EditSaveStage),
+        exchange: impl FnOnce(&Directory, &OsStr, &OsStr) -> std::io::Result<()>,
+    ) -> Result<(), AppError> {
         let parent = SecureRoot::open(boundary)?.parent(relative, true)?;
         let (original, original_stat) = open_edit_at(&parent.directory, &parent.name)?;
         verify_edit_digest(&original, expected)?;
@@ -3425,10 +3438,22 @@ mod secure_entry_ops {
             return finish_temporary(&mut temporary, Err(error));
         }
         observe(EditSaveStage::Publishing);
-        if let Err(error) = exchange_edit_names(&parent.directory, &temporary.name, &parent.name) {
+        if let Err(error) = exchange(&parent.directory, &temporary.name, &parent.name) {
             if at(&temporary.name) == Some(draft_stat.identity)
                 && at(&parent.name) == Some(original_stat.identity)
             {
+                #[cfg(target_os = "linux")]
+                if matches!(error.raw_os_error(), Some(libc::EINVAL | libc::EOPNOTSUPP | libc::ENOSYS)) {
+                    return publish_edit_without_exchange(
+                        &parent,
+                        relative,
+                        &mut temporary,
+                        (draft, draft_stat.identity),
+                        (original, original_stat, expected),
+                        bytes,
+                        observe,
+                    );
+                }
                 return finish_temporary(&mut temporary, Err(edit_io_error(error)));
             }
             temporary.active = false;
@@ -3451,6 +3476,126 @@ mod secure_entry_ops {
         // SAFETY: the descriptor is owned by parent.directory and remains live.
         let _ = unsafe { libc::fsync(parent.directory.fd) };
         Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn link_edit_name(
+        source: &Directory,
+        source_name: &OsStr,
+        target: &Directory,
+        target_name: &OsStr,
+    ) -> std::io::Result<()> {
+        let source_name = c_string(source_name)?;
+        let target_name = c_string(target_name)?;
+        // SAFETY: both descriptors and names remain live. linkat fails when the
+        // destination exists and flags=0 prevents following a source symlink.
+        if unsafe { libc::linkat(source.fd, source_name.as_ptr(), target.fd, target_name.as_ptr(), 0) }
+            == 0
+        {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn publish_edit_without_exchange(
+        parent: &EntryParent,
+        relative: &Path,
+        temporary: &mut TemporaryEntry<'_>,
+        (draft, draft_identity): (fs::File, Identity),
+        (original, original_stat, expected): (fs::File, NodeStat, &str),
+        bytes: &[u8],
+        observe: &mut impl FnMut(EditSaveStage),
+    ) -> Result<(), AppError> {
+        let directory = &parent.directory;
+        let mut recovery = match TemporaryEntry::directory(directory, 0o700) {
+            Ok(recovery) => recovery,
+            Err(error) => return finish_temporary(temporary, Err(error)),
+        };
+        let backup = relative.with_file_name(&recovery.name);
+        let staged = recovery.directory.as_ref().expect("directory temporary");
+        let draft_name = OsStr::new("draft");
+        let original_name = OsStr::new("original");
+        let pending = || edit_needs_reconciliation(&backup);
+        let identity_at = |directory: &Directory, name: &OsStr| {
+            stat_at(directory.fd, name).ok().map(|stat| stat.identity)
+        };
+
+        // Check hard-link support and secure the draft before detaching anything.
+        if let Err(error) = link_edit_name(directory, &temporary.name, staged, draft_name) {
+            let error = finish_temporary(&mut recovery, Err(edit_io_error(error)));
+            return finish_temporary(temporary, error);
+        }
+        if identity_at(staged, draft_name) != Some(draft_identity)
+            || identity_at(directory, &temporary.name) != Some(draft_identity)
+        {
+            recovery.active = false;
+            temporary.active = false;
+            return Err(pending());
+        }
+        drop(draft);
+        if temporary.cleanup().is_err() {
+            temporary.active = false;
+            recovery.active = false;
+            return Err(pending());
+        }
+        if identity_at(directory, &parent.name) != Some(original_stat.identity) {
+            return finish_temporary(&mut recovery, Err(changed_edit_target()));
+        }
+
+        // The destination is inside the private directory and has never existed.
+        // Once the syscall runs, cleanup must keep the displaced object on any ambiguity.
+        recovery.active = false;
+        rename_without_flags(directory.fd, &parent.name, staged.fd, original_name)
+            .map_err(|_| pending())?;
+        // Some Linux mounts cannot look up a renamed file until its original
+        // descriptor closes. NFS can also leave a hidden file on unlink.
+        drop(original);
+        observe(EditSaveStage::Detached);
+        let displaced = stat_at(staged.fd, original_name).map_err(|_| pending())?;
+        let original_matches = || {
+            open_edit_at(staged, original_name).is_ok_and(|(file, stat)| {
+                stat == original_stat && verify_edit_digest(&file, expected).is_ok()
+            })
+        };
+        let publication = if displaced == original_stat && original_matches() {
+            link_edit_name(staged, draft_name, directory, &parent.name).map_err(edit_io_error)
+        } else {
+            Err(changed_edit_target())
+        };
+
+        let result = match publication {
+            Ok(()) => {
+                observe(EditSaveStage::Published);
+                let draft_matches = open_edit_at(staged, draft_name).is_ok_and(|(file, stat)| {
+                    stat.identity == draft_identity && verify_edit_digest(&file, &sha256_hex(bytes)).is_ok()
+                });
+                if !draft_matches {
+                    return Err(preserve_ambiguous_edit(directory, &backup, bytes));
+                }
+                if identity_at(directory, &parent.name) != Some(draft_identity) || !original_matches() {
+                    return Err(pending());
+                }
+                Ok(())
+            }
+            Err(error) => {
+                // Restore by link as well. A writer that filled the vacant name wins.
+                if identity_at(staged, original_name) != Some(displaced.identity)
+                    || link_edit_name(staged, original_name, directory, &parent.name).is_err()
+                    || identity_at(directory, &parent.name) != Some(displaced.identity)
+                {
+                    return Err(pending());
+                }
+                Err(error)
+            }
+        };
+        unlink_at(staged, original_name, 0).map_err(|_| pending())?;
+        unlink_at(staged, draft_name, 0).map_err(|_| pending())?;
+        unlink_at(directory, &recovery.name, libc::AT_REMOVEDIR).map_err(|_| pending())?;
+        // SAFETY: the descriptor is owned by directory and remains live.
+        let _ = unsafe { libc::fsync(directory.fd) };
+        result
     }
 
     fn rename_exclusive(
@@ -3555,7 +3700,7 @@ mod secure_entry_ops {
                     {
                         return Err(nested_repository_error());
                     }
-                    mkdir_at(target, &name)
+                    mkdir_at(target, &name, 0o777)
                         .map_err(|error| entry_io_error(error, "创建复制目录失败，未发布目标。"))?;
                     let child_target = Directory::open_at(target, &name)
                         .map_err(|error| entry_io_error(error, "无法绑定复制目录身份。"))?;
@@ -3607,10 +3752,10 @@ mod secure_entry_ops {
             Err(std::io::Error::new(ErrorKind::AlreadyExists, "temporary names exhausted"))
         }
 
-        fn directory(parent: &'a Directory) -> Result<Self, AppError> {
+        fn directory(parent: &'a Directory, mode: libc::mode_t) -> Result<Self, AppError> {
             for _ in 0..100 {
                 let name = Self::candidate();
-                match mkdir_at(parent, &name) {
+                match mkdir_at(parent, &name, mode) {
                     Ok(()) => {
                         let directory = match Directory::open_at(parent, &name) {
                             Ok(directory) => directory,
@@ -3720,7 +3865,7 @@ mod secure_entry_ops {
         let target = root.target(relative)?;
         match kind {
             RepositoryCreateEntryKind::File => open_new_file(&target.directory, &target.name).map(|_| ()),
-            RepositoryCreateEntryKind::Directory => mkdir_at(&target.directory, &target.name),
+            RepositoryCreateEntryKind::Directory => mkdir_at(&target.directory, &target.name, 0o777),
         }
         .map_err(|error| entry_io_error(error, "新建失败，未覆盖已有内容。"))
     }
@@ -3764,7 +3909,7 @@ mod secure_entry_ops {
                 return finish_temporary(&mut temporary, result);
             }
             OrdinaryEntryKind::Directory => {
-                let temporary = TemporaryEntry::directory(&target.directory)?;
+                let temporary = TemporaryEntry::directory(&target.directory, 0o777)?;
                 // 临时目录已落盘：即使后续内容复制失败，也属写锁内已发生的部分写入。
                 *wrote = true;
                 temporary
@@ -4276,7 +4421,7 @@ mod secure_entry_ops {
                 let (fd, opened) =
                     open_bound_source(target, libc::O_RDONLY | libc::O_DIRECTORY)?;
                 let source = Directory { fd };
-                let mut temporary = TemporaryEntry::directory(files)?;
+                let mut temporary = TemporaryEntry::directory(files, 0o777)?;
                 let result = (|| {
                     let destination = temporary
                         .directory
@@ -4328,6 +4473,135 @@ mod secure_entry_ops {
             EditBoundary {
                 root: root.clone(),
                 git_dirs: vec![root.join(".git")],
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        fn edit_without_exchange(
+            boundary: &EditBoundary,
+            errno: i32,
+            mut observe: impl FnMut(EditSaveStage),
+        ) -> Result<(), AppError> {
+            replace_edit_file_with_exchange(
+                boundary,
+                Path::new("note.txt"),
+                &sha256_hex(b"original\n"),
+                b"draft\n",
+                &mut observe,
+                |_, _, _| Err(std::io::Error::from_raw_os_error(errno)),
+            )
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn edit_save_falls_back_only_for_unsupported_exchange() {
+            for errno in [libc::EINVAL, libc::EOPNOTSUPP, libc::ENOSYS, libc::EPERM] {
+                let workspace = tempfile::tempdir().unwrap();
+                let boundary = boundary(workspace.path());
+                let target = boundary.root.join("note.txt");
+                fs::write(&target, b"original\n").unwrap();
+                fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+                let result = edit_without_exchange(&boundary, errno, |_| {});
+                if errno == libc::EPERM {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.code, "edit_write_failed");
+                    assert!(!error.write_unconfirmed);
+                    assert_eq!(fs::read(&target).unwrap(), b"original\n");
+                } else {
+                    result.unwrap();
+                    assert_eq!(fs::read(&target).unwrap(), b"draft\n");
+                }
+                assert_eq!(fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o640);
+                assert_eq!(fs::read_dir(&boundary.root).unwrap().count(), 2);
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn edit_save_fallback_restores_the_late_conflicting_version() {
+            let workspace = tempfile::tempdir().unwrap();
+            let boundary = boundary(workspace.path());
+            let target = boundary.root.join("note.txt");
+            fs::write(&target, b"original\n").unwrap();
+            let inode = fs::metadata(&target).unwrap().ino();
+            let mut detached = false;
+            let error = edit_without_exchange(&boundary, libc::EINVAL, |stage| {
+                if stage == EditSaveStage::Publishing {
+                    fs::write(&target, b"external\n").unwrap();
+                } else if stage == EditSaveStage::Detached {
+                    assert!(!target.exists());
+                    detached = true;
+                }
+            })
+            .unwrap_err();
+            assert!(detached);
+            assert_eq!(error.code, "edit_conflict");
+            assert!(!error.write_unconfirmed);
+            assert_eq!(fs::read(&target).unwrap(), b"external\n");
+            assert_eq!(fs::metadata(&target).unwrap().ino(), inode);
+            assert_eq!(fs::read_dir(&boundary.root).unwrap().count(), 2);
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn edit_save_fallback_keeps_a_third_writer_and_both_recovery_versions() {
+            for (late_update, displaced) in [(false, b"original\n"), (true, b"external\n")] {
+                let workspace = tempfile::tempdir().unwrap();
+                let boundary = boundary(workspace.path());
+                let target = boundary.root.join("note.txt");
+                fs::write(&target, b"original\n").unwrap();
+                let error = edit_without_exchange(&boundary, libc::EOPNOTSUPP, |stage| {
+                    if stage == EditSaveStage::Publishing && late_update {
+                        fs::write(&target, displaced).unwrap();
+                    } else if stage == EditSaveStage::Detached {
+                        fs::write(&target, b"third\n").unwrap();
+                    }
+                })
+                .unwrap_err();
+                assert_eq!(error.code, "edit_verify");
+                assert!(error.write_unconfirmed);
+                assert_eq!(fs::read(&target).unwrap(), b"third\n");
+                let recovery = fs::read_dir(&boundary.root)
+                    .unwrap()
+                    .map(Result::unwrap)
+                    .find(|entry| entry.file_name().to_string_lossy().starts_with(".twiglane-entry-"))
+                    .unwrap();
+                assert!(error.message.contains(&*recovery.file_name().to_string_lossy()));
+                assert_eq!(recovery.metadata().unwrap().permissions().mode() & 0o777, 0o700);
+                assert_eq!(fs::read(recovery.path().join("original")).unwrap(), displaced);
+                assert_eq!(fs::read(recovery.path().join("draft")).unwrap(), b"draft\n");
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn edit_save_fallback_keeps_a_separate_draft_after_an_in_place_write() {
+            let workspace = tempfile::tempdir().unwrap();
+            let boundary = boundary(workspace.path());
+            let target = boundary.root.join("note.txt");
+            fs::write(&target, b"original\n").unwrap();
+            let error = edit_without_exchange(&boundary, libc::EINVAL, |stage| {
+                if stage == EditSaveStage::Published {
+                    fs::write(&target, b"third\n").unwrap();
+                }
+            })
+            .unwrap_err();
+            assert_eq!(error.code, "edit_verify");
+            assert!(error.write_unconfirmed);
+            assert_eq!(fs::read(&target).unwrap(), b"third\n");
+            let recoveries: Vec<_> = fs::read_dir(&boundary.root)
+                .unwrap()
+                .map(Result::unwrap)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with(".twiglane-entry-"))
+                .collect();
+            assert_eq!(recoveries.len(), 2);
+            for recovery in recoveries {
+                assert!(error.message.contains(&*recovery.file_name().to_string_lossy()));
+                if recovery.file_type().unwrap().is_dir() {
+                    assert_eq!(fs::read(recovery.path().join("original")).unwrap(), b"original\n");
+                } else {
+                    assert_eq!(fs::read(recovery.path()).unwrap(), b"draft\n");
+                }
             }
         }
 
@@ -8184,7 +8458,9 @@ mod tests {
                     fs::write(&target, b"later\n").unwrap();
                 }
                 EditSaveStage::Published => fs::write(&target, b"third\n").unwrap(),
-                EditSaveStage::Prepared => {}
+                EditSaveStage::Prepared => {},
+                #[cfg(target_os = "linux")]
+                EditSaveStage::Detached => {},
             }
         }).await.unwrap_err();
         assert_eq!(error.code, "edit_verify");

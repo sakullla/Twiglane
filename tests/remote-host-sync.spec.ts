@@ -101,6 +101,41 @@ describe("host-sync v1 前端契约", () => {
     expect(hostSyncMessage(conflict)).toContain("没有写入任何内容");
   });
 
+  it("密码缺确认票据时配置仍算已同步，并说明去哪确认", () => {
+    const pending = fixture.cases.find((item: { name: string }) => item.name === "needs-confirmation")
+      .receive as HostSyncResult;
+    expect(pending.result).toBe("partial");
+    // 配置与密码分别回执：配置写好了，密码只是等确认，不是失败。
+    expect(pending.receipts).toEqual([
+      { kind: "config", state: "saved" },
+      { kind: "password", state: "needs_confirmation" },
+    ]);
+    expect(pending.password).toBe("needs_confirmation");
+    expect(pending.sessionClosed).toBe(false);
+    const message = hostSyncMessage(pending);
+    expect(message).toContain("confirm");
+    expect(message).toContain("原密码未改动");
+    expect(message).not.toContain(fixture.secretSentinel);
+  });
+
+  it("协议版本与两种调用形态都写在契约里", () => {
+    expect(fixture.protocol).toBe(2);
+    expect(fixture.capabilities).toContain("stdinArgs");
+    expect(fixture.capabilities).toContain("legacyArgv");
+    expect(fixture.capabilities).toContain("confirmation");
+    // 冲突回执不写记录，所以 hostId/password 可以缺省（与 association_* 对齐）。
+    const conflict = fixture.cases.find((item: { name: string }) => item.name === "association-conflict")
+      .receive as HostSyncResult;
+    expect(conflict.hostId).toBeUndefined();
+    expect(conflict.password).toBeUndefined();
+  });
+
+  it("界面提示把确认入口说清楚（终端 confirm 或 T6 界面）", () => {
+    const source = read("src/App.svelte");
+    expect(source).toContain("--host-sync-v1 confirm");
+    expect(source).toContain("T6 界面确认");
+  });
+
   it("原生实现只把结构化结果写到 stdout，密码只以状态出现在回执里", () => {
     const native = read("src-tauri/src/remote_ssh_sync.rs");
     // helper 只打一行 JSON；错误只回错误码，不带诊断文本。

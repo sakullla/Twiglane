@@ -159,11 +159,17 @@ export interface HostSyncSession {
   ttlSeconds: number;
 }
 
-export type HostSyncPasswordState = "equal" | "differs" | "absent" | "unknown";
+export type HostSyncPasswordState =
+  | "equal"
+  | "differs"
+  | "absent"
+  | "unknown"
+  /** 密码需要用户确认才能取回：既不是相同，也不是不可读，绝不折叠成失败。 */
+  | "needs_confirmation";
 
 export interface HostSyncReceipt {
   kind: "config" | "password";
-  state: "unchanged" | "saved" | "failed" | "absent" | "unavailable" | "conflict";
+  state: "unchanged" | "saved" | "failed" | "absent" | "unavailable" | "conflict" | "needs_confirmation";
 }
 
 export interface HostSyncCandidate {
@@ -194,9 +200,11 @@ export interface HostSyncResult {
     | "association_required"
     | "association_conflict"
     | "conflict";
-  hostId: string | null;
+  /* 冲突与未关联回执不写任何记录，所以这三项可以缺省。 */
+  hostId?: string | null;
   sharedHostId: string | null;
-  password: HostSyncPasswordState;
+  password?: HostSyncPasswordState;
+  revision?: number | null;
   receipts: HostSyncReceipt[];
   sessionClosed: boolean;
   candidates?: HostSyncCandidate[];
@@ -213,10 +221,15 @@ export function hostSyncMessage(result: HostSyncResult): string {
       if (saved.length === 0) return "这台主机已同步，没有需要改写的字段。";
       return `这台主机已同步：${saved.map((kind) => (kind === "config" ? "配置" : "密码")).join("、")}已写入本机。`;
     }
-    case "partial":
+    case "partial": {
+      // 密码缺确认票据时配置仍然会写好：不能把整次同步说成失败。
+      if (result.receipts.some((receipt) => receipt.state === "needs_confirmation")) {
+        return "本机配置已按需同步；需要同步密码时请在终端执行 confirm，或在 T6 界面确认后再同步一次。原密码未改动。";
+      }
       return "配置已保存，但密码未能写入系统凭据。原密码仍保留，可在跳转流程里重试。";
+    }
     case "conflict":
-      return "本机这台主机在同步期间被修改，本次没有覆盖。请重新发起跳转。";
+      return "本机这台主机在同步期间被修改或删除，本次没有覆盖、也没有重建记录。请重新发起跳转。";
     case "association_conflict":
       return "本机这条主机记录已关联到另一个共享标识，本次没有写入任何内容。请手动处理这条记录，或改用另一台主机发起跳转。";
     case "association_required": {

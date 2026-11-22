@@ -1,11 +1,12 @@
 {
-  "protocol": 1,
+  "protocol": 2,
   "kind": "host-sync-v1",
+  "capabilities": ["stdinArgs", "legacyArgv", "confirmation"],
   "secretSentinel": "s3cret-do-not-leak",
   "sessionRef": "9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f",
   "deepLink": "twiglane://remote-review?v=1&reviewId=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee&sessionId=11111111-2222-3333-4444-666666666666&targetId=host-a&targetRevision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&peerRevision=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&peerIdentity=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc&worktreeIdentity=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd&worktreePath=%2Fsrv%2Fapp&hostSync=9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f",
   "sourceCheck": {
-    "protocol": 1,
+    "protocol": 2,
     "kind": "host-sync-v1",
     "role": "source",
     "hostId": "host-a",
@@ -23,7 +24,7 @@
       "name": "consistent",
       "description": "两端完全一致：不取回配置或密码，不写记录，不推进修订",
       "receive": {
-        "protocol": 1,
+        "protocol": 2,
         "kind": "host-sync-v1",
         "role": "receiver",
         "result": "consistent",
@@ -47,7 +48,7 @@
       "name": "fetch-config",
       "description": "配置不同、密码相同：只写配置，密码不动",
       "receive": {
-        "protocol": 1,
+        "protocol": 2,
         "kind": "host-sync-v1",
         "role": "receiver",
         "result": "applied",
@@ -71,7 +72,7 @@
       "name": "password-only",
       "description": "配置相同而密码不同：只更新密码，配置不重写",
       "receive": {
-        "protocol": 1,
+        "protocol": 2,
         "kind": "host-sync-v1",
         "role": "receiver",
         "result": "applied",
@@ -95,7 +96,7 @@
       "name": "partial",
       "description": "配置已保存、密码写入失败：保留原密码，会话可重试",
       "receive": {
-        "protocol": 1,
+        "protocol": 2,
         "kind": "host-sync-v1",
         "role": "receiver",
         "result": "partial",
@@ -116,10 +117,34 @@
       }
     },
     {
+      "name": "needs-confirmation",
+      "description": "配置已写入、密码缺一次性确认票据：分别回执，不回滚配置也不判整次失败",
+      "receive": {
+        "protocol": 2,
+        "kind": "host-sync-v1",
+        "role": "receiver",
+        "result": "partial",
+        "hostId": "host-a",
+        "sharedHostId": "11111111-2222-3333-4444-555555555555",
+        "password": "needs_confirmation",
+        "receipts": [
+          {
+            "kind": "config",
+            "state": "saved"
+          },
+          {
+            "kind": "password",
+            "state": "needs_confirmation"
+          }
+        ],
+        "sessionClosed": false
+      }
+    },
+    {
       "name": "unknown",
       "description": "本机读不到密码：只能报 unknown，不当作一致",
       "receive": {
-        "protocol": 1,
+        "protocol": 2,
         "kind": "host-sync-v1",
         "role": "receiver",
         "result": "unknown",
@@ -143,7 +168,7 @@
       "name": "association-required",
       "description": "存在未关联候选：要求显式解决，不按名称或地址自动合并",
       "receive": {
-        "protocol": 1,
+        "protocol": 2,
         "kind": "host-sync-v1",
         "role": "receiver",
         "result": "association_required",
@@ -165,7 +190,7 @@
       "name": "association-conflict",
       "description": "同地址记录已关联到另一个共享标识：返回冲突，不新建重复记录、不写任何内容",
       "receive": {
-        "protocol": 1,
+        "protocol": 2,
         "kind": "host-sync-v1",
         "role": "receiver",
         "result": "association_conflict",

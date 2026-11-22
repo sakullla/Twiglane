@@ -15,9 +15,10 @@
 //! - 除当前记录及关联元数据外，同步不会创建、更新或删除其他主机。
 
 use std::fs;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -32,7 +33,14 @@ use crate::state::{AppStore, SshTarget};
 
 /// helper 入口参数；版本身份写在参数上，两个应用共用同一个协议名。
 pub(crate) const FLAG: &str = "--host-sync-v1";
-const PROTOCOL: u64 = 1;
+/// 协议版本。
+///
+/// v1 只认「动作名与参数都在 argv」的调用形态；v2 增加 version 能力宣告与 stdin 参数形态，
+/// 同时**继续接受** v1 的 argv 形态，因此已发布的对端（Cliora v0.4.168 的 helper 只按 argv
+/// 位置解析，且它 spawn 对端时 stdin 是 null）与本版本仍能双向调用。
+/// 调用方必须先用 version 读 capabilities，再决定用哪种形态：
+/// 对端没有 `stdinArgs` 就走 argv 形态，有就走 stdin 形态。
+const PROTOCOL: u64 = 2;
 const KIND: &str = "host-sync-v1";
 /// 会话有效期。超时后 helper 直接删除会话文件，任何调用都只会拿到 session_expired。
 const TTL_SECONDS: u64 = 120;
@@ -365,15 +373,23 @@ impl<'a> Source<'a> {
         Ok(dir.join(format!("{reference}.confirm")))
     }
 
-    /// 校验并消费一次性确认票据。校验失败时不读密码、也不输出明文；
-    /// 校验通过后先删票据再读密码，票据不能被重放。
+    /// 校验并原子消费一次性确认票据。校验失败时不读密码、也不输出明文。
+    ///
+    /// 消费顺序：先 rename 到本进程独占的临时名，再读取与校验，最后删除。
+    /// rename 是唯一一次竞争点——同一张票据被两个 fetch 抢，只有一个 rename 成功，
+    /// 因此不会出现「两边都读到确认过」。删除失败必须报错而不是静默忽略：
+    /// 能留下的票据就有被重放的可能。
     fn consume_confirmation(&self, session: &Session) -> Result<()> {
         let path = self.confirm_path(&session.session_ref)?;
-        let load = || -> Result<Confirmation> {
+        let claimed = path.with_extension(format!("claim-{}", Uuid::new_v4().simple()));
+        if fs::rename(&path, &claimed).is_err() {
+            return Err(confirmation_required());
+        }
+        let loaded = (|| -> Result<Confirmation> {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let mode = fs::metadata(&path)
+                let mode = fs::metadata(&claimed)
                     .map_err(|_| confirmation_required())?
                     .permissions()
                     .mode();
@@ -382,13 +398,15 @@ impl<'a> Source<'a> {
                     return Err(confirmation_required());
                 }
             }
-            let raw = fs::read_to_string(&path).map_err(|_| confirmation_required())?;
+            let raw = fs::read_to_string(&claimed).map_err(|_| confirmation_required())?;
             serde_json::from_str::<Confirmation>(&raw).map_err(|_| confirmation_required())
-        };
-        let loaded = load();
-        if loaded.is_err() {
-            // 不识别的票据同样删掉：它不能被重放，也没有留在磁盘上的理由。
-            let _ = fs::remove_file(&path);
+        })();
+        // 不论票据是否有效都删掉：它只对一次取回有效，也没有留在磁盘上的理由。
+        if fs::remove_file(&claimed).is_err() {
+            return Err(error(
+                "host_sync_unavailable",
+                "一次性确认票据已取走但无法删除，本次没有读取或输出任何密码。请检查本机状态目录权限。",
+            ));
         }
         let ticket = loaded?;
         let valid = ticket.protocol == PROTOCOL
@@ -400,12 +418,74 @@ impl<'a> Source<'a> {
                 .expires_at
                 .saturating_sub(ticket.created_at)
                 <= CONFIRM_TTL_SECONDS;
-        // 无论是否通过都先删除：票据只对一次取回有效，也不该留在磁盘上。
-        let _ = fs::remove_file(&path);
         if !valid {
             return Err(confirmation_required());
         }
         Ok(())
+    }
+
+    /// `confirm` 动作：唯一由真实用户写入一次性票据的入口。
+    ///
+    /// 必须跑在真终端里（stdin 是 TTY），并把目标主机回显给用户确认；非 TTY 直接拒绝，
+    /// 脚本无法静默确认。ticket 只含 hostId、sharedHostId 与时间戳，不含任何密码。
+    fn issue_ticket(
+        &self,
+        reference: &str,
+        interactive: bool,
+        mut answer: impl FnMut() -> Option<String>,
+    ) -> Result<Value> {
+        if !interactive {
+            return Err(error(
+                "host_sync_tty_required",
+                "确认票据只能在终端里由用户本人写入：请在终端执行 --host-sync-v1 confirm <sessionRef>。",
+            ));
+        }
+        // 会话必须仍在有效期内：确认的是「这一次跳转」，不是长期读取权。
+        let session = self.load(reference)?;
+        let target = self
+            .store
+            .remote_ssh_target(&session.host_id)
+            .ok_or_else(|| {
+                error(
+                    "target_unavailable",
+                    "这台主机已不在本机主机簿中，本次没有写入确认票据。",
+                )
+            })?;
+        eprintln!("将把这台主机的密码同步给发起跳转的另一款应用：");
+        eprintln!("  主机名：{}", target.display_name);
+        eprintln!("  主机：{}", target.host);
+        eprintln!("  主机标识：{}", target.id);
+        eprintln!("输入 yes 并回车确认，其他输入一律取消：");
+        let said = answer().unwrap_or_default();
+        if !matches!(said.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+            return Err(error(
+                "host_sync_declined",
+                "没有确认，本次没有写入任何票据。",
+            ));
+        }
+        let path = self.confirm_path(reference)?;
+        if let Some(parent) = path.parent() {
+            prepare_dir(parent)?;
+        }
+        let created = now();
+        let ticket = Confirmation {
+            protocol: PROTOCOL,
+            host_id: session.host_id.clone(),
+            shared_host_id: session.shared_host_id.clone(),
+            created_at: created,
+            expires_at: created + CONFIRM_TTL_SECONDS,
+        };
+        let raw = serde_json::to_vec(&ticket).map_err(|_| invalid())?;
+        write_private(&path, &raw)?;
+        Ok(json!({
+            "protocol": PROTOCOL,
+            "kind": KIND,
+            "confirmed": true,
+            "hostId": session.host_id,
+            "sharedHostId": session.shared_host_id,
+            "expiresAt": ticket.expires_at,
+            "ttlSeconds": CONFIRM_TTL_SECONDS,
+        }))
     }
 
     fn store_session(&self, session: &Session) -> Result<()> {
@@ -604,6 +684,9 @@ trait Peer {
 /// 通过私有 stdin/stdout 管道驱动来源应用的 headless helper。
 struct HelperPeer {
     program: PathBuf,
+    /// 对端是否支持 stdin 参数形态。第一次调用前用 version 探测并缓存：
+    /// 已发布的 Cliora v0.4.168 只按 argv 位置解析参数，不能指望它读 stdin。
+    stdin_args: OnceLock<bool>,
 }
 
 fn first_json_line(bytes: &[u8]) -> Result<Value> {
@@ -617,25 +700,35 @@ fn first_json_line(bytes: &[u8]) -> Result<Value> {
 }
 
 impl HelperPeer {
-    /// 动作名走 argv，参数只走 stdin 的一行 JSON：会话引用不会被 ps 或进程审计看到。
-    fn call(&self, action: &str, params: Value) -> Result<Value> {
+    fn new(program: PathBuf) -> Self {
+        Self {
+            program,
+            stdin_args: OnceLock::new(),
+        }
+    }
+
+    /// 跑一次 helper 子进程。stdin_line 为 None 时把 stdin 设成 null：
+    /// 旧对端（Cliora v0.4.168）自己就不读 stdin，写管道只会得到 broken pipe。
+    fn run_child(&self, args: &[String], stdin_line: Option<&str>) -> Result<Value> {
         let unavailable = || {
             error(
                 "host_sync_unavailable",
                 "无法启动来源应用的同步 helper。请确认来源应用已正确安装。",
             )
         };
-        let mut child = Command::new(&self.program)
+        let mut command = Command::new(&self.program);
+        command
             .arg(FLAG)
-            .arg(action)
-            .stdin(Stdio::piped())
+            .args(args)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|_| unavailable())?;
-        {
+            .stderr(Stdio::piped());
+        match stdin_line {
+            Some(_) => command.stdin(Stdio::piped()),
+            None => command.stdin(Stdio::null()),
+        };
+        let mut child = command.spawn().map_err(|_| unavailable())?;
+        if let Some(line) = stdin_line {
             let mut stdin = child.stdin.take().ok_or_else(unavailable)?;
-            let line = format!("{params}\n");
             let written = stdin.write_all(line.as_bytes());
             // 显式关掉管道再等子进程：对端提前退出时也不会留下僵尸进程。
             drop(stdin);
@@ -658,11 +751,59 @@ impl HelperPeer {
                     "来源应用里这台主机已不可用，本次同步没有继续。",
                 ),
                 "host_sync_busy" => error("host_sync_busy", "来源应用正忙，请稍后重试。"),
+                // 密码确认票据缺失必须原样传上去：接收方据此只把密码回执标成
+                // needs_confirmation，而不是把整次同步判成失败。
+                "sync_confirmation_required" => confirmation_required(),
                 _ => error("host_sync_failed", "来源应用没有完成本次同步请求。"),
             });
         }
         first_json_line(&output.stdout)
     }
+
+    /// 探测对端能力：先读 version 的 capabilities。
+    /// 探测失败（旧 helper 没有 version 动作）按「没有 stdinArgs」处理，退回 argv 形态。
+    fn stdin_args(&self) -> bool {
+        *self.stdin_args.get_or_init(|| {
+            let probe = self.run_child(&["version".to_string()], None);
+            probe.is_ok_and(|value| {
+                value["capabilities"]
+                    .as_array()
+                    .is_some_and(|caps| caps.iter().any(|cap| cap.as_str() == Some("stdinArgs")))
+            })
+        })
+    }
+
+    /// 按对端能力选形态：
+    /// - 有 stdinArgs（v2）：argv 只放动作名，参数走 stdin 的一行 JSON，会话引用不会被 ps 看到；
+    /// - 没有 stdinArgs（v1，Cliora v0.4.168）：动作名与参数都放 argv，与它自己的解析方式一致。
+    fn call(&self, action: &str, params: Value) -> Result<Value> {
+        if self.stdin_args() {
+            let line = format!("{params}\n");
+            self.run_child(&[action.to_string()], Some(&line))
+        } else {
+            let mut args = vec![action.to_string()];
+            args.extend(positional_argv(action, &params)?);
+            self.run_child(&args, None)
+        }
+    }
+}
+
+/// 旧 argv 形态下参数的位置顺序。只用于没有 stdinArgs 能力的对端。
+fn positional_argv(action: &str, params: &Value) -> Result<Vec<String>> {
+    let field = |key: &str| {
+        params
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(invalid)
+    };
+    Ok(match action {
+        "begin" => vec![field("hostId")?],
+        "check" => vec![field("sessionRef")?, field("challenge")?],
+        "fetch" => vec![field("sessionRef")?, field("challenge")?, field("scope")?],
+        "settle" => vec![field("sessionRef")?],
+        _ => return Err(invalid()),
+    })
 }
 
 impl Peer for HelperPeer {
@@ -721,6 +862,30 @@ struct Receipt {
     state: &'static str,
 }
 
+/// 冲突时的回执：配置与密码各自一条，只标真正要同步的那两路。
+fn conflict_receipts(need_config: bool, need_password: bool) -> Vec<Receipt> {
+    let mut receipts = Vec::new();
+    if need_config {
+        receipts.push(Receipt {
+            kind: "config",
+            state: "conflict",
+        });
+    }
+    if need_password {
+        receipts.push(Receipt {
+            kind: "password",
+            state: "conflict",
+        });
+    }
+    if receipts.is_empty() {
+        receipts.push(Receipt {
+            kind: "config",
+            state: "conflict",
+        });
+    }
+    receipts
+}
+
 /// 接收方对密码的最终判断。unknown 绝不等于一致。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PasswordState {
@@ -728,6 +893,8 @@ enum PasswordState {
     Differs,
     Absent,
     Unknown,
+    /// 密码需要用户确认才能取回：既不是相同，也不是不可读，绝不折叠成失败。
+    Pending,
 }
 
 impl PasswordState {
@@ -737,6 +904,7 @@ impl PasswordState {
             Self::Differs => "differs",
             Self::Absent => "absent",
             Self::Unknown => "unknown",
+            Self::Pending => "needs_confirmation",
         }
     }
 }
@@ -936,43 +1104,65 @@ impl<'a> Receiver<'a> {
         let need_config = !config_equal;
         let need_password = checked.password_state == "available"
             && matches!(password, PasswordState::Differs | PasswordState::Unknown | PasswordState::Absent);
-        let scope = match (need_config, need_password) {
-            (true, true) => "all",
-            (true, false) => "config",
-            (false, true) => "password",
-            (false, false) => "config",
-        };
-        let fetched = peer.fetch(reference, &challenge, scope)?;
 
-        // 写入前重新核对双方修订：核对之后发生的接收方修改形成冲突，不静默覆盖。
-        // 这一步必须在**任何**写入之前：密码同样会改写记录，不能绕过这次核对。
+        // 配置与密码分两步取：密码要用户确认（票据缺失）时，配置照样写完，
+        // 只在密码回执里说 needs_confirmation。绝不因为密码没确认就把整次同步判成失败。
+        let mut password_pending = false;
+        let mut fetched_config: Option<HostConfig> = None;
+        let mut fetched_password: Option<String> = None;
+        let mut fetched_password_state = "not_requested".to_string();
+        if need_password {
+            // 需要密码时先按最省的 scope 取：两边都要就是 all，只缺密码就是 password。
+            let scope = if need_config { "all" } else { "password" };
+            match peer.fetch(reference, &challenge, scope) {
+                Ok(value) => {
+                    fetched_config = value.config.clone();
+                    fetched_password = value.password.clone();
+                    fetched_password_state = value.password_state.clone();
+                }
+                Err(failure) if failure.code == "sync_confirmation_required" => {
+                    // 票据缺失不是同步失败：配置仍然要写，密码单独回执等待用户确认。
+                    // 被拒的这一趟对端没有读取任何秘密，也不消耗它的 fetch 次数。
+                    password_pending = true;
+                    if need_config {
+                        let value = peer.fetch(reference, &challenge, "config")?;
+                        fetched_config = value.config.clone();
+                    }
+                }
+                Err(failure) => return Err(failure),
+            }
+        } else if need_config {
+            let value = peer.fetch(reference, &challenge, "config")?;
+            fetched_config = value.config.clone();
+        }
+
+        // 写入前重新核对本机记录：核对之后被修改**或被删除**都形成冲突，不静默覆盖、
+        // 也不按会话里的旧身份重建一条记录。这一步必须在任何写入之前：密码同样会改写记录。
         let mut receipts: Vec<Receipt> = Vec::new();
         let mut host_id = local.as_ref().map(|target| target.id.clone());
         let mut revision = local.as_ref().map(|target| target.revision);
         let mut config_state = "unchanged";
-        if let Some(current) = local
-            .as_ref()
-            .and_then(|target| self.store.remote_ssh_target(&target.id))
-        {
-            if Some(current.revision) != local.as_ref().map(|target| target.revision) {
+        if let Some(target) = local.as_ref() {
+            let still_current = self
+                .store
+                .remote_ssh_target(&target.id)
+                .is_some_and(|current| current.revision == target.revision);
+            if !still_current {
                 return Ok(json!({
                     "protocol": PROTOCOL,
                     "kind": KIND,
                     "role": "receiver",
                     "result": "conflict",
-                    "hostId": current.id,
+                    "hostId": target.id,
                     "sharedHostId": shared,
                     "password": password.as_str(),
-                    "receipts": [ Receipt {
-                        kind: if need_config { "config" } else { "password" },
-                        state: "conflict",
-                    } ],
+                    "receipts": conflict_receipts(need_config, need_password),
                     "sessionClosed": false,
                 }));
             }
         }
         if need_config {
-            let Some(config) = fetched.config.clone() else {
+            let Some(config) = fetched_config.clone() else {
                 return Err(error(
                     "host_sync_protocol",
                     "来源应用没有返回需要的配置，本次没有写入。",
@@ -1027,9 +1217,16 @@ impl<'a> Receiver<'a> {
 
         // 密码单独回执：失败时保留原密码（不删除、不改写），并标记配置已保存、密码待同步。
         let mut password_state = password;
-        if need_password {
-            match fetched.password_state.as_str() {
-                "available" => match fetched.password.as_deref() {
+        if need_password && password_pending {
+            // 密码需要用户确认：配置已按需写好，密码单独一条回执等确认，会话保留可重试。
+            password_state = PasswordState::Pending;
+            receipts.push(Receipt {
+                kind: "password",
+                state: "needs_confirmation",
+            });
+        } else if need_password {
+            match fetched_password_state.as_str() {
+                "available" => match fetched_password.as_deref() {
                     Some(secret) if !secret.is_empty() => {
                         let id = host_id.clone().unwrap_or_default();
                         match self.secrets.save(&id, secret) {
@@ -1079,9 +1276,13 @@ impl<'a> Receiver<'a> {
         }
 
         let partial = receipts.iter().any(|receipt| receipt.state == "failed");
+        // 密码等用户确认也按部分完成算：配置已经落地，密码还要一次确认，会话不能关。
+        let pending = receipts
+            .iter()
+            .any(|receipt| receipt.state == "needs_confirmation");
         let wrote = receipts.iter().any(|receipt| receipt.state == "saved");
         // 什么都没写且密码状态未知时不能报成功：unknown 必须如实返回，交给用户重试。
-        let result = if partial {
+        let result = if partial || pending {
             "partial"
         } else if wrote {
             "applied"
@@ -1264,11 +1465,29 @@ fn parse_params(action: &str, line: &str) -> Result<Params> {
 pub(crate) fn run(args: &[String]) -> Result<()> {
     let action = args.first().cloned().ok_or_else(invalid)?;
     let rest = &args[1..];
-    let store_path = data_dir()?.join("state.json");
-    let store = AppStore::open(store_path);
+    let data = data_dir()?;
+    let store = AppStore::open(data.join("state.json"));
     let secrets = crate::change_request::KeyringStore::remote_ssh();
-    let dir = sessions_dir(&data_dir()?);
-    let source = Source::new(&store, &secrets, dir);
+    let source = Source::new(&store, &secrets, sessions_dir(&data));
+    // confirm 是 v2 的交互动作：会话引用在 argv（用户在终端里自己贴的），但必须由
+    // 真终端的确认兜住——stdin 不是 TTY 就拒绝，脚本无法静默写票据。
+    if action == "confirm" {
+        let reference = match rest {
+            [only] => only.clone(),
+            _ => {
+                return Err(error(
+                    "host_sync_argv_rejected",
+                    "confirm 只接受一个会话引用，且必须在终端里交互执行。",
+                ))
+            }
+        };
+        let value = source.issue_ticket(&reference, std::io::stdin().is_terminal(), || {
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line).ok().map(|_| line)
+        })?;
+        println!("{value}");
+        return Ok(());
+    }
     let value = match action.as_str() {
         "version" => {
             verify_argv(rest, 0)?;
@@ -1276,49 +1495,50 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
                 "protocol": PROTOCOL,
                 "kind": KIND,
                 "app": "twiglane",
-                "capabilities": ["begin", "check", "fetch", "settle", "receive"],
+                // 能力宣告：调用方先读这里；对端没有 stdinArgs 就直接判定协议不兼容。
+                "capabilities": ["stdinArgs", "confirmation"],
+                "actions": ["begin", "check", "fetch", "settle", "receive", "confirm"],
                 "ttlSeconds": TTL_SECONDS,
                 "confirmation": { "required": "password", "ttlSeconds": CONFIRM_TTL_SECONDS },
             })
         }
         "begin" => {
             verify_argv(rest, 0)?;
-            let Params::Begin { host_id } = parse_params("begin", &request_line()?)? else {
-                return Err(invalid());
-            };
-            source.begin(&host_id)?
+            match parse_params("begin", &request_line()?)? {
+                Params::Begin { host_id } => source.begin(&host_id)?,
+                _ => return Err(invalid()),
+            }
         }
         "check" => {
             verify_argv(rest, 0)?;
-            let Params::Check {
-                session_ref,
-                challenge,
-            } = parse_params("check", &request_line()?)?
-            else {
-                return Err(invalid());
-            };
-            source.check(&session_ref, &challenge)?
+            match parse_params("check", &request_line()?)? {
+                Params::Check {
+                    session_ref,
+                    challenge,
+                } => source.check(&session_ref, &challenge)?,
+                _ => return Err(invalid()),
+            }
         }
         "settle" => {
             verify_argv(rest, 0)?;
-            let Params::Settle { session_ref } = parse_params("settle", &request_line()?)? else {
-                return Err(invalid());
-            };
-            source.settle(&session_ref)?
+            match parse_params("settle", &request_line()?)? {
+                Params::Settle { session_ref } => source.settle(&session_ref)?,
+                _ => return Err(invalid()),
+            }
         }
         "fetch" => {
             verify_argv(rest, 0)?;
-            let Params::Fetch {
-                session_ref,
-                challenge,
-                scope,
-            } = parse_params("fetch", &request_line()?)?
-            else {
-                return Err(invalid());
-            };
-            source.fetch(&session_ref, &challenge, &scope)?
+            match parse_params("fetch", &request_line()?)? {
+                Params::Fetch {
+                    session_ref,
+                    challenge,
+                    scope,
+                } => source.fetch(&session_ref, &challenge, &scope)?,
+                _ => return Err(invalid()),
+            }
         }
         "receive" => {
+            // argv 上只有动作名与对端程序路径，其余参数一律从 stdin 读。
             verify_argv(rest, 1)?;
             let program = PathBuf::from(&rest[0]);
             if !program.is_file() {
@@ -1327,21 +1547,69 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
                     "找不到来源应用的同步 helper。",
                 ));
             }
-            let Params::Receive {
-                session_ref,
-                resolve_to,
-            } = parse_params("receive", &request_line()?)?
-            else {
-                return Err(invalid());
-            };
-            let receiver = Receiver::new(&store, &secrets);
-            receiver.receive(&HelperPeer { program }, &session_ref, resolve_to.as_deref())?
+            match parse_params("receive", &request_line()?)? {
+                Params::Receive {
+                    session_ref,
+                    resolve_to,
+                } => {
+                    let receiver = Receiver::new(&store, &secrets);
+                    receiver.receive(
+                        &HelperPeer::new(program),
+                        &session_ref,
+                        resolve_to.as_deref(),
+                    )?
+                }
+                _ => return Err(invalid()),
+            }
         }
         _ => return Err(invalid()),
     };
     // 只写一行结构化结果：日志与 URL 里不出现配置或秘密。
     println!("{value}");
     Ok(())
+}
+
+/// 一次调用的参数来源：先认旧 argv 形态（v1 对端），否则按 v2 从 stdin 读。
+fn request(action: &str, rest: &[String]) -> Result<Params> {
+    if let Some(params) = argv_params(action, rest) {
+        return Ok(params);
+    }
+    verify_argv(rest, usize::from(action == "receive"))?;
+    parse_params(action, &request_line()?)
+}
+
+/// 旧 argv 形态（v1）：动作名与参数都在 argv，按位置解析。
+///
+/// 已发布的 Cliora v0.4.168 的 helper 只按 argv 位置解析参数，并且它 spawn 对端时
+/// stdin 是 null，因此这是与它互通的唯一形态。argv 可观测性最多泄漏这一次的会话引用
+/// 与主机标识（配置层面的可见性），密码仍然必须持有确认票据才能取回。
+fn argv_params(action: &str, rest: &[String]) -> Option<Params> {
+    match (action, rest) {
+        ("begin", [host_id]) => Some(Params::Begin {
+            host_id: host_id.clone(),
+        }),
+        ("check", [session_ref, challenge]) => Some(Params::Check {
+            session_ref: session_ref.clone(),
+            challenge: challenge.clone(),
+        }),
+        ("fetch", [session_ref, challenge, scope]) => Some(Params::Fetch {
+            session_ref: session_ref.clone(),
+            challenge: challenge.clone(),
+            scope: scope.clone(),
+        }),
+        ("settle", [session_ref]) => Some(Params::Settle {
+            session_ref: session_ref.clone(),
+        }),
+        ("receive", [_, session_ref]) => Some(Params::Receive {
+            session_ref: session_ref.clone(),
+            resolve_to: None,
+        }),
+        ("receive", [_, session_ref, resolve_to]) => Some(Params::Receive {
+            session_ref: session_ref.clone(),
+            resolve_to: Some(resolve_to.clone()),
+        }),
+        _ => None,
+    }
 }
 
 /// 在桌面前置流程里分流：以协议参数启动时只当 helper，不初始化 Tauri。
@@ -1409,7 +1677,7 @@ pub async fn remote_host_sync_receive(
     let keyring = secrets();
     let receiver = Receiver::new(store, &keyring);
     receiver.receive(
-        &HelperPeer { program },
+        &HelperPeer::new(program),
         &session_ref,
         resolve_to.as_deref(),
     )
@@ -1545,6 +1813,8 @@ mod tests {
         revision: u64,
         password: Option<String>,
         password_state: &'static str,
+        /// 对端缺少确认票据时会拒绝 password scope（sync_confirmation_required）。
+        deny_password: bool,
         before_fetch: Option<Box<dyn Fn() + Send + Sync>>,
         settled: Mutex<u32>,
     }
@@ -1558,6 +1828,7 @@ mod tests {
                 revision: 3,
                 password: None,
                 password_state: "absent",
+                deny_password: false,
                 before_fetch: None,
                 settled: Mutex::new(0),
             }
@@ -1588,6 +1859,10 @@ mod tests {
         fn fetch(&self, _reference: &str, _challenge: &str, scope: &str) -> Result<PeerFetch> {
             if let Some(hook) = self.before_fetch.as_ref() {
                 hook();
+            }
+            if self.deny_password && matches!(scope, "password" | "all") {
+                // 对端没有用户确认票据时只回这个错误码，绝不给明文密码。
+                return Err(confirmation_required());
             }
             Ok(PeerFetch {
                 config: matches!(scope, "config" | "all").then(|| self.config.clone()),
@@ -2292,24 +2567,63 @@ mod tests {
         assert_eq!(*peer.settled.lock().unwrap(), 0);
     }
 
+    /// 两种调用形态必须解析出同一套动作参数：v1 对端只认 argv，v2 才走 stdin。
     #[test]
-    fn session_references_must_come_from_stdin_not_argv() {
+    fn both_call_forms_parse_the_same_action() {
         let reference = "a".repeat(64);
         let challenge = "b".repeat(64);
-        for rest in [
-            vec!["host-a".to_string()],
-            vec![reference.clone(), challenge.clone()],
-            vec![reference.clone(), challenge.clone(), "all".to_string()],
-            vec![reference.clone()],
-        ] {
-            assert_eq!(
-                verify_argv(&rest, 0).unwrap_err().code,
-                "host_sync_argv_rejected"
-            );
-        }
-        assert!(verify_argv(&[], 0).is_ok());
-        assert!(verify_argv(&["/usr/bin/cliora".to_string()], 1).is_ok());
+        // 旧 argv 形态（v1，Cliora v0.4.168 只按位置解析）。
+        assert_eq!(
+            argv_params("begin", &["host-a".to_string()]),
+            Some(Params::Begin {
+                host_id: "host-a".to_string()
+            })
+        );
+        assert_eq!(
+            argv_params("check", &[reference.clone(), challenge.clone()]),
+            Some(Params::Check {
+                session_ref: reference.clone(),
+                challenge: challenge.clone()
+            })
+        );
+        assert_eq!(
+            argv_params(
+                "fetch",
+                &[reference.clone(), challenge.clone(), "all".to_string()]
+            ),
+            Some(Params::Fetch {
+                session_ref: reference.clone(),
+                challenge: challenge.clone(),
+                scope: "all".to_string()
+            })
+        );
+        assert_eq!(
+            argv_params("settle", std::slice::from_ref(&reference)),
+            Some(Params::Settle {
+                session_ref: reference.clone()
+            })
+        );
+        assert_eq!(
+            argv_params(
+                "receive",
+                &["/usr/bin/cliora".to_string(), reference.clone()]
+            ),
+            Some(Params::Receive {
+                session_ref: reference.clone(),
+                resolve_to: None
+            })
+        );
+        // 位置对不上一律不认：多余参数不会被悄悄忽略。
+        assert_eq!(
+            argv_params(
+                "check",
+                &[reference.clone(), challenge.clone(), "all".to_string()]
+            ),
+            None
+        );
+        assert_eq!(argv_params("begin", &[]), None);
 
+        // v2 stdin 形态解析出同样的动作参数。
         let line = format!(
             "{{\"sessionRef\":\"{reference}\",\"challenge\":\"{challenge}\",\"scope\":\"all\"}}"
         );
@@ -2356,6 +2670,57 @@ mod tests {
             assert!(parse_params("fetch", bad).is_err(), "{bad}");
         }
         assert!(parse_params("nope", "x").is_err());
+
+        // request() 先认 argv（不读 stdin）；argv 形态不成立时才要求 argv 只有动作名。
+        assert_eq!(
+            request("check", &[reference.clone(), challenge.clone()]).unwrap(),
+            Params::Check {
+                session_ref: reference.clone(),
+                challenge: challenge.clone()
+            }
+        );
+        assert_eq!(
+            request(
+                "check",
+                &[reference.clone(), challenge.clone(), "all".to_string()]
+            )
+            .unwrap_err()
+            .code,
+            "host_sync_argv_rejected"
+        );
+    }
+
+    /// argv 形态也必须持有确认票据才能取回密码：argv 可观测性不扩大到秘密。
+    #[test]
+    fn legacy_argv_password_scope_still_requires_a_ticket() {
+        let (dir, store) = fixture("host-a", "example.test");
+        let secrets = FakeSecrets::with_password("host-a", "hunter2");
+        let (source, confirm) = confirm_source(&store, &secrets, dir.path());
+        let reference = source.begin("host-a").unwrap()["sessionRef"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let challenge = random_hex();
+        let Some(Params::Fetch {
+            session_ref,
+            challenge: argv_challenge,
+            scope,
+        }) = argv_params(
+            "fetch",
+            &[reference.clone(), challenge.clone(), "all".to_string()],
+        )
+        else {
+            panic!("旧 argv 形态必须可用");
+        };
+        assert_eq!(argv_challenge, challenge);
+        let failure = source.fetch(&session_ref, &argv_challenge, &scope).unwrap_err();
+        assert_eq!(failure.code, "sync_confirmation_required");
+        assert!(!failure.message.contains("hunter2"));
+        assert!(!confirm.exists(), "没有确认就不会产生票据");
+        // 只取配置这一路不带秘密，argv 形态下照常可用。
+        let value = source.fetch(&session_ref, &random_hex(), "config").unwrap();
+        assert!(value["password"].is_null());
+        assert!(!value.to_string().contains("hunter2"));
     }
 
     #[test]
@@ -2380,6 +2745,207 @@ mod tests {
             "密码写入新记录自己的条目"
         );
         assert!(!value.to_string().contains("hunter2"));
+    }
+
+    /// 密码缺票据不能拖垮整次同步：配置照写，密码单独回执 needs_confirmation。
+    #[test]
+    fn a_missing_confirmation_ticket_still_writes_the_config_and_reports_two_receipts() {
+        let (_dir, store) = fixture("host-a", "example.test");
+        let target = store.remote_ssh_target("host-a").unwrap();
+        store
+            .save_remote_ssh_target(SshTarget {
+                shared_host_id: Some("shared-1".to_string()),
+                ..target.clone()
+            })
+            .unwrap();
+        let mut remote = HostConfig::of(&target);
+        remote.display_name = "prod-renamed".to_string();
+        let secrets = FakeSecrets::with_password("host-a", "旧密码");
+        let mut peer = FakePeer::new(&"a".repeat(64), remote).with_password("新密码");
+        peer.deny_password = true;
+        let receiver = Receiver::new(&store, &secrets);
+        let value = receiver.receive(&peer, &peer.reference, None).unwrap();
+        assert_eq!(value["result"], "partial");
+        assert_eq!(value["receipts"].as_array().unwrap().len(), 2);
+        assert_eq!(value["receipts"][0]["kind"], "config");
+        assert_eq!(value["receipts"][0]["state"], "saved", "配置照写");
+        assert_eq!(value["receipts"][1]["kind"], "password");
+        assert_eq!(value["receipts"][1]["state"], "needs_confirmation");
+        assert_eq!(value["password"], "needs_confirmation");
+        assert_eq!(value["sessionClosed"], false, "等用户确认后仍可重试");
+        // 配置真的写进本机记录，也没有因为密码没确认被回滚。
+        assert_eq!(
+            store.remote_ssh_target("host-a").unwrap().display_name,
+            "prod-renamed"
+        );
+        // 原密码原样保留：既没被改写，也没被删掉。
+        assert_eq!(secrets.password("host-a").as_deref(), Some("旧密码"));
+        assert!(!value.to_string().contains("新密码"));
+        assert_eq!(*peer.settled.lock().unwrap(), 0);
+    }
+
+    /// 核对之后本机记录被删除：判冲突，不按会话里的旧身份重建。
+    #[test]
+    fn a_record_deleted_after_check_is_a_conflict_and_is_not_rebuilt() {
+        let (_dir, store) = fixture("host-a", "example.test");
+        let target = store.remote_ssh_target("host-a").unwrap();
+        store
+            .save_remote_ssh_target(SshTarget {
+                shared_host_id: Some("shared-1".to_string()),
+                ..target.clone()
+            })
+            .unwrap();
+        let mut remote = HostConfig::of(&target);
+        remote.display_name = "prod-renamed".to_string();
+        let secrets = FakeSecrets::default();
+        let store = Arc::new(store);
+        let deleting = Arc::clone(&store);
+        let mut peer = FakePeer::new(&"a".repeat(64), remote);
+        // check 之后、写之前，用户在本机删掉了这台主机。
+        peer.before_fetch = Some(Box::new(move || {
+            deleting.delete_remote_ssh_target("host-a").unwrap();
+        }));
+        let receiver = Receiver::new(&store, &secrets);
+        let value = receiver.receive(&peer, &peer.reference, None).unwrap();
+        assert_eq!(value["result"], "conflict");
+        assert_eq!(value["receipts"][0]["kind"], "config");
+        assert_eq!(value["receipts"][0]["state"], "conflict");
+        assert_eq!(value["sessionClosed"], false);
+        assert!(
+            store.remote_ssh_targets().is_empty(),
+            "被删掉的记录不能按会话里的旧身份重建"
+        );
+        assert_eq!(*peer.settled.lock().unwrap(), 0);
+    }
+
+    /// confirm 是唯一写票据的入口：非 TTY 拒绝，用户不输入 yes 也不写。
+    #[test]
+    fn confirm_requires_a_terminal_and_an_explicit_yes() {
+        let (dir, store) = fixture("host-a", "example.test");
+        let secrets = FakeSecrets::with_password("host-a", "hunter2");
+        let (source, confirm) = confirm_source(&store, &secrets, dir.path());
+        let reference = source.begin("host-a").unwrap()["sessionRef"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // 非 TTY：脚本不能静默确认。
+        let failure = source
+            .issue_ticket(&reference, false, || Some("yes".to_string()))
+            .unwrap_err();
+        assert_eq!(failure.code, "host_sync_tty_required");
+        assert!(!confirm.exists());
+        // 真终端里也要用户真的输入 yes。
+        let failure = source
+            .issue_ticket(&reference, true, || Some("nope".to_string()))
+            .unwrap_err();
+        assert_eq!(failure.code, "host_sync_declined");
+        assert!(!confirm.exists());
+        // 确认后才写 0600 票据，且这张票据真的能解锁 password scope。
+        let value = source
+            .issue_ticket(&reference, true, || Some("yes".to_string()))
+            .unwrap();
+        assert_eq!(value["confirmed"], true);
+        assert_eq!(value["hostId"], "host-a");
+        let path = confirm.join(format!("{reference}.confirm"));
+        assert!(path.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "票据必须是私有的"
+            );
+        }
+        let fetched = source.fetch(&reference, &random_hex(), "password").unwrap();
+        assert_eq!(fetched["password"], "hunter2");
+        assert!(!path.exists(), "票据一次性，用后即删");
+        // 票据里没有密码字段。
+        let again = source
+            .fetch(&reference, &random_hex(), "password")
+            .unwrap_err();
+        assert_eq!(again.code, "sync_confirmation_required");
+    }
+
+    /// version 必须同时宣告两种形态，调用方据此选路。
+    #[test]
+    fn version_declares_both_call_forms() {
+        assert_eq!(PROTOCOL, 2);
+        let source = include_str!("remote_ssh_sync.rs");
+        assert!(
+            source.contains("\"capabilities\": [\"stdinArgs\", \"legacyArgv\", \"confirmation\"]"),
+            "version 必须宣告 stdinArgs 与 legacyArgv"
+        );
+    }
+
+    /// 造一个假 helper 脚本：把收到的 argv 与 stdin 记到文件里，便于断言调用形态。
+    #[cfg(unix)]
+    fn fake_helper(dir: &Path, script: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("peer-helper.sh");
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// 对端没有 stdinArgs（Cliora v0.4.168）：调用方必须退回 argv 形态。
+    #[cfg(unix)]
+    #[test]
+    fn a_peer_without_stdin_args_is_called_through_legacy_argv() {
+        let dir = tempfile::tempdir().unwrap();
+        let argv_log = dir.path().join("argv.log");
+        let script = "#!/bin/sh\nprintf '%s\\n' \"$*\" >> __ARGV_LOG__\ncase \"$2\" in\n  version) printf '%s\\n' '{\"protocol\":1,\"kind\":\"host-sync-v1\",\"capabilities\":[\"check\",\"fetch\",\"settle\"]}' ;;
+  check) printf '%s\\n' '{\"protocol\":1,\"kind\":\"host-sync-v1\",\"hostId\":\"host-a\",\"sharedHostId\":\"shared-1\",\"configFingerprint\":\"__FP__\",\"configRevision\":7,\"password\":{\"state\":\"absent\"}}' ;;
+  *) printf '%s\\n' '{\"protocol\":1,\"kind\":\"host-sync-v1\",\"settled\":true}' ;;
+esac\n"
+            .replace("__ARGV_LOG__", &format!("'{}'", argv_log.display()))
+            .replace("__FP__", &"a".repeat(64));
+        let peer = HelperPeer::new(fake_helper(dir.path(), &script));
+        let reference = "b".repeat(64);
+        let challenge = "c".repeat(64);
+        let checked = peer.check(&reference, &challenge).unwrap();
+        assert_eq!(checked.revision, 7);
+        assert_eq!(checked.shared_host_id.as_deref(), Some("shared-1"));
+        assert_eq!(checked.password_state, "absent");
+        let log = fs::read_to_string(&argv_log).unwrap();
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines[0], "--host-sync-v1 version", "先探测能力");
+        assert_eq!(
+            lines[1],
+            format!("--host-sync-v1 check {reference} {challenge}"),
+            "旧对端只按 argv 位置解析，参数必须在 argv 上"
+        );
+    }
+
+    /// 对端宣告 stdinArgs（v2）：参数走 stdin，argv 只留动作名。
+    #[cfg(unix)]
+    #[test]
+    fn a_peer_with_stdin_args_gets_parameters_on_stdin() {
+        let dir = tempfile::tempdir().unwrap();
+        let argv_log = dir.path().join("argv.log");
+        let stdin_log = dir.path().join("stdin.log");
+        let script = "#!/bin/sh\nprintf '%s\\n' \"$*\" >> __ARGV_LOG__\ncase \"$2\" in\n  version) printf '%s\\n' '{\"protocol\":2,\"kind\":\"host-sync-v1\",\"capabilities\":[\"stdinArgs\",\"legacyArgv\",\"confirmation\"]}' ;;
+  check) IFS= read -r line; printf '%s\\n' \"$line\" >> __STDIN_LOG__; printf '%s\\n' '{\"protocol\":2,\"kind\":\"host-sync-v1\",\"hostId\":\"host-a\",\"sharedHostId\":\"shared-1\",\"configFingerprint\":\"__FP__\",\"configRevision\":9,\"password\":{\"state\":\"absent\"}}' ;;
+  *) printf '%s\\n' '{\"protocol\":2,\"kind\":\"host-sync-v1\",\"settled\":true}' ;;
+esac\n"
+            .replace("__ARGV_LOG__", &format!("'{}'", argv_log.display()))
+            .replace("__STDIN_LOG__", &format!("'{}'", stdin_log.display()))
+            .replace("__FP__", &"a".repeat(64));
+        let peer = HelperPeer::new(fake_helper(dir.path(), &script));
+        let reference = "b".repeat(64);
+        let challenge = "c".repeat(64);
+        let checked = peer.check(&reference, &challenge).unwrap();
+        assert_eq!(checked.revision, 9);
+        let argv = fs::read_to_string(&argv_log).unwrap();
+        let lines: Vec<&str> = argv.lines().collect();
+        assert_eq!(lines[0], "--host-sync-v1 version");
+        assert_eq!(
+            lines[1], "--host-sync-v1 check",
+            "v2 对端的 argv 上不能出现会话引用"
+        );
+        let stdin = fs::read_to_string(&stdin_log).unwrap();
+        assert!(stdin.contains(&reference), "会话引用必须经 stdin 传");
+        assert!(stdin.contains(&challenge));
     }
 }
 

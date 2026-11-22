@@ -3209,7 +3209,10 @@
    */
   function announceHostSyncHint(hasSession: boolean) {
     if (!hasSession) return;
-    notice("本次跳转带有主机同步会话；本版本还没有应用内的同步接收，本机主机配置与密码不会被改动。");
+    notice(
+      "本次跳转带有主机同步会话；本版本还没有应用内的同步接收，本机主机配置与密码不会被改动。" +
+        "需要同步密码时请在终端执行 --host-sync-v1 confirm <sessionRef>，或在 T6 界面确认。",
+    );
   }
 
   async function handleRemoteReviewLink(url: string) {

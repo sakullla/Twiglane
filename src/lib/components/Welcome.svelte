@@ -51,6 +51,10 @@
     onDiagnose,
   }: Props = $props();
   const LIMIT = 5;
+  /** 远端仓库显示真实主机与远端路径；内部仓库键只用于打开与身份判定。 */
+  function repoPathLabel(repo: RecentRepo): string {
+    return repo.remotePath ?? repo.path;
+  }
   let query = $state("");
   let items = $derived(repos ?? recent);
   let searchable = $derived(items.length > LIMIT);
@@ -232,7 +236,7 @@
           {#each shown as repo, index (repo.path)}
             <button
               type="button"
-              title={repo.path}
+              title={repoPathLabel(repo)}
               onclick={() => onOpen(repo.path)}
               oncontextmenu={(event) => {
                 if (!onContextMenu) return;
@@ -246,7 +250,9 @@
                 <span class="repo-name">{#each matchParts(repo.name, searching ? query : "") as part}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span>
                 <span class={sameNames.has(repo.name) ? "repo-path-full" : "repo-path"}>
                   <bdi>
-                    {#if divergences.get(repo.path)?.diverge}
+                    {#if repo.host}
+                      <span class="path-diverge">{repo.host}</span> · {repoPathLabel(repo)}
+                    {:else if divergences.get(repo.path)?.diverge}
                       {@const parts = divergences.get(repo.path)!}
                       {parts.head}<span class="path-diverge">{parts.diverge}</span>{parts.tail}
                     {:else}

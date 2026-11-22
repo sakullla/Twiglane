@@ -1,17 +1,45 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/svelte";
-import { tick } from "svelte";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import RemoteWorktree from "../src/lib/components/RemoteWorktree.svelte";
-import type {
-  RemoteDiffPage,
-  RemoteOpenResult,
-  RemoteTarget,
-  RemoteWorktreePort,
-  RemoteWorktreeSnapshot,
-  RemoteWriteResult,
-} from "../src/lib/remote-worktree";
+// @vitest-environment node
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const hostA: RemoteTarget = {
+/*
+ * 主窗口验收（T6）：远端仓库在主窗口和本机仓库共用同一套 DTO 与同一批 API 方法。
+ * 这里顶替的是两处边界——Tauri 命令（本机）与远端端口（SSH）——然后断言：
+ * 打开/刷新/分页差异/暂存/提交都返回同一套 DTO；仓库键隔离两台主机的同名路径；
+ * 迟到的响应、断线只读与待确认写入都不会回退到本机 Git。
+ */
+
+const invoke = vi.hoisted(() =>
+  vi.fn(async (_command: string, _args?: Record<string, unknown>): Promise<unknown> => ({ ok: true })),
+);
+
+const port = vi.hoisted(() => ({
+  targets: vi.fn(),
+  open: vi.fn(),
+  cancelOpen: vi.fn(),
+  close: vi.fn(),
+  status: vi.fn(),
+  diff: vi.fn(),
+  write: vi.fn(),
+  recover: vi.fn(),
+}));
+
+const review = vi.hoisted(() => ({
+  begin: vi.fn(),
+  accept: vi.fn(),
+  end: vi.fn(),
+  returnReview: vi.fn(),
+}));
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+vi.mock("../src/lib/remote-worktree", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/lib/remote-worktree")>();
+  return { ...actual, remoteWorktreePort: port, remoteReviewPort: review };
+});
+
+import { api, openRemoteRepository, remoteRepositoryState } from "../src/lib/api";
+import { remoteRepositoryKey } from "../src/lib/remote-worktree";
+
+const hostA = {
   targetId: "host-a",
   targetRevision: "a".repeat(64),
   name: "构建主机 A",
@@ -22,313 +50,312 @@ const hostA: RemoteTarget = {
   authMethod: "key",
   defaultPath: "/srv/repo",
 };
-const hostB: RemoteTarget = { ...hostA, targetId: "host-b", targetRevision: "b".repeat(64), name: "构建主机 B", host: "builder-b.example", effectiveHost: undefined };
-const snapshot: RemoteWorktreeSnapshot = {
-  repo: "repo-a",
-  root: "/srv/repo",
-  host: "build-a",
-  head: "a".repeat(40),
-  branch: "feature",
-  generation: "g1",
-  files: [
-    { path: "large.txt", xy: " M" },
-    { path: "small.txt", xy: " M" },
-    { path: "unopened.txt", xy: "??" },
-  ],
-};
+const hostB = { ...hostA, targetId: "host-b", targetRevision: "b".repeat(64), name: "构建主机 B" };
 
-function opened(sessionId = "session-a", value = snapshot): RemoteOpenResult {
-  return { kind: "open", sessionId, snapshot: value, pendingWrite: null };
+const keyA = remoteRepositoryKey(hostA.targetId, "/srv/repo");
+const keyB = remoteRepositoryKey(hostB.targetId, "/srv/repo");
+
+function snapshot(extra: Record<string, unknown> = {}) {
+  return {
+    repo: "repo-a",
+    root: "/srv/repo",
+    host: "build-a",
+    head: "a".repeat(40),
+    branch: "feature",
+    generation: "g1",
+    files: [
+      { path: "small.txt", xy: " M" },
+      { path: "staged.txt", xy: "M " },
+      { path: "new.txt", xy: "??" },
+    ],
+    ...extra,
+  };
 }
 
-function page(text: string | Uint8Array, nextCursor: string | null = null): RemoteDiffPage {
-  const bytes = typeof text === "string" ? new TextEncoder().encode(text) : text;
+function opened(sessionId = "session-a", snap: unknown = snapshot(), pendingWrite: unknown = null) {
+  return { kind: "open", sessionId, snapshot: snap, pendingWrite };
+}
+
+function bytesOf(text: string): Uint8Array {
+  return new TextEncoder().encode(text);
+}
+
+function page(text: string | Uint8Array, nextCursor: string | null = null) {
+  const bytes = typeof text === "string" ? bytesOf(text) : text;
   return { data: btoa(String.fromCharCode(...bytes)), nextCursor };
 }
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
 }
 
-function fixture() {
-  return {
-    targets: vi.fn<RemoteWorktreePort["targets"]>().mockResolvedValue([hostA, hostB]),
-    open: vi.fn<RemoteWorktreePort["open"]>().mockResolvedValue(opened()),
-    cancelOpen: vi.fn<RemoteWorktreePort["cancelOpen"]>().mockResolvedValue(undefined),
-    close: vi.fn<RemoteWorktreePort["close"]>().mockResolvedValue(undefined),
-    status: vi.fn<RemoteWorktreePort["status"]>().mockResolvedValue(snapshot),
-    diff: vi.fn<RemoteWorktreePort["diff"]>().mockResolvedValue(page("差异\n")),
-    write: vi.fn<RemoteWorktreePort["write"]>(),
-    recover: vi.fn<RemoteWorktreePort["recover"]>(),
-  };
+async function openHost(target = hostA, key = keyA, sessionId = "session-a", snap: unknown = snapshot()) {
+  port.open.mockResolvedValueOnce(opened(sessionId, snap));
+  return api.openRepository(key, 1);
 }
 
-async function openFromPicker() {
-  await screen.findByRole("option", { name: /构建主机 A/ });
-  await fireEvent.click(screen.getByRole("button", { name: "打开仓库" }));
-}
+beforeEach(() => {
+  invoke.mockClear();
+  for (const fn of Object.values(port)) fn.mockReset();
+  for (const fn of Object.values(review)) fn.mockReset();
+  port.targets.mockResolvedValue([hostA, hostB]);
+  port.open.mockResolvedValue(opened());
+  port.close.mockResolvedValue(undefined);
+  port.status.mockResolvedValue(snapshot());
+  port.diff.mockResolvedValue(page(""));
+  port.write.mockResolvedValue({ state: "unknown", operationId: "x", message: "未准备" });
+  port.recover.mockResolvedValue({ state: "unknown", operationId: "x", message: "未准备" });
+  review.accept.mockResolvedValue(undefined);
+  review.end.mockResolvedValue(undefined);
+  review.returnReview.mockResolvedValue(undefined);
+});
 
-afterEach(cleanup);
+afterEach(async () => {
+  await api.closeRepository().catch(() => undefined);
+});
 
-describe("远端工作树页面", () => {
-  it("由用户确认交付到哪台主机，并取消仍在传输的安装", async () => {
-    const port = fixture();
-    const transfer = deferred<RemoteOpenResult>();
-    port.open
-      .mockResolvedValueOnce({ kind: "install_required", version: "v1", size: 2048, confirmationId: "abandoned-confirmation" })
-      .mockResolvedValueOnce({ kind: "install_required", version: "v1", size: 2048, confirmationId: "current-confirmation" })
-      .mockImplementationOnce((_, progress) => {
-        progress({ phase: "installing", sentBytes: 1024, totalBytes: 2048 });
-        return transfer.promise;
-      });
-    const onOpened = vi.fn();
-    render(RemoteWorktree, { port, onOpened });
+describe("远端仓库在主窗口：同一套 DTO", () => {
+  it("打开返回 OpenedRepository，键是主机 + 远端路径，状态翻成 StatusSnapshot", async () => {
+    const repository = await openHost();
 
-    await openFromPicker();
-    await screen.findByText("目标主机：构建主机 A · dev@builder-a.example:22");
-    expect(port.open.mock.calls[0][0]).toMatchObject({ targetId: hostA.targetId, path: "/srv/repo", allowInstall: false });
-    await fireEvent.click(screen.getByRole("button", { name: "取消" }));
-    expect(port.open).toHaveBeenCalledTimes(1);
-    expect(screen.queryByText("确认安装")).toBeNull();
-
-    await openFromPicker();
-    await fireEvent.click(await screen.findByRole("button", { name: "确认安装" }));
-    expect(port.open.mock.calls[2][0]).toMatchObject({
-      targetId: hostA.targetId, targetRevision: hostA.targetRevision, path: "/srv/repo", allowInstall: true,
-      installConfirmation: "current-confirmation",
-    });
-    expect(screen.getByRole("progressbar", { name: "Agent 安装进度" })).toBeTruthy();
-    expect(screen.getByText("50%")).toBeTruthy();
-    await fireEvent.click(screen.getByRole("button", { name: "取消" }));
-    expect(port.cancelOpen).toHaveBeenCalledWith(port.open.mock.calls[2][0].requestId);
-    transfer.resolve(opened("old-session"));
-    await waitFor(() => expect(port.close).toHaveBeenCalledWith("old-session"));
-    expect(onOpened).not.toHaveBeenCalled();
-    expect(screen.getByText(/已取消安装/)).toBeTruthy();
-
-    await openFromPicker();
-    expect(await screen.findByRole("heading", { name: /构建主机 A/ })).toBeTruthy();
-    expect(port.open.mock.calls[3][0].allowInstall).toBe(false);
-  });
-
-  it("先显示改动列表，切换文件不等待迟到的差异", async () => {
-    const port = fixture();
-    const oldDiff = deferred<RemoteDiffPage>();
-    port.diff
-      .mockReturnValueOnce(oldDiff.promise)
-      .mockResolvedValueOnce(page("+new selection\n"));
-    render(RemoteWorktree, { port });
-    await openFromPicker();
-    expect(await screen.findByText("feature")).toBeTruthy();
-    const small = screen.getByRole("button", { name: "未暂存 · small.txt" });
-    expect(port.diff.mock.calls.map(([request]) => request.path)).toEqual(["large.txt"]);
-
-    await fireEvent.click(small);
-    expect(await screen.findByText("+new selection")).toBeTruthy();
-    oldDiff.resolve(page("-stale diff\n", "old-cursor"));
-    await tick();
-    expect(screen.queryByText("-stale diff")).toBeNull();
-    expect(screen.queryByRole("button", { name: "加载更多差异" })).toBeNull();
-    expect(port.diff.mock.calls.map(([request]) => request.path)).toEqual(["large.txt", "small.txt"]);
-    expect(port.status).not.toHaveBeenCalled();
-  });
-
-  it("不同主机的同名工作树路径和文件分别显示各自差异", async () => {
-    const port = fixture();
-    const oldDiff = deferred<RemoteDiffPage>();
-    port.open.mockResolvedValueOnce(opened("session-a", snapshot))
-      .mockResolvedValueOnce(opened("session-b", {
-        ...snapshot, repo: "repo-b", host: "build-b", branch: "other-branch",
-      }));
-    port.diff.mockReturnValueOnce(oldDiff.promise).mockResolvedValueOnce(page("+only on B\n"));
-    render(RemoteWorktree, { port });
-    await openFromPicker();
-    await screen.findByRole("heading", { name: /构建主机 A/ });
-
-    await fireEvent.click(screen.getByRole("button", { name: "更换仓库" }));
-    await fireEvent.change(screen.getByRole("combobox", { name: "Cliora 主机" }), { target: { value: hostB.targetId } });
-    await openFromPicker();
-    expect(await screen.findByRole("heading", { name: /构建主机 B/ })).toBeTruthy();
-    expect(screen.getByText("other-branch")).toBeTruthy();
-    expect(await screen.findByText("+only on B")).toBeTruthy();
-    expect(port.close).toHaveBeenCalledWith("session-a");
-    expect(port.open.mock.calls.map(([request]) => [request.targetId, request.path]))
-      .toEqual([[hostA.targetId, snapshot.root], [hostB.targetId, snapshot.root]]);
-    expect(port.diff.mock.calls.map(([request]) => [request.sessionId, request.path]))
-      .toEqual([["session-a", "large.txt"], ["session-b", "large.txt"]]);
-
-    oldDiff.resolve(page("-only on A\n", "stale-a"));
-    await tick();
-    expect(screen.queryByText("-only on A")).toBeNull();
-    expect(screen.queryByRole("button", { name: "加载更多差异" })).toBeNull();
-  });
-
-  it("续读仅在用户请求时发出，并保留跨页 UTF-8 字符", async () => {
-    const port = fixture();
-    const bytes = new TextEncoder().encode("+首段内容\n");
-    port.diff.mockResolvedValueOnce(page(bytes.slice(0, 2), "page-2"))
-      .mockResolvedValueOnce(page(bytes.slice(2)));
-    render(RemoteWorktree, { port });
-    await openFromPicker();
-    const more = await screen.findByRole("button", { name: "加载更多差异" });
-    expect(port.diff).toHaveBeenCalledTimes(1);
-    await fireEvent.click(more);
-    expect(await screen.findByText("+首段内容")).toBeTruthy();
-    expect(port.diff.mock.calls[1][0]).toEqual({
-      sessionId: "session-a", generation: "g1", path: "large.txt", view: "unstaged", cursor: "page-2",
-    });
-  });
-
-  it("分别读取同一路径的已暂存删除和未跟踪内容", async () => {
-    const port = fixture();
-    port.open.mockResolvedValueOnce(opened("session-a", {
-      ...snapshot, files: [{ path: "same.txt", xy: "D?" }],
-    }));
-    port.write.mockImplementation(async ({ operationId }) => ({
-      state: "completed", operationId, snapshot: { ...snapshot, generation: "g2", files: [{ path: "same.txt", xy: " M" }] },
-    }));
-    render(RemoteWorktree, { port });
-    await openFromPicker();
-    const staged = await screen.findByRole("button", { name: "已暂存 · same.txt" });
-    expect(screen.getByRole("button", { name: "未暂存 · same.txt" })).toBeTruthy();
-    await fireEvent.click(staged);
-    expect(port.diff.mock.calls.at(-1)?.[0]).toMatchObject({ path: "same.txt", view: "staged" });
-    await fireEvent.click(screen.getByRole("button", { name: "取消暂存 same.txt" }));
-    expect(await screen.findByText("取消暂存已确认。")).toBeTruthy();
-    expect(port.write.mock.calls[0][0]).toMatchObject({ sessionId: "session-a", generation: "g1", op: "unstage", path: "same.txt" });
-    expect(screen.queryByRole("button", { name: "已暂存 · same.txt" })).toBeNull();
-  });
-
-  it("提交回执丢失后重连原主机和规范路径，只核对同一个操作 ID", async () => {
-    const port = fixture();
-    const staged = { ...snapshot, files: [{ path: "small.txt", xy: "M " }] };
-    const committed = { ...staged, generation: "g2", files: [], head: "b".repeat(40) };
-    port.open.mockResolvedValueOnce(opened("before", staged))
-      .mockResolvedValueOnce(opened("after", committed));
-    port.write.mockRejectedValueOnce({ code: "transport", message: "SSH 已断开" });
-    port.recover.mockImplementationOnce(async (_, operationId): Promise<RemoteWriteResult> => ({
-      state: "completed", operationId, snapshot: committed, head: committed.head,
-    }));
-    const onWriteResult = vi.fn();
-    render(RemoteWorktree, { port, onWriteResult });
-
-    await openFromPicker();
-    await fireEvent.input(await screen.findByRole("textbox", { name: "提交说明" }), { target: { value: "Update remote" } });
-    await fireEvent.click(screen.getByRole("button", { name: "提交已暂存改动" }));
-    expect(await screen.findByText("结果待确认")).toBeTruthy();
-    expect(screen.getByText("SSH 已断开")).toBeTruthy();
-    expect((screen.getByRole("button", { name: "提交已暂存改动" }) as HTMLButtonElement).disabled).toBe(true);
-    const { operationId } = port.write.mock.calls[0][0];
-    await fireEvent.click(screen.getByRole("button", { name: "重连并核对" }));
-    expect(await screen.findByText("提交已确认 · bbbbbbb。")).toBeTruthy();
-    expect(port.open.mock.calls[1][0]).toMatchObject({
-      targetId: hostA.targetId, targetRevision: hostA.targetRevision, path: staged.root, allowInstall: false,
-    });
-    expect(port.recover).toHaveBeenCalledExactlyOnceWith("after", operationId);
-    expect(port.write).toHaveBeenCalledTimes(1);
-    expect(onWriteResult).toHaveBeenCalledWith(
-      expect.objectContaining({ sessionId: "after", snapshot: committed }),
-      expect.objectContaining({ state: "completed", operationId }),
+    expect(port.open).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targetId: hostA.targetId,
+        targetRevision: hostA.targetRevision,
+        path: "/srv/repo",
+        allowInstall: false,
+      }),
+      expect.any(Function),
     );
-  });
-
-  it("重连后回执仍未知时，继续显示唯一文件的新差异并禁用写入", async () => {
-    const port = fixture();
-    const before = { ...snapshot, files: [{ path: "small.txt", xy: "MM" }] };
-    const after = { ...snapshot, generation: "g2", files: [{ path: "small.txt", xy: " M" }] };
-    port.open.mockResolvedValueOnce(opened("before", before)).mockResolvedValueOnce(opened("after", after));
-    port.diff.mockResolvedValueOnce(page("+旧连接差异\n")).mockResolvedValueOnce(page("+重连后的差异\n"));
-    port.write.mockRejectedValueOnce({ code: "transport", message: "SSH 已断开" });
-    port.recover.mockImplementationOnce(async (_, operationId) => ({
-      state: "unknown", operationId, message: "远端没有足够证据确认该提交。",
-    }));
-    render(RemoteWorktree, { port });
-    await openFromPicker();
-    await screen.findByText("+旧连接差异");
-    await fireEvent.input(screen.getByRole("textbox", { name: "提交说明" }), { target: { value: "Update remote" } });
-    await fireEvent.click(screen.getByRole("button", { name: "提交已暂存改动" }));
-    expect(await screen.findByText("尚未读取当前文件的差异。")).toBeTruthy();
-    expect(screen.queryByText("没有可显示的文本差异。")).toBeNull();
-    await fireEvent.click(await screen.findByRole("button", { name: "重连并核对" }));
-
-    expect(await screen.findByText("+重连后的差异")).toBeTruthy();
-    expect(screen.getByText("结果待确认")).toBeTruthy();
-    expect(screen.getByText("远端没有足够证据确认该提交。")).toBeTruthy();
-    expect((screen.getByRole("button", { name: "暂存 small.txt" }) as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByRole("button", { name: "提交已暂存改动" }) as HTMLButtonElement).disabled).toBe(true);
-    expect(port.diff.mock.calls.at(-1)?.[0]).toEqual({
-      path: "small.txt", view: "unstaged", sessionId: "after", generation: "g2",
+    expect(repository.summary).toMatchObject({
+      name: "repo",
+      path: "ssh://host-a/srv/repo",
+      host: "构建主机 A",
+      remotePath: "/srv/repo",
     });
-    expect(port.write).toHaveBeenCalledTimes(1);
+    expect(repository.generation).toBeGreaterThan(0);
+    const files = repository.snapshot.files;
+    expect(files.find((file) => file.path === "small.txt")).toMatchObject({ staged: "none", unstaged: "modified" });
+    expect(files.find((file) => file.path === "staged.txt")).toMatchObject({ staged: "modified", unstaged: "none" });
+    expect(files.find((file) => file.path === "new.txt")).toMatchObject({ untracked: true });
+    expect(repository.snapshot.branch).toMatchObject({ name: "feature", detached: false, headOid: "a".repeat(40) });
+    // 远端仓库不经过任何本机 Git 命令。
+    expect(invoke).not.toHaveBeenCalled();
   });
 
-  it("打开后的持久待确认操作不会向同名的另一台主机或新工作树查询", async () => {
-    const port = fixture();
-    const pendingWrite = { op: "commit", operationId: "5d751ed7-c132-4ae8-b48f-b801db4db2ba" } as const;
-    port.open.mockResolvedValueOnce({ kind: "open", sessionId: "before", snapshot, pendingWrite })
-      .mockResolvedValueOnce(opened("wrong-session", { ...snapshot, repo: "different-identity" }));
-    render(RemoteWorktree, { port });
-    await openFromPicker();
-    await fireEvent.click(await screen.findByRole("button", { name: "重连并核对" }));
-    expect((await screen.findByRole("alert")).textContent).toContain("工作树身份已变化");
-    expect(screen.getByText("结果待确认")).toBeTruthy();
-    expect(port.recover).not.toHaveBeenCalled();
-    expect(port.close).toHaveBeenCalledWith("wrong-session");
-    expect(port.open.mock.calls[1][0].targetId).toBe(hostA.targetId);
+  it("刷新只在远端状态令牌变化时推进数值代次，旧响应不会被当成新代次", async () => {
+    const repository = await openHost();
+    const first = repository.generation;
+
+    const same = await api.refreshStatus(keyA, first, 2);
+    expect(same.generation).toBe(first);
+
+    port.status.mockResolvedValueOnce(snapshot({ generation: "g2", branch: "other" }));
+    const next = await api.refreshStatus(keyA, first, 3);
+    expect(next.generation).toBeGreaterThan(first);
+    expect(next.branch.name).toBe("other");
+    expect(invoke).not.toHaveBeenCalled();
   });
 
-  it("保留安装阶段的失败原因，用户可再次确认安装", async () => {
-    const port = fixture();
-    port.open.mockResolvedValueOnce({ kind: "install_required", version: "v1", size: 4096 })
-      .mockImplementationOnce(async (_, progress) => {
-        progress({ phase: "installing", sentBytes: 1024, totalBytes: 4096 });
-        throw { code: "install_failed", message: "SSH 连接超时" };
-      })
-      .mockResolvedValueOnce({ kind: "install_required", version: "v1", size: 4096 });
-    render(RemoteWorktree, { port });
-    await openFromPicker();
-    await fireEvent.click(await screen.findByRole("button", { name: "确认安装" }));
-    expect((await screen.findByRole("alert")).textContent).toContain("安装 Twiglane agent失败：SSH 连接超时");
-    expect((screen.getByRole("textbox", { name: "远端工作树路径" }) as HTMLInputElement).value).toBe("/srv/repo");
-    await openFromPicker();
-    expect(await screen.findByRole("button", { name: "确认安装" })).toBeTruthy();
-    expect(port.open.mock.calls.map(([request]) => request.allowInstall)).toEqual([false, true, false]);
+  it("分页差异解析成 DiffResponse：块、行号与增删计数都在主窗口这一侧", async () => {
+    const repository = await openHost();
+    const patch = [
+      "diff --git a/small.txt b/small.txt",
+      "--- a/small.txt",
+      "+++ b/small.txt",
+      "@@ -1,3 +1,4 @@",
+      " one",
+      "-two",
+      "+two!",
+      "+three",
+      " four",
+      "",
+    ].join("\n");
+    port.diff.mockResolvedValueOnce(page(patch, null));
+
+    const pageOne = await api.loadDiff(keyA, "small.txt", false, repository.generation, 4);
+    expect(pageOne.additions).toBe(2);
+    expect(pageOne.deletions).toBe(1);
+    expect(pageOne.totalLines).toBe(9);
+    expect(pageOne.hunks).toHaveLength(1);
+    expect(pageOne.hunks[0]).toMatchObject({ index: 0, header: "@@ -1,3 +1,4 @@", startLine: 3 });
+    expect(pageOne.lines[3]).toMatchObject({ kind: "hunk", hunkIndex: 0 });
+    expect(pageOne.lines[4]).toMatchObject({ kind: "context", text: "one", oldNo: 1, newNo: 1 });
+    expect(pageOne.lines[5]).toMatchObject({ kind: "del", text: "two", oldNo: 2 });
+    expect(pageOne.lines[6]).toMatchObject({ kind: "add", text: "two!", newNo: 2 });
+
+    // 续页只切已解析结果，不再向远端要一次，块的 startLine 按页偏移重算。
+    const pageTwo = await api.loadDiff(keyA, "small.txt", false, repository.generation, 5, null, 6, 10);
+    expect(port.diff).toHaveBeenCalledTimes(1);
+    expect(pageTwo.offset).toBe(6);
+    expect(pageTwo.lines[0]).toMatchObject({ kind: "add", text: "two!" });
+    expect(pageTwo.hunks[0].startLine).toBe(0);
+    expect(invoke).not.toHaveBeenCalled();
   });
 
-  it("将任务基线绑定原主机与路径，已变化的配置须显式重新选择", async () => {
-    const port = fixture();
-    const baseline = "d".repeat(40);
-    const prefill = { targetId: hostB.targetId, targetRevision: "old", path: "/srv/repo", baseline };
-    render(RemoteWorktree, { port, prefill });
-    expect((await screen.findByRole("alert")).textContent).toContain("原远端主机的配置已变化");
-    expect((screen.getByRole("button", { name: "打开仓库" }) as HTMLButtonElement).disabled).toBe(true);
-    await fireEvent.click(screen.getByRole("button", { name: "刷新主机" }));
-    expect((screen.getByRole("button", { name: "打开仓库" }) as HTMLButtonElement).disabled).toBe(true);
-    const select = screen.getByRole("combobox", { name: "Cliora 主机" });
-    await fireEvent.change(select, { target: { value: hostB.targetId } });
-    await openFromPicker();
-    expect(port.open.mock.calls[0][0]).toMatchObject({ targetId: hostB.targetId, targetRevision: hostB.targetRevision, baseline: undefined });
-  });
+  it("跨页被切开的 UTF-8 字符在整文件读取时重新拼回", async () => {
+    const repository = await openHost();
+    const text = "@@ -0,0 +1,1 @@\n+首段内容\n";
+    const bytes = bytesOf(text);
+    port.diff
+      .mockResolvedValueOnce(page(bytes.slice(0, 2), "page-2"))
+      .mockResolvedValueOnce(page(bytes.slice(2), null));
 
-  it("刷新后保留不可用原因，不自动改用另一台主机", async () => {
-    const port = fixture();
-    port.targets.mockResolvedValueOnce([hostA, hostB]).mockResolvedValueOnce([
-      { ...hostA, host: "", effectiveHost: undefined, user: "", unavailableReason: "SSH 配置无法读取" },
-      hostB,
-    ]);
-    render(RemoteWorktree, { port });
-    await screen.findByRole("option", { name: /构建主机 A/ });
-    await fireEvent.click(screen.getByRole("button", { name: "刷新主机" }));
-    const unavailable = await screen.findByRole("option", { name: "构建主机 A · SSH 配置无法读取" }) as HTMLOptionElement;
-    expect(unavailable.disabled).toBe(true);
-    expect((await screen.findByRole("alert")).textContent).toContain("SSH 配置无法读取");
-    const open = screen.getByRole("button", { name: "打开仓库" }) as HTMLButtonElement;
-    expect(open.disabled).toBe(true);
-    expect(port.open).not.toHaveBeenCalled();
-    await fireEvent.change(screen.getByRole("combobox", { name: "Cliora 主机" }), { target: { value: hostB.targetId } });
-    await fireEvent.click(open);
-    expect(port.open.mock.calls[0][0].targetId).toBe(hostB.targetId);
+    const diff = await api.loadDiff(keyA, "small.txt", false, repository.generation, 6);
+    const added = diff.lines.filter((line) => line.kind === "add").map((line) => line.text).join("");
+    expect(added).toBe("首段内容");
+    expect(port.diff.mock.calls[1][0]).toMatchObject({ path: "small.txt", view: "unstaged", cursor: "page-2" });
   });
 });
+
+describe("远端仓库在主窗口：写入与仓库键隔离", () => {
+  it("暂存与提交复用同一个 StatusSnapshot / CommitResult，且不落回本机 Git", async () => {
+    const repository = await openHost();
+    const staged = snapshot({ generation: "g2" });
+    port.write.mockResolvedValueOnce({ state: "completed", operationId: "op-1", snapshot: staged });
+
+    const afterStage = await api.stageFiles(keyA, ["small.txt"], repository.generation, 7);
+    expect(port.write.mock.calls[0][0]).toMatchObject({ op: "stage", path: "small.txt", generation: "g1" });
+    expect(afterStage.generation).toBeGreaterThan(repository.generation);
+
+    port.status.mockResolvedValue(staged);
+    port.write.mockResolvedValueOnce({
+      state: "completed",
+      operationId: "op-2",
+      snapshot: snapshot({ generation: "g3", files: [], head: "b".repeat(40) }),
+    });
+    const commit = await api.commitChanges(keyA, "远端提交\n\n正文不进入 summary", afterStage.generation, 8);
+    expect(port.write.mock.calls[1][0]).toMatchObject({ op: "commit", message: "远端提交\n\n正文不进入 summary" });
+    expect(commit).toMatchObject({ oid: "b".repeat(40), branch: "feature", pushed: false, summary: "远端提交" });
+    expect(commit.snapshot.files).toEqual([]);
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("两台主机的同名工作树路径是不同的仓库,切换后旧会话不再接受写入", async () => {
+    await openHost(hostA, keyA, "session-a");
+    await openHost(hostB, keyB, "session-b");
+
+    expect(keyA).not.toBe(keyB);
+    expect(port.close).toHaveBeenCalledWith("session-a");
+    expect(remoteRepositoryState(keyA)).toBeNull();
+    expect(remoteRepositoryState(keyB)).toMatchObject({ host: "构建主机 B", path: "/srv/repo" });
+
+    await expect(api.refreshStatus(keyA, 1, 9)).rejects.toMatchObject({ code: "remote_disconnected" });
+    await expect(api.stageFiles(keyA, ["small.txt"], 1, 10)).rejects.toMatchObject({ code: "remote_disconnected" });
+  });
+
+  it("迟到的差异响应无法写到另一个仓库上", async () => {
+    const repository = await openHost(hostA, keyA, "session-a");
+    const lateDiff = deferred<{ data: string; nextCursor: string | null }>();
+    port.diff.mockReturnValueOnce(lateDiff.promise);
+
+    const pending = api.loadDiff(keyA, "small.txt", false, repository.generation, 11);
+    await openHost(hostB, keyB, "session-b");
+    lateDiff.resolve(page("+old host\n"));
+
+    await expect(pending).rejects.toMatchObject({ code: "remote_disconnected" });
+  });
+
+  it("断线后只读：状态读取失败即停止发送写入，已读内容不被改写", async () => {
+    const repository = await openHost();
+    port.status.mockRejectedValueOnce({ code: "remote_disconnected", message: "SSH 已断开" });
+
+    await expect(api.refreshStatus(keyA, repository.generation, 12)).rejects.toMatchObject({
+      code: "remote_disconnected",
+    });
+    expect(remoteRepositoryState(keyA)).toMatchObject({ connected: false });
+
+    port.write.mockClear();
+    await expect(api.stageFiles(keyA, ["small.txt"], repository.generation, 13)).rejects.toMatchObject({
+      code: "remote_disconnected",
+    });
+    await expect(api.loadDiff(keyA, "small.txt", false, repository.generation, 14)).rejects.toMatchObject({
+      code: "remote_disconnected",
+    });
+    // 断线不会发出写入，也不会改用本机 Git。
+    expect(port.write).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("待确认写入在打开时只核对回执，不重发原操作", async () => {
+    const pendingWrite = { op: "commit", operationId: "5d751ed7-c132-4ae8-b48f-b801db4db2ba" };
+    const recovered = snapshot({ generation: "g9", files: [], head: "c".repeat(40) });
+    port.open.mockResolvedValueOnce(opened("session-a", snapshot(), pendingWrite));
+    port.recover.mockResolvedValueOnce({ state: "completed", operationId: pendingWrite.operationId, snapshot: recovered });
+
+    const repository = await api.openRepository(keyA, 1);
+    expect(port.recover).toHaveBeenCalledWith("session-a", pendingWrite.operationId);
+    expect(port.write).not.toHaveBeenCalled();
+    expect(remoteRepositoryState(keyA)).toMatchObject({ pending: false });
+    expect(repository.snapshot.files).toEqual([]);
+    expect(repository.snapshot.branch.headOid).toBe("c".repeat(40));
+  });
+
+  it("回执仍未知时保持待确认并禁用写入", async () => {
+    const pendingWrite = { op: "stage", operationId: "6d751ed7-c132-4ae8-b48f-b801db4db2ba" };
+    port.open.mockResolvedValueOnce(opened("session-a", snapshot(), pendingWrite));
+    port.recover.mockResolvedValueOnce({ state: "unknown", operationId: pendingWrite.operationId, message: "远端没有足够证据" });
+
+    const repository = await api.openRepository(keyA, 1);
+    expect(remoteRepositoryState(keyA)).toMatchObject({ pending: true });
+    await expect(api.stageFiles(keyA, ["small.txt"], repository.generation, 15)).rejects.toMatchObject({
+      code: "write_pending",
+    });
+    expect(port.write).not.toHaveBeenCalled();
+  });
+});
+
+describe("远端仓库在主窗口：安装确认与审查来源", () => {
+  it("安装需要显式确认；未确认不发起传输", async () => {
+    port.open.mockResolvedValueOnce({ kind: "install_required", version: "v2", size: 2048, confirmationId: "offer-1" });
+
+    const offer = await openRemoteRepository({
+      kind: "ssh",
+      hostId: hostA.targetId,
+      hostRevision: hostA.targetRevision,
+      path: "/srv/repo",
+    });
+    expect(offer).toMatchObject({ kind: "install_required", version: "v2", size: 2048, confirmationId: "offer-1" });
+    expect(port.open.mock.calls[0][0]).toMatchObject({ allowInstall: false });
+    expect(port.open.mock.calls[0][0].installConfirmation).toBeUndefined();
+
+    port.open.mockResolvedValueOnce(opened("session-installed"));
+    const installed = await openRemoteRepository(
+      { kind: "ssh", hostId: hostA.targetId, hostRevision: hostA.targetRevision, path: "/srv/repo" },
+      { allowInstall: true, installConfirmation: "offer-1" },
+    );
+    expect(installed.kind).toBe("opened");
+    expect(port.open.mock.calls[1][0]).toMatchObject({ allowInstall: true, installConfirmation: "offer-1" });
+  });
+
+  it("打开后接受审查来源，返回结果走远程审查通道而不是本机仓库", async () => {
+    port.open.mockResolvedValueOnce(opened("session-review"));
+    const outcome = await openRemoteRepository(
+      { kind: "ssh", hostId: hostA.targetId, hostRevision: hostA.targetRevision, path: "/srv/repo" },
+      { reviewId: "review-1" },
+    );
+    expect(outcome.kind).toBe("opened");
+    expect(review.accept).toHaveBeenCalledWith("review-1", "session-review");
+    expect(remoteRepositoryState(keyA)).toMatchObject({ reviewId: "review-1" });
+
+    await api.remoteReturnReview(keyA);
+    expect(review.returnReview).toHaveBeenCalledWith("review-1", "session-review");
+    expect(keyA).toBe("ssh://host-a/srv/repo");
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("本机路径仍走原生命令：分派只看仓库键，不改本机行为", async () => {
+    invoke.mockResolvedValueOnce({ generation: 7, branch: {}, files: [] });
+    const snapshotLocal = await api.refreshStatus("C:/work/demo", 7, 16);
+    expect(invoke).toHaveBeenLastCalledWith("refresh_status", { path: "C:/work/demo", generation: 7, requestId: 16 });
+    expect(snapshotLocal.generation).toBe(7);
+    expect(port.status).not.toHaveBeenCalled();
+  });
+});
+

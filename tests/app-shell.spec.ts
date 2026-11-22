@@ -94,6 +94,11 @@ const mocks = vi.hoisted(() => ({
   getSettings: vi.fn(),
   workspaceList: vi.fn(),
   openRepository: vi.fn(),
+  remoteTargets: vi.fn(),
+  openRemoteRepository: vi.fn(),
+  remoteRepositoryState: vi.fn(),
+  remoteReturnReview: vi.fn(),
+  closeRemoteRepository: vi.fn(),
   addRepository: vi.fn(),
   createRepository: vi.fn(),
   closeRepository: vi.fn(),
@@ -2916,14 +2921,67 @@ describe("应用外壳", () => {
     finish(undefined);
   });
 
-  it("从起始页打开 Cliora 远端仓库选择器", async () => {
-    mocks.getSettings.mockResolvedValue({ theme: "system", recent: [] });
+  it("从起始页打开远端仓库选择器：远端仓库走主窗口，不再有独立的远端工作台", async () => {
+    mocks.remoteTargets.mockResolvedValue([
+      {
+        targetId: "host-a",
+        targetRevision: "a".repeat(64),
+        name: "构建主机 A",
+        host: "builder-a.example",
+        user: "dev",
+        port: 22,
+        authMethod: "key",
+        defaultPath: "/srv/repo",
+      },
+    ]);
+    const remoteRepo = {
+      summary: { name: "repo", path: "ssh://host-a/srv/repo", host: "构建主机 A", remotePath: "/srv/repo" },
+      generation: 9,
+      snapshot: { ...snapshot, generation: 9 },
+      draft: "",
+      watchDegraded: false,
+    };
+    mocks.openRemoteRepository.mockResolvedValueOnce({
+      kind: "opened",
+      repository: remoteRepo,
+      key: "ssh://host-a/srv/repo",
+      host: "构建主机 A",
+      path: "/srv/repo",
+      pending: null,
+      reviewId: null,
+    });
+    mocks.remoteRepositoryState.mockReturnValue({
+      key: "ssh://host-a/srv/repo",
+      host: "构建主机 A",
+      path: "/srv/repo",
+      pending: false,
+      reviewId: null,
+      connected: true,
+    });
     render(App);
     await fireEvent.click(await screen.findByRole("button", { name: /打开远端仓库/ }));
-    const dialog = await screen.findByRole("dialog", { name: "远端仓库" });
-    expect(within(dialog).getByLabelText("Cliora 主机")).toBeTruthy();
-    expect(within(dialog).getByLabelText("远端工作树路径")).toBeTruthy();
+    const dialog = await screen.findByRole("dialog", { name: "打开远端仓库" });
+    expect(within(dialog).getByLabelText("SSH 主机")).toBeTruthy();
+    expect(within(dialog).getByLabelText("远端路径")).toBeTruthy();
     expect(mocks.openRepository).not.toHaveBeenCalled();
+    // 主机列表读回来之后默认选中第一台可用主机，并带出它的默认目录。
+    await within(dialog).findByRole("option", { name: /构建主机 A/ });
+    const openButton = within(dialog).getByRole("button", { name: "打开仓库" }) as HTMLButtonElement;
+    expect(openButton.disabled, "选好主机与路径后可以直接打开").toBe(false);
+    await fireEvent.click(openButton);
+    await tick();
+    // 打开走远端端口：主机与远端路径分开传，仓库键由主机 + 远端路径组成。
+    await waitFor(() =>
+      expect(mocks.openRemoteRepository).toHaveBeenCalledWith(
+        { kind: "ssh", hostId: "host-a", hostRevision: "a".repeat(64), path: "/srv/repo" },
+        expect.objectContaining({ allowInstall: false }),
+      ),
+    );
+    // 主窗口继续工作：常驻状态条显示真实主机与远端路径，旧弹层不再出现。
+    await waitFor(() => expect(document.querySelector("[data-remote-repository]")).toBeTruthy());
+    expect(screen.queryByRole("dialog", { name: "远端仓库" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "Cliora 远端审查" })).toBeNull();
+    expect(screen.getByText(/构建主机 A · \/srv\/repo/)).toBeTruthy();
   });
 
   it("起始页空状态保留四个仓库入口", async () => {

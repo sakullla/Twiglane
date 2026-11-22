@@ -1,5 +1,6 @@
 <script module lang="ts">
   import { api } from "../api";
+  import { isRemoteRepositoryKey } from "../remote-worktree";
   import type { RepoHead, WorktreeItem } from "../types";
 
   // A close/reopen may overlap the same disk read, including when switching projects.
@@ -29,8 +30,23 @@
   }
 
   let overviewRequestId = 1_000_000_000_000;
-  const requestHeads = sharePending((paths) => api.repoHeads(paths));
-  const requestOverview = sharePending((paths) => api.worktreeOverview(paths, ++overviewRequestId));
+  /**
+   * 远端仓库的键不是本机路径：HEAD 与 worktree 总览只读本机仓库，
+   * 这里先过滤，绝不把 ssh 键交给本机命令。
+   */
+  function localPaths(paths: string[]): string[] {
+    return paths.filter((path) => !isRemoteRepositoryKey(path));
+  }
+  const requestHeads = sharePending((paths) => {
+    const local = localPaths(paths);
+    return local.length > 0 ? api.repoHeads(local) : Promise.resolve([]);
+  });
+  const requestOverview = sharePending((paths) => {
+    const local = localPaths(paths);
+    return local.length > 0
+      ? api.worktreeOverview(local, ++overviewRequestId)
+      : Promise.resolve({ items: [], checkedAtMs: Date.now() });
+  });
 
   /**
    * 上次读到的 HEAD 与总览：弹层再次打开时先显示上次结果，后台再刷新。
@@ -591,7 +607,7 @@
                   aria-disabled={reason ? "true" : undefined}
                   data-index={viewIndex}
                   data-worktree-path={view.path}
-                  title={reason ?? view.path}
+                  title={reason ?? (view.host ? view.host + " · " + view.displayPath : view.path)}
                   tabindex="-1"
                   onmousemove={() => {
                     if (viewIndex !== active) setActive(viewIndex);
@@ -630,7 +646,7 @@
                         <span class="rs-icon-badge warn" title="已用 git worktree lock 锁定，删除会被拒绝"><span class="repo-locked">已锁定</span></span>
                       {/if}
                     </span>
-                    <span class={sameNames.has(view.name) ? "repo-path-full rs-path" : "repo-path rs-path"}><bdi>{#if divergences.get(view.path)?.diverge}{@const parts = divergences.get(view.path)!}{parts.head}<span class="path-diverge">{parts.diverge}</span>{parts.tail}{:else}{view.path}{/if}</bdi></span>
+                    <span class={sameNames.has(view.name) ? "repo-path-full rs-path" : "repo-path rs-path"}><bdi>{#if view.host}<span class="path-diverge">{view.host}</span> · {view.displayPath}{:else if divergences.get(view.path)?.diverge}{@const parts = divergences.get(view.path)!}{parts.head}<span class="path-diverge">{parts.diverge}</span>{parts.tail}{:else}{view.path}{/if}</bdi></span>
                   </span>
                   <span class="repo-status rs-state" data-worktree-state={view.state} title={sentence}>
                     <span class="sr-only">{sentence}{#if view.note && view.state !== "ready"}；{view.note}{/if}</span>

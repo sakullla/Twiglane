@@ -36,8 +36,13 @@ export type ChangeKind =
 
 export interface RecentRepo {
   name: string;
+  /** 稳定仓库键；远端仓库是 ssh://hostId/远端路径，不是本机路径。 */
   path: string;
   openedAtMs: number;
+  /** 远端仓库的主机地址；本机仓库缺省。 */
+  host?: string | null;
+  /** 远端仓库真实的远端路径；本机仓库缺省，此时 path 就是用户路径。 */
+  remotePath?: string | null;
 }
 
 export interface GitInfo {
@@ -51,7 +56,35 @@ export interface GitInfo {
 
 export interface RepoSummary {
   name: string;
+  /**
+   * 稳定、可持久化的仓库键：本机仓库是规范路径，远端仓库是
+   * `ssh://<hostId>/<远端绝对路径>`。它用于最近记录、草稿与审阅进度的分区，
+   * 因此不能包含显示名、会话 ID 或任何秘密。
+   */
   path: string;
+  /** 远端仓库的主机地址（user@host:port）；本机仓库缺省。只在展示层使用。 */
+  host?: string | null;
+  /** 远端仓库真实的远端绝对路径；本机仓库缺省，此时 `path` 本身就是用户路径。 */
+  remotePath?: string | null;
+}
+
+/**
+ * 仓库位置：本机目录或 SSH 主机上的远端工作树。同一个位置在应用内只有一个仓库键，
+ * 由 `path`（本机）或 `hostId` + `path`（远端）决定。
+ */
+export type RepositoryLocation =
+  | { kind: "local"; path: string }
+  | { kind: "ssh"; hostId: string; hostRevision: string; path: string };
+
+/** 一个位置的展示身份：内部键与用户路径分开，界面显示真实主机与远端路径。 */
+export interface RepositoryEndpoint {
+  kind: "local" | "ssh";
+  /** 稳定仓库键，进程重启后仍然指向同一个仓库。 */
+  key: string;
+  /** 用户看到的路径：本机路径或远端绝对路径。 */
+  displayPath: string;
+  /** 远端主机地址；本机仓库为 null。 */
+  host: string | null;
 }
 
 /** 文本文件的新增与删除行数。两个计数都是 null 时表示二进制，不能显示成 +0 −0。 */

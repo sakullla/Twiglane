@@ -189,6 +189,7 @@ vi.mock("../src/lib/api", () => ({
 }));
 
 import App from "../src/App.svelte";
+import { remoteReviewPort as reviews } from "../src/lib/remote-worktree";
 import { menuValues, pickMenu } from "./select-menu-helpers";
 
 function resetMocks() {
@@ -1004,37 +1005,66 @@ describe("Cliora 远端审查入口", () => {
 
   afterEach(() => vi.restoreAllMocks());
 
-  it("冷启动定位原远端会话，等待用户安装，再接收和返回；同名本机路径始终未被打开", async () => {
-    const { remoteReviewPort: reviews, remoteWorktreePort: remote } = await import("../src/lib/remote-worktree");
+  it("冷启动在主窗口打开原远端会话：等待安装确认后接收，再返回 Cliora；同名本机路径始终未被打开", async () => {
     deepLink.getCurrent.mockResolvedValue([url]);
     const begin = vi.spyOn(reviews, "begin").mockResolvedValueOnce(source).mockResolvedValue(null);
-    const accept = vi.spyOn(reviews, "accept").mockResolvedValue();
     const end = vi.spyOn(reviews, "end").mockResolvedValue();
-    const returned = vi.spyOn(reviews, "returnReview").mockResolvedValue();
-    vi.spyOn(remote, "targets").mockResolvedValue([target]);
-    const open = vi.spyOn(remote, "open").mockResolvedValueOnce({
-      kind: "install_required", version: "v1", size: 2048, confirmationId: "offered",
-    }).mockResolvedValueOnce({ kind: "open", sessionId: "verified-local-binding", pendingWrite: null, snapshot: {
-      repo: "agent-a", root: source.worktreePath, host: "host-a", head: BASELINE, branch: "main",
-      generation: "g1", files: [], reviewFiles: ["committed.txt"],
-    } });
-    vi.spyOn(remote, "close").mockResolvedValue();
-    const diff = vi.spyOn(remote, "diff").mockResolvedValue({ data: btoa("+actual task diff"), nextCursor: null });
+    mocks.api.remoteTargets.mockResolvedValue([target]);
+    mocks.api.openRemoteRepository
+      .mockResolvedValueOnce({ kind: "install_required", version: "v2", size: 2048, confirmationId: "offered" })
+      .mockResolvedValueOnce({
+        kind: "opened",
+        repository: {
+          summary: { name: "worktree", path: "ssh://remote-a/srv/worktree", host: "服务器 A", remotePath: "/srv/worktree" },
+          generation: 21,
+          snapshot: { generation: 21, branch: { name: "main", detached: false, unborn: false, headOid: BASELINE, upstream: null, ahead: null, behind: null, liveRemoteChecked: false, remoteCheckedAtMs: null, remoteCheckStale: false }, files: [] },
+          draft: "",
+          watchDegraded: false,
+        },
+        key: "ssh://remote-a/srv/worktree",
+        host: "服务器 A",
+        path: "/srv/worktree",
+        pending: null,
+        reviewId: REVIEW_A,
+      });
+    mocks.api.remoteRepositoryState.mockReturnValue({
+      key: "ssh://remote-a/srv/worktree",
+      host: "服务器 A",
+      path: "/srv/worktree",
+      pending: false,
+      reviewId: REVIEW_A,
+      connected: true,
+    });
+    mocks.api.remoteReturnReview.mockResolvedValue(undefined);
+
     const handle = await mountShell();
     const install = await screen.findByRole("button", { name: "确认安装" });
     expect(begin).toHaveBeenCalledWith(url);
-    expect(accept).not.toHaveBeenCalled();
-    expect(open).toHaveBeenNthCalledWith(1, expect.objectContaining({
-      targetId: source.targetId, path: source.worktreePath, reviewId: REVIEW_A, baseline: BASELINE, allowInstall: false,
-    }), expect.any(Function));
+    // 主窗口打开：主机、工作树与审查来源一起传，安装缺省不传输。
+    expect(mocks.api.openRemoteRepository).toHaveBeenNthCalledWith(
+      1,
+      { kind: "ssh", hostId: source.targetId, hostRevision: source.targetRevision, path: source.worktreePath },
+      expect.objectContaining({ reviewId: REVIEW_A, allowInstall: false }),
+    );
+    expect(mocks.api.remoteRepositoryState).not.toHaveBeenCalled();
     handle([url]);
     await waitFor(() => expect(begin).toHaveBeenCalledTimes(2));
-    expect(open).toHaveBeenCalledTimes(1);
+    expect(mocks.api.openRemoteRepository).toHaveBeenCalledTimes(1);
+
     await fireEvent.click(install);
-    await waitFor(() => expect(accept).toHaveBeenCalledWith(REVIEW_A, "verified-local-binding"));
-    await waitFor(() => expect(diff).toHaveBeenCalledWith(expect.objectContaining({ view: "task", path: "committed.txt" })));
+    await waitFor(() =>
+      expect(mocks.api.openRemoteRepository).toHaveBeenNthCalledWith(
+        2,
+        { kind: "ssh", hostId: source.targetId, hostRevision: source.targetRevision, path: source.worktreePath },
+        expect.objectContaining({ reviewId: REVIEW_A, allowInstall: true, installConfirmation: "offered" }),
+      ),
+    );
+    // 打开后主窗口显示真实主机与远端路径，并给出返回入口；没有独立的远端弹层。
+    await waitFor(() => expect(document.querySelector("[data-remote-repository]")).toBeTruthy());
+    expect(screen.queryByRole("dialog", { name: "Cliora 远端审查" })).toBeNull();
     await fireEvent.click(await screen.findByRole("button", { name: "返回 Cliora" }));
-    expect(returned).toHaveBeenCalledWith(REVIEW_A, "verified-local-binding");
+    await waitFor(() => expect(mocks.api.remoteReturnReview).toHaveBeenCalledWith("ssh://remote-a/srv/worktree"));
+    // 同名本机路径从未被打开，也没有走本机审查回执。
     expect(mocks.api.openRepository).not.toHaveBeenCalled();
     expect(mocks.api.clioraReviewRequest).not.toHaveBeenCalled();
     expect(end).not.toHaveBeenCalled();
@@ -1042,17 +1072,13 @@ describe("Cliora 远端审查入口", () => {
   });
 
   it("活动窗口收到远端来源，原主机已变更时回送拒绝，不会选择其它同路径主机", async () => {
-    const { remoteReviewPort: reviews, remoteWorktreePort: remote } = await import("../src/lib/remote-worktree");
     vi.spyOn(reviews, "begin").mockResolvedValue(source);
     const end = vi.spyOn(reviews, "end").mockResolvedValue();
-    const accept = vi.spyOn(reviews, "accept").mockResolvedValue();
-    vi.spyOn(remote, "targets").mockResolvedValue([{ ...target, targetRevision: "e".repeat(64) }]);
-    const open = vi.spyOn(remote, "open");
+    mocks.api.remoteTargets.mockResolvedValue([{ ...target, targetRevision: "e".repeat(64) }]);
     const handle = await mountShell();
     handle([url]);
     await waitFor(() => expect(end).toHaveBeenCalledWith(REVIEW_A, "target_changed"));
-    expect(accept).not.toHaveBeenCalled();
-    expect(open).not.toHaveBeenCalled();
+    expect(mocks.api.openRemoteRepository).not.toHaveBeenCalled();
     expect(mocks.api.openRepository).not.toHaveBeenCalled();
     expect(screen.queryByRole("button", { name: "返回 Cliora" })).toBeNull();
     cleanup();

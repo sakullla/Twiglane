@@ -1,3 +1,14 @@
+import type {
+  BranchInfo,
+  ChangeKind,
+  DiffHunk,
+  DiffLine,
+  DiffResponse,
+  FileChange,
+  RepositoryEndpoint,
+  StatusSnapshot,
+} from "./types";
+
 export interface RemoteTarget {
   targetId: string;
   targetRevision: string;
@@ -243,5 +254,280 @@ export function hostSyncMessage(result: HostSyncResult): string {
     default:
       return "这台主机的同步没有产生改动。";
   }
+}
+
+
+/* ------------------------------------------------------------------ *
+ * 仓库位置：本机路径与 SSH 工作树共用一套仓库键与 DTO 适配（T6）
+ *
+ * 主界面只认 OpenedRepository / StatusSnapshot / DiffResponse，远端返回的是
+ * 仓库标识、xy 状态与分页的原始 diff，因此在这一层翻成同一套 DTO；界面不感知差异。
+ * ------------------------------------------------------------------ */
+
+/** 远端仓库键的固定前缀。hostId 是主机记录 id，不是显示名。 */
+export const REMOTE_KEY_SCHEME = "ssh://";
+
+/**
+ * 远端仓库的稳定键：hostId + 规范化远端路径。
+ * 不含显示名、连接会话或认证信息，进程重启后仍指向同一个仓库。
+ */
+export function remoteRepositoryKey(hostId: string, path: string): string {
+  const root = path.trim().replace(/\/+$/, "") || "/";
+  const suffix = root.startsWith("/") ? root : "/" + root;
+  return REMOTE_KEY_SCHEME + hostId + suffix;
+}
+
+export function isRemoteRepositoryKey(key: string | null | undefined): key is string {
+  return typeof key === "string" && key.startsWith(REMOTE_KEY_SCHEME);
+}
+
+export function parseRemoteRepositoryKey(key: string): { hostId: string; path: string } | null {
+  if (!isRemoteRepositoryKey(key)) return null;
+  const rest = key.slice(REMOTE_KEY_SCHEME.length);
+  const slash = rest.indexOf("/");
+  if (slash <= 0) return null;
+  const path = rest.slice(slash);
+  return path.startsWith("/") ? { hostId: rest.slice(0, slash), path } : null;
+}
+
+/** 展示身份：内部仓库键与用户路径分开，远端显示真实远端路径与主机。 */
+export function repositoryEndpoint(key: string, host: string | null = null): RepositoryEndpoint {
+  const parsed = parseRemoteRepositoryKey(key);
+  return {
+    kind: parsed ? "ssh" : "local",
+    key,
+    displayPath: parsed?.path ?? key,
+    host: parsed ? host : null,
+  };
+}
+
+/** 路径最后一段：与 recent.baseName 同一条规则，远端路径同样适用。 */
+export function repositoryBaseName(path: string): string {
+  const trimmed = path.replace(/[\\/]+$/, "");
+  const at = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+  return at >= 0 ? trimmed.slice(at + 1) : trimmed;
+}
+
+const UNMERGED_XY = new Set(["DD", "AU", "UD", "UA", "DU", "AA", "UU"]);
+
+function changeKind(mark: string | undefined): ChangeKind {
+  switch (mark) {
+    case "A":
+      return "added";
+    case "D":
+      return "deleted";
+    case "R":
+      return "renamed";
+    case "C":
+      return "copied";
+    case "M":
+      return "modified";
+    case "T":
+      return "typeChanged";
+    case "U":
+      return "unmerged";
+    default:
+      return "none";
+  }
+}
+
+/** 远端 xy 状态翻成主界面用的 FileChange：未跟踪与冲突保持各自的独立标记。 */
+export function remoteChanges(files: readonly { path: string; xy: string }[]): FileChange[] {
+  return files.map(({ path, xy }) => {
+    if (xy === "??") {
+      return { path, originalPath: null, staged: "none", unstaged: "added", untracked: true, unmerged: false };
+    }
+    if (UNMERGED_XY.has(xy)) {
+      return {
+        path,
+        originalPath: null,
+        staged: "unmerged",
+        unstaged: "unmerged",
+        untracked: false,
+        unmerged: true,
+      };
+    }
+    return {
+      path,
+      originalPath: null,
+      staged: changeKind(xy[0]),
+      unstaged: changeKind(xy[1]),
+      untracked: false,
+      unmerged: false,
+    };
+  });
+}
+
+/**
+ * 远端分支信息：上游与领先/落后不在这条协议里，保持 null（未知），
+ * 不把「没读到」写成 0，也不能声称远程状态已核对。
+ */
+export function remoteBranch(snapshot: RemoteWorktreeSnapshot): BranchInfo {
+  const head = snapshot.head ?? null;
+  return {
+    name: snapshot.branch ?? null,
+    detached: head !== null && !snapshot.branch,
+    unborn: head === null,
+    headOid: head,
+    upstream: null,
+    ahead: null,
+    behind: null,
+    liveRemoteChecked: false,
+    remoteCheckedAtMs: null,
+    remoteCheckStale: false,
+  };
+}
+
+export function remoteStatus(snapshot: RemoteWorktreeSnapshot, generation: number): StatusSnapshot {
+  return { generation, branch: remoteBranch(snapshot), files: remoteChanges(snapshot.files) };
+}
+
+export interface RemotePatch {
+  binary: boolean;
+  /** 续读达到页数上限时明确截断，不当成完整差异。 */
+  truncated: boolean;
+  lines: DiffLine[];
+  hunks: DiffHunk[];
+  additions: number;
+  deletions: number;
+}
+
+const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+
+/** 解析远端 unified diff 的完整文本：一次算出行号、块索引与增删计数。 */
+export function parseRemotePatch(text: string): RemotePatch {
+  const raw = text.split("\n");
+  if (raw.length > 0 && raw[raw.length - 1] === "") raw.pop();
+  const lines: DiffLine[] = [];
+  const hunks: DiffHunk[] = [];
+  let additions = 0;
+  let deletions = 0;
+  let oldNo = 0;
+  let newNo = 0;
+  let hunkIndex: number | null = null;
+  let binary = false;
+  for (const rawLine of raw) {
+    const body = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    const header = HUNK_HEADER.exec(body);
+    if (header) {
+      hunkIndex = hunks.length;
+      oldNo = Number(header[1] ?? 0);
+      newNo = Number(header[3] ?? 0);
+      hunks.push({
+        index: hunkIndex,
+        header: body,
+        complete: true,
+        // 远端写入只支持整文件暂存；块级暂存不会发出，按钮必须保持不可用。
+        stageable: false,
+        startLine: lines.length,
+        lineCount: 1,
+      });
+      lines.push({ kind: "hunk", text: body, oldNo: null, newNo: null, hunkIndex });
+      continue;
+    }
+    if (hunkIndex === null) {
+      if (body.startsWith("Binary files ") && body.endsWith(" differ")) binary = true;
+      if (body.length > 0) {
+        lines.push({ kind: "meta", text: body, oldNo: null, newNo: null, hunkIndex: null });
+      }
+      continue;
+    }
+    const hunk = hunks[hunkIndex];
+    if (body.startsWith("-")) {
+      lines.push({ kind: "del", text: body.slice(1), oldNo, newNo: null, hunkIndex });
+      oldNo += 1;
+      deletions += 1;
+      hunk.lineCount += 1;
+      continue;
+    }
+    if (body.startsWith("+")) {
+      lines.push({ kind: "add", text: body.slice(1), oldNo: null, newNo, hunkIndex });
+      newNo += 1;
+      additions += 1;
+      hunk.lineCount += 1;
+      continue;
+    }
+    if (body.startsWith("\\")) {
+      lines.push({ kind: "nonewline", text: body, oldNo: null, newNo: null, hunkIndex });
+      hunk.lineCount += 1;
+      continue;
+    }
+    lines.push({
+      kind: "context",
+      text: body.startsWith(" ") ? body.slice(1) : body,
+      oldNo,
+      newNo,
+      hunkIndex,
+    });
+    oldNo += 1;
+    newNo += 1;
+    hunk.lineCount += 1;
+  }
+  return { binary, truncated: false, lines, hunks, additions, deletions };
+}
+
+/** 一份已解析的远端差异：分页只切这份结果，不重新请求远端。 */
+export interface RemoteDiffDocument {
+  generation: number;
+  path: string;
+  staged: boolean;
+  /** 与远端状态令牌绑定的快照标识，用于丢弃旧响应。 */
+  snapshot: string;
+  patch: RemotePatch;
+  totalLines: number;
+}
+
+export function remoteDiffDocument(
+  patch: RemotePatch,
+  generation: number,
+  path: string,
+  staged: boolean,
+  snapshot: string,
+): RemoteDiffDocument {
+  return { generation, path, staged, snapshot, patch, totalLines: patch.lines.length };
+}
+
+/** 切成主界面请求的那一页：行窗口与块的 startLine 都按页偏移重算。 */
+export function remoteDiffPage(document: RemoteDiffDocument, offset: number, limit: number): DiffResponse {
+  const patch = document.patch;
+  const total = document.totalLines;
+  const start = Math.min(Math.max(offset, 0), total);
+  const end = limit > 0 ? Math.min(start + limit, total) : total;
+  const lines = patch.lines.slice(start, end);
+  const hunks = patch.hunks
+    .filter((hunk) => hunk.startLine < end && hunk.startLine + hunk.lineCount > start)
+    .map((hunk) => {
+      const from = Math.max(hunk.startLine, start);
+      const to = Math.min(hunk.startLine + hunk.lineCount, end);
+      return { ...hunk, startLine: from - start, lineCount: to - from };
+    });
+  const summary = patch.binary
+    ? "二进制文件改动，不能按文本显示。"
+    : String(patch.additions) + " 行新增，" + String(patch.deletions) + " 行删除。";
+  return {
+    generation: document.generation,
+    path: document.path,
+    staged: document.staged,
+    binary: patch.binary,
+    text: null,
+    summary,
+    additions: patch.additions,
+    deletions: patch.deletions,
+    complete: !patch.truncated,
+    truncated: patch.truncated,
+    snapshot: document.snapshot,
+    hunks,
+    lines,
+    offset: start,
+    totalLines: total,
+  };
+}
+
+/**
+ * 远端审阅 token：绑定仓库键、状态令牌与路径。状态或内容一变 token 就不同，
+ * 旧标记随之失效；它只是本地人工记录，不参与 Cliora 结果。
+ */
+export function remoteReviewToken(snapshot: string, key: string, path: string): string {
+  return "remote:" + key + ":" + snapshot + ":" + path;
 }
 

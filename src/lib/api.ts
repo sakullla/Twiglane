@@ -1,6 +1,33 @@
 import type { Projects, WorkspacePreview, WorkspaceManifest, WorkspaceCandidate, WorkspaceDiscovery } from "./workspaces";
 import { captureClioraReview, recordClioraCommit, recordClioraMerge, type ClioraSourceSnapshot } from "./cliora-review.svelte";
 import { normalizeError } from "./errors";
+import {
+  isRemoteRepositoryKey,
+  parseRemotePatch,
+  parseRemoteRepositoryKey,
+  remoteChanges,
+  remoteDiffDocument,
+  remoteDiffPage,
+  remoteRepositoryKey,
+  remoteReviewPort,
+  remoteReviewToken,
+  remoteStatus,
+  remoteWorktreePort,
+  repositoryBaseName,
+  type RemoteConnectionProgress,
+  type RemoteDiffDocument,
+  type RemoteDiffPage,
+  type RemoteDiffView,
+  type RemoteOpenRequest,
+  type RemoteOpenResult,
+  type RemotePatch,
+  type RemotePendingWrite,
+  type RemoteTarget,
+  type RemoteWorktreeSnapshot,
+  type RemoteWriteAction,
+  type RemoteWriteRequest,
+  type RemoteWriteResult,
+} from "./remote-worktree";
 import type {
   BatchDeleteResult,
   BranchState,
@@ -72,6 +99,8 @@ import type {
   UndoResult,
   RevertOutcome,
   AmendOutcome,
+  AppFailure,
+  RepositoryLocation,
 } from "./types";
 
 /** 历史筛选。缺省字段不传，后端按当前分支、无作者、无日期、无路径处理。 */
@@ -156,7 +185,451 @@ export async function pickDirectories(): Promise<string[]> {
   const selected = await open({ title: "选择项目仓库（可多选）", directory: true, multiple: true });
   return Array.isArray(selected) ? selected : typeof selected === "string" ? [selected] : [];
 }
-export const api = {
+
+/* ------------------------------------------------------------------ *
+ * 仓库位置分派（T6）：本机仓库继续走原生命令，SSH 工作树走远端端口。
+ * 两条路径在这一个 API 边界返回同一套 DTO，界面不需要第二套页面；
+ * 远端仓库的稳定键（ssh://hostId/path）进入这里时绝不落回本机 Git。
+ * ------------------------------------------------------------------ */
+
+/** 远端一次完整差异最多续读的页数：超过就明确截断，不做无界循环。 */
+const REMOTE_DIFF_PAGE_LIMIT = 64;
+
+/** 有界差异缓存：按状态令牌失效，不随仓库大小无限增长。 */
+const REMOTE_DIFF_CACHE_LIMIT = 32;
+
+/** 明确「没有写进去」的远端错误：可以清掉待确认记录，也不需要重发。 */
+const DEFINITIVE_WRITE_CODES = new Set([
+  "remote_busy",
+  "remote_not_sent",
+  "remote_request",
+  "remote_request_size",
+  "bad_request",
+  "invalid_path",
+  "invalid_selection",
+  "selection_expands",
+  "stale_state",
+  "index_locked",
+  "nothing_staged",
+  "unmerged",
+  "git_operation_active",
+  "hook_failed",
+  "empty_message",
+]);
+
+interface RemoteRepositorySession {
+  key: string;
+  hostId: string;
+  hostRevision: string;
+  /** 主机显示名；只用于展示，不参与仓库键。 */
+  host: string;
+  /** 远端仓库身份（agent 返回的 repo 标识），每次响应都要核对。 */
+  repo: string;
+  root: string;
+  sessionId: string;
+  /** 远端状态令牌：状态一变就换新值。 */
+  token: string;
+  /** 数值代次：主界面对旧响应的比较照旧成立。 */
+  generation: number;
+  latest: RemoteWorktreeSnapshot;
+  reviewId: string | null;
+  pending: RemotePendingWrite | null;
+  /**
+   * 连接断开后只读：已读内容保留，但写入与新的读取都不再发送，
+   * 直到重新打开这个远端仓库。绝不因为断线改用本机 Git。
+   */
+  disconnected: boolean;
+  diffs: Map<string, RemoteDiffDocument>;
+}
+
+/** 传输层错误：连接已不可用，界面转入只读。 */
+const DISCONNECT_CODES = new Set(["remote_disconnected", "ssh_failed", "remote_timeout", "ssh_auth_failed"]);
+
+const remoteSessions = new Map<string, RemoteRepositorySession>();
+const remoteHostLabels = new Map<string, string>();
+let remoteGeneration = 1000;
+
+function remoteError(code: string, message: string, generation?: number): AppFailure {
+  return generation === undefined ? { code, message } : { code, message, generation };
+}
+
+function newOperationId(): string {
+  const uuid = globalThis.crypto?.randomUUID?.();
+  if (uuid) return uuid;
+  const bytes = new Uint8Array(16);
+  globalThis.crypto?.getRandomValues?.(bytes);
+  const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+  return hex.slice(0, 8) + "-" + hex.slice(8, 12) + "-4" + hex.slice(13, 16) + "-a" + hex.slice(17, 20) + "-" + hex.slice(20, 32);
+}
+
+function decodeBase64(value: string): Uint8Array {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+function remoteSession(key: string): RemoteRepositorySession {
+  const session = remoteSessions.get(key);
+  if (!session) {
+    throw remoteError("remote_disconnected", "远端仓库连接已断开，请重新打开这个远端仓库。");
+  }
+  return session;
+}
+
+async function hostLabel(hostId: string, fallback: string): Promise<string> {
+  const known = remoteHostLabels.get(hostId);
+  if (known) return known;
+  try {
+    for (const target of await remoteWorktreePort.targets()) {
+      remoteHostLabels.set(target.targetId, target.name);
+    }
+  } catch {
+    // 主机列表读不到时用远端返回的主机标识，不因此拒绝已打开的仓库。
+  }
+  return remoteHostLabels.get(hostId) ?? fallback;
+}
+
+/**
+ * 状态令牌变化时才推进数值代次：同一状态重复读取不会让界面把旧响应当成新代次，
+ * 状态真的变化时旧响应又一定会被丢弃。
+ */
+function advanceRemoteGeneration(session: RemoteRepositorySession, snapshot: RemoteWorktreeSnapshot): number {
+  if (session.token !== snapshot.generation) {
+    session.token = snapshot.generation;
+    remoteGeneration += 1;
+    session.generation = remoteGeneration;
+  }
+  session.latest = snapshot;
+  return session.generation;
+}
+
+function openedRemote(session: RemoteRepositorySession): OpenedRepository {
+  return {
+    summary: {
+      name: repositoryBaseName(session.root),
+      path: session.key,
+      host: session.host,
+      remotePath: session.root,
+    },
+    generation: session.generation,
+    snapshot: remoteStatus(session.latest, session.generation),
+    // 远端仓库的提交说明草稿只在本会话内保留：本机 state.json 只服务本机仓库。
+    draft: "",
+    // 远端没有本机文件监听，变化由显式刷新与聚焦刷新发现。
+    watchDegraded: false,
+  };
+}
+
+async function remoteStatusOf(session: RemoteRepositorySession): Promise<RemoteWorktreeSnapshot> {
+  if (session.disconnected) {
+    throw remoteError("remote_disconnected", "远端连接已断开，请重新打开这个远端仓库；当前内容只读。");
+  }
+  let snapshot: RemoteWorktreeSnapshot;
+  try {
+    snapshot = await remoteWorktreePort.status(session.sessionId);
+  } catch (error) {
+    const failure = normalizeError(error);
+    if (DISCONNECT_CODES.has(failure.code)) session.disconnected = true;
+    session.diffs.clear();
+    throw failure;
+  }
+  session.disconnected = false;
+  if (snapshot.repo !== session.repo) {
+    throw remoteError("target_changed", "远端工作树身份已变化，请重新打开这个远端仓库。");
+  }
+  advanceRemoteGeneration(session, snapshot);
+  return snapshot;
+}
+
+async function loadRemotePatch(
+  session: RemoteRepositorySession,
+  path: string,
+  view: RemoteDiffView,
+): Promise<RemotePatch> {
+  const chunks: Uint8Array[] = [];
+  let cursor: string | null = null;
+  let pages = 0;
+  let total = 0;
+  let truncated = false;
+  while (pages < REMOTE_DIFF_PAGE_LIMIT) {
+    let page: RemoteDiffPage;
+    try {
+      page = await remoteWorktreePort.diff({
+        sessionId: session.sessionId,
+        generation: session.token,
+        path,
+        view,
+        ...(cursor ? { cursor } : {}),
+      });
+    } catch (error) {
+      throw normalizeError(error);
+    }
+    const bytes = decodeBase64(page.data);
+    chunks.push(bytes);
+    total += bytes.length;
+    pages += 1;
+    cursor = page.nextCursor;
+    if (!cursor) break;
+  }
+  truncated = cursor !== null;
+  const joined = new Uint8Array(total);
+  let at = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, at);
+    at += chunk.length;
+  }
+  const patch = parseRemotePatch(new TextDecoder().decode(joined));
+  return truncated ? { ...patch, truncated: true } : patch;
+}
+
+async function settleRemoteWrite(
+  session: RemoteRepositorySession,
+  result: RemoteWriteResult,
+  op: RemotePendingWrite["op"],
+): Promise<RemoteWorktreeSnapshot> {
+  if (result.state === "completed") {
+    session.pending = null;
+    if (result.snapshot.repo !== session.repo) {
+      throw remoteError("target_changed", "远端工作树身份已变化，请重新打开这个远端仓库。", session.generation);
+    }
+    session.diffs.clear();
+    advanceRemoteGeneration(session, result.snapshot);
+    return result.snapshot;
+  }
+  if (result.state === "failed") {
+    // 远端已核实这次写入没有生效：清掉待确认记录，错误如实上报。
+    session.pending = null;
+    throw remoteError("remote_write_failed", result.message || "远端操作失败，工作树没有被改动。", session.generation);
+  }
+  session.pending = { operationId: result.operationId, op };
+  throw remoteError("write_pending", result.message || "远端操作结果待确认，请重新打开这个远端仓库核对。", session.generation);
+}
+
+async function recoverRemoteWrite(session: RemoteRepositorySession): Promise<RemoteWorktreeSnapshot | null> {
+  const pending = session.pending;
+  if (!pending) return null;
+  let result: RemoteWriteResult;
+  try {
+    // 只查询原操作 ID 的回执，绝不重发写入。
+    result = await remoteWorktreePort.recover(session.sessionId, pending.operationId);
+  } catch (error) {
+    throw normalizeError(error);
+  }
+  return settleRemoteWrite(session, result, pending.op);
+}
+
+async function remoteWrite(
+  session: RemoteRepositorySession,
+  action: RemoteWriteAction,
+  generation: number,
+): Promise<RemoteWorktreeSnapshot> {
+  if (session.disconnected) {
+    throw remoteError("remote_disconnected", "远端连接已断开，本次写入没有发送；请重新打开这个远端仓库。");
+  }
+  if (generation !== session.generation) {
+    throw remoteError("stale", "远端仓库已有变化，请刷新后重试。", session.generation);
+  }
+  if (session.pending) {
+    throw remoteError(
+      "write_pending",
+      "上一次远端操作的结果还没有核对，请重新打开这个远端仓库核对后再写入。",
+      session.generation,
+    );
+  }
+  const operationId = newOperationId();
+  session.pending = { operationId, op: action.op };
+  let result: RemoteWriteResult;
+  try {
+    result = await remoteWorktreePort.write({
+      ...action,
+      sessionId: session.sessionId,
+      generation: session.token,
+      operationId,
+    } as RemoteWriteRequest);
+  } catch (error) {
+    const failure = normalizeError(error);
+    if (DEFINITIVE_WRITE_CODES.has(failure.code)) {
+      session.pending = null;
+      throw failure;
+    }
+    // 未收到回执：按「结果未知」处理，不重发、不冒充失败，写入保持禁用。
+    throw remoteError("write_pending", failure.message, session.generation);
+  }
+  return settleRemoteWrite(session, result, action.op);
+}
+
+async function closeRemoteSession(
+  session: RemoteRepositorySession,
+  reason: string,
+): Promise<void> {
+  remoteSessions.delete(session.key);
+  try {
+    await remoteWorktreePort.close(session.sessionId);
+  } catch {
+    // 关闭失败不改变本机会话已结束的事实；下次打开会重新建立连接。
+  }
+  if (session.reviewId) {
+    try {
+      await remoteReviewPort.end(session.reviewId, reason);
+    } catch {
+      // 来源已失效时不再补发回执。
+    }
+  }
+}
+
+export interface RemoteOpenOptions {
+  reviewId?: string;
+  allowInstall?: boolean;
+  installConfirmation?: string | null;
+  onProgress?: (value: RemoteConnectionProgress) => void;
+}
+
+export type RemoteOpenOutcome =
+  | {
+      kind: "opened";
+      repository: OpenedRepository;
+      key: string;
+      host: string;
+      path: string;
+      pending: RemotePendingWrite | null;
+      reviewId: string | null;
+    }
+  | { kind: "install_required"; version: string; size: number; confirmationId: string | null };
+
+/** 远端仓库的当前状态：只给展示层用，不含任何秘密。 */
+export interface RemoteRepositoryState {
+  key: string;
+  host: string;
+  path: string;
+  /** 有待核对的写入：写入保持禁用，直到重新打开并核对。 */
+  pending: boolean;
+  reviewId: string | null;
+  connected: boolean;
+}
+
+async function openRemote(
+  location: Extract<RepositoryLocation, { kind: "ssh" }>,
+  options: RemoteOpenOptions = {},
+): Promise<RemoteOpenOutcome> {
+  let opened: RemoteOpenResult;
+  try {
+    opened = await remoteWorktreePort.open(
+      {
+        requestId: newOperationId(),
+        targetId: location.hostId,
+        targetRevision: location.hostRevision,
+        path: location.path,
+        allowInstall: options.allowInstall ?? false,
+        ...(options.installConfirmation ? { installConfirmation: options.installConfirmation } : {}),
+        ...(options.reviewId ? { reviewId: options.reviewId } : {}),
+      } as RemoteOpenRequest,
+      options.onProgress ?? (() => {}),
+    );
+  } catch (error) {
+    throw normalizeError(error);
+  }
+  if (opened.kind === "install_required") {
+    return {
+      kind: "install_required",
+      version: opened.version,
+      size: opened.size,
+      confirmationId: opened.confirmationId ?? null,
+    };
+  }
+  const root = opened.snapshot.root;
+  const host = await hostLabel(location.hostId, opened.snapshot.host || location.hostId);
+  const key = remoteRepositoryKey(location.hostId, root);
+  // 主窗口同时只有一个当前仓库：先前打开的远端连接（含同名路径的另一台主机）先结束。
+  for (const previous of [...remoteSessions.values()]) {
+    await closeRemoteSession(previous, "cancelled");
+  }
+  const session: RemoteRepositorySession = {
+    key,
+    hostId: location.hostId,
+    hostRevision: location.hostRevision,
+    host,
+    repo: opened.snapshot.repo,
+    root,
+    sessionId: opened.sessionId,
+    token: opened.snapshot.generation,
+    generation: (remoteGeneration += 1),
+    latest: opened.snapshot,
+    reviewId: options.reviewId ?? null,
+    pending: opened.pendingWrite ?? null,
+    disconnected: false,
+    diffs: new Map(),
+  };
+  remoteSessions.set(key, session);
+  if (session.reviewId) {
+    try {
+      await remoteReviewPort.accept(session.reviewId, session.sessionId);
+    } catch (error) {
+      await closeRemoteSession(session, "open_failed");
+      throw normalizeError(error);
+    }
+  }
+  if (session.pending) {
+    // 打开时后端已经带回持久记录：只核对回执，不重发写入。
+    await recoverRemoteWrite(session).catch(() => undefined);
+  }
+  return {
+    kind: "opened",
+    repository: openedRemote(session),
+    key,
+    host,
+    path: root,
+    pending: session.pending,
+    reviewId: session.reviewId,
+  };
+}
+
+/** 打开远端仓库：主机、路径与可选审查来源都在这里绑定，安装需要显式确认。 */
+export async function openRemoteRepository(
+  location: Extract<RepositoryLocation, { kind: "ssh" }>,
+  options: RemoteOpenOptions = {},
+): Promise<RemoteOpenOutcome> {
+  return openRemote(location, options);
+}
+
+/** 远端主机列表（只读）：主机簿里的显示名与默认目录，不含秘密。 */
+export async function remoteTargets(): Promise<RemoteTarget[]> {
+  try {
+    return await remoteWorktreePort.targets();
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+export function remoteRepositoryState(key: string): RemoteRepositoryState | null {
+  const session = remoteSessions.get(key);
+  if (!session) return null;
+  return {
+    key: session.key,
+    host: session.host,
+    path: session.root,
+    pending: session.pending !== null,
+    reviewId: session.reviewId,
+    connected: !session.disconnected,
+  };
+}
+
+/** 向原 Cliora 会话返回审查结果：只发送真实 Git 结果，不推进任何本地仓库状态。 */
+export async function remoteReturnReview(key: string): Promise<void> {
+  const session = remoteSession(key);
+  if (!session.reviewId) throw remoteError("remote_review", "这次打开不是 Cliora 远端审查，没有可返回的来源。");
+  if (session.pending) {
+    throw remoteError("write_pending", "请先核对远端操作结果，再返回 Cliora。", session.generation);
+  }
+  try {
+    await remoteReviewPort.returnReview(session.reviewId, session.sessionId);
+  } catch (error) {
+    throw normalizeError(error);
+  }
+}
+
+
+const apiBase = {
   workspaceList: () => invoke<Projects>("workspace_list"),
   workspaceCreate: (name: string) => invoke<Projects>("workspace_create", { name }),
   workspacePreview: (path: string) => invoke<WorkspacePreview>("workspace_preview", { path }),
@@ -1014,3 +1487,241 @@ export const api = {
     headOid: string | null = null,
   ) => invoke<ClioraReturnSent>("cliora_review_return", { reviewId, sessionId, outcome, headOid }),
 };
+
+/* ------------------------------------------------------------------ *
+ * 分派：同一个方法名按仓库键落到本机或远端；远端仓库绝不落回本机 Git。
+ * ------------------------------------------------------------------ */
+
+async function remoteStageMany(
+  path: string,
+  paths: string[],
+  generation: number,
+  op: "stage" | "unstage",
+): Promise<StatusSnapshot> {
+  const session = remoteSession(path);
+  let current = generation;
+  let snapshot = session.latest;
+  for (const relative of paths) {
+    snapshot = await remoteWrite(session, { op, path: relative }, current);
+    current = session.generation;
+  }
+  return remoteStatus(snapshot, session.generation);
+}
+
+async function closeAllRemoteSessions(): Promise<void> {
+  for (const session of [...remoteSessions.values()]) {
+    await closeRemoteSession(session, "cancelled");
+  }
+}
+
+export async function closeRemoteRepository(key: string): Promise<void> {
+  const session = remoteSessions.get(key);
+  if (!session) return;
+  await closeRemoteSession(session, "cancelled");
+}
+
+const apiExtras = {
+  remoteTargets,
+  openRemoteRepository,
+  remoteReturnReview,
+  remoteRepositoryState,
+  closeRemoteRepository,
+};
+
+const remoteOverrides: Record<string, unknown> = {
+  async openRepository(path: string, requestId: number): Promise<OpenedRepository> {
+    if (!isRemoteRepositoryKey(path)) {
+      // 切到本机仓库前先结束远端会话：一条连接只服务一个当前仓库。
+      await closeAllRemoteSessions();
+      return apiBase.openRepository(path, requestId);
+    }
+    const parsed = parseRemoteRepositoryKey(path);
+    if (!parsed) throw remoteError("invalid_path", "远端仓库地址无效。");
+    const targets = await remoteTargets();
+    const target = targets.find((item) => item.targetId === parsed.hostId);
+    if (!target) throw remoteError("target_changed", "这台 SSH 主机已不在主机簿里，请重新选择主机。");
+    if (target.unavailableReason) throw remoteError("target_unavailable", target.unavailableReason);
+    const outcome = await openRemote({
+      kind: "ssh",
+      hostId: target.targetId,
+      hostRevision: target.targetRevision,
+      path: parsed.path,
+    });
+    if (outcome.kind === "install_required") {
+      throw remoteError(
+        "remote_install_required",
+        "这台主机还没有可用的 Twiglane 远端组件，请在“打开远端仓库”里确认安装后再打开。",
+      );
+    }
+    return outcome.repository;
+  },
+
+  async addRepository(path: string, requestId: number): Promise<OpenedRepository> {
+    await closeAllRemoteSessions();
+    return apiBase.addRepository(path, requestId);
+  },
+
+  async refreshStatus(path: string, generation: number, requestId: number): Promise<StatusSnapshot> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.refreshStatus(path, generation, requestId);
+    const session = remoteSession(path);
+    const snapshot = await remoteStatusOf(session);
+    return remoteStatus(snapshot, session.generation);
+  },
+
+  async loadDiff(
+    path: string,
+    relative: string,
+    staged: boolean,
+    generation: number,
+    requestId: number,
+    original: string | null = null,
+    offset = 0,
+    limit = 0,
+    context?: number,
+    asText?: boolean,
+  ): Promise<DiffResponse> {
+    if (!isRemoteRepositoryKey(path)) {
+      return apiBase.loadDiff(path, relative, staged, generation, requestId, original, offset, limit, context, asText);
+    }
+    const session = remoteSession(path);
+    if (session.disconnected) {
+      throw remoteError("remote_disconnected", "远端连接已断开：已读内容保留，新的差异读取不再发送。");
+    }
+    if (generation !== session.generation) {
+      throw remoteError("stale", "远端仓库已有变化，请刷新后重试。", session.generation);
+    }
+    const view: RemoteDiffView = staged ? "staged" : "unstaged";
+    const cacheKey = view + "\u0000" + relative + "\u0000" + session.token;
+    let document = session.diffs.get(cacheKey);
+    if (!document) {
+      const patch = await loadRemotePatch(session, relative, view);
+      // 等待期间切了仓库：这次响应属于旧连接，直接丢弃而不是贴到新仓库上。
+      if (remoteSessions.get(path) !== session) {
+        throw remoteError("remote_disconnected", "远端仓库已切换，这次差异读取已丢弃。");
+      }
+      document = remoteDiffDocument(patch, session.generation, relative, staged, session.token);
+      if (session.diffs.size >= REMOTE_DIFF_CACHE_LIMIT) session.diffs.clear();
+      session.diffs.set(cacheKey, document);
+    }
+    if (document.generation !== generation) {
+      throw remoteError("stale", "远端仓库已有变化，请刷新后重试。", session.generation);
+    }
+    return remoteDiffPage(document, offset, limit);
+  },
+
+  async stageFiles(path: string, paths: string[], generation: number, requestId: number): Promise<StatusSnapshot> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.stageFiles(path, paths, generation, requestId);
+    return remoteStageMany(path, paths, generation, "stage");
+  },
+
+  async unstageFiles(path: string, paths: string[], generation: number, requestId: number): Promise<StatusSnapshot> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.unstageFiles(path, paths, generation, requestId);
+    return remoteStageMany(path, paths, generation, "unstage");
+  },
+
+  async commitChanges(path: string, message: string, generation: number, requestId: number): Promise<CommitResult> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.commitChanges(path, message, generation, requestId);
+    const session = remoteSession(path);
+    const staged = remoteChanges(session.latest.files)
+      .filter((file) => file.staged !== "none")
+      .map((file) => file.path);
+    const snapshot = await remoteWrite(session, { op: "commit", message }, generation);
+    return {
+      oid: snapshot.head ?? "",
+      generation: session.generation,
+      branch: snapshot.branch ?? "",
+      summary: message.split("\n")[0] ?? "",
+      files: staged,
+      pushed: false,
+      snapshot: remoteStatus(snapshot, session.generation),
+    };
+  },
+
+  async closeRepository(): Promise<void> {
+    await closeAllRemoteSessions();
+    return apiBase.closeRepository();
+  },
+
+  async repositoryReviewToken(
+    path: string,
+    relative: string,
+    generation: number,
+    requestId: number,
+  ): Promise<RepositoryReviewToken> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.repositoryReviewToken(path, relative, generation, requestId);
+    const session = remoteSession(path);
+    if (generation !== session.generation) {
+      throw remoteError("stale", "远端仓库已有变化，请刷新后重试。", session.generation);
+    }
+    const file = remoteChanges(session.latest.files).find((item) => item.path === relative);
+    if (!file) {
+      return {
+        generation,
+        path: relative,
+        state: "missing",
+        token: null,
+        staged: "none",
+        unstaged: "none",
+        untracked: false,
+        unmerged: false,
+        contentVersion: null,
+        message: "这条改动已不在远端工作树里。",
+      };
+    }
+    return {
+      generation,
+      path: relative,
+      state: "current",
+      token: remoteReviewToken(session.token, path, relative),
+      staged: file.staged,
+      unstaged: file.unstaged,
+      untracked: file.untracked,
+      unmerged: file.unmerged,
+      contentVersion: session.token,
+      message: "",
+    };
+  },
+
+  async saveDraft(path: string, message: string): Promise<void> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.saveDraft(path, message);
+    // 本机草稿库只按本机仓库规范路径保存；远端仓库的草稿留在会话内存里，
+    // 换仓库再回来仍然可用，但不会写进本机 state.json。
+    return Promise.resolve();
+  },
+
+  async forgetRecent(path: string): Promise<RecentRepo[]> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.forgetRecent(path);
+    throw remoteError("remote_unsupported", "远端仓库的最近记录只在本次会话内，移除请从仓库弹层里操作。");
+  },
+};
+
+/**
+ * 同一个 api 对象：未覆盖的方法遇到远端仓库键时明确失败，
+ * 不会把 ssh 仓库键当成路径交给本机 Git。
+ */
+function withRemoteDispatch(base: typeof apiBase): typeof apiBase & typeof apiExtras {
+  return new Proxy(base as typeof apiBase & typeof apiExtras, {
+    get(target, prop, receiver) {
+      if (typeof prop === "string" && prop in apiExtras) {
+        return (apiExtras as Record<string, unknown>)[prop];
+      }
+      if (typeof prop === "string" && prop in remoteOverrides) {
+        return remoteOverrides[prop];
+      }
+      const value = Reflect.get(target, prop, receiver) as unknown;
+      if (typeof value !== "function" || typeof prop !== "string") return value;
+      return (...args: unknown[]) => {
+        const first = args[0];
+        if (typeof first === "string" && isRemoteRepositoryKey(first)) {
+          return Promise.reject(
+            remoteError("remote_unsupported", "远端仓库暂不支持这个操作（" + prop + "）。"),
+          );
+        }
+        return (value as (...inner: unknown[]) => unknown)(...args);
+      };
+    },
+  });
+}
+
+export const api = withRemoteDispatch(apiBase);
+

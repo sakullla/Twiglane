@@ -139,8 +139,14 @@
   import StatusBar from "./lib/components/StatusBar.svelte";
   import TitleBar from "./lib/components/TitleBar.svelte";
   import ViewSwitcher from "./lib/components/ViewSwitcher.svelte";
-  import RemoteWorktree from "./lib/components/RemoteWorktree.svelte";
-  import { remoteReviewPort, type RemoteReviewSource } from "./lib/remote-worktree";
+  import {
+    isRemoteRepositoryKey,
+    remoteReviewPort,
+    repositoryBaseName,
+    type RemoteConnectionProgress,
+    type RemoteReviewSource,
+    type RemoteTarget,
+  } from "./lib/remote-worktree";
   import Welcome from "./lib/components/Welcome.svelte";
   import { createQuietActivity } from "./lib/quiet-activity";
   import { setAbbrevLength } from "./lib/abbrev.svelte";
@@ -244,6 +250,8 @@
     const host = projects.hostId;
     linkedMember = null;
     if (!current || !project || directMember) return;
+    // 远端仓库不在本机磁盘上：仓库键不能交给本机 HEAD 读取，也不参与本机成员比对。
+    if (isRemoteRepositoryKey(current)) return;
     // Bounded on-disk HEAD metadata only; Git status stays in the existing Scheduler overview.
     const paths = [...new Set([current, ...projectRepos(project, host, []).map((repo) => repo.path)])];
     let alive = true;
@@ -474,9 +482,23 @@
   let taskNav = $state.raw<FileNavState | null>(null);
   let taskHunk = $state<HunkNavReport | null>(null);
   let taskModal = $state<TaskModal | null>(null);
-  let remoteWorktreeOpen = $state(false);
-  let remoteReviewSource = $state<RemoteReviewSource | undefined>();
-  let remoteWorktreeWriting = $state(false);
+  /*
+   * 远端仓库在主窗口打开：这里只留主机/路径选择与连接状态，不再有独立的远端工作台。
+   * 主机簿来自只读的主机列表，路径由用户显式给出；仓库键与 DTO 分派都在 api 边界完成。
+   */
+  let remotePickerOpen = $state(false);
+  let remotePickerBusy = $state(false);
+  let remotePickerError = $state<string | null>(null);
+  let remotePickerTargets = $state.raw<RemoteTarget[]>([]);
+  let remoteTargetId = $state("");
+  let remotePath = $state("");
+  let remoteInstall = $state<{ version: string; size: number; confirmationId: string | null } | null>(null);
+  let remoteProgress = $state<string | null>(null);
+  let remoteReviewSource = $state<RemoteReviewSource | null>(null);
+  let remoteReturning = $state(false);
+  /** 当前打开的远端仓库键；本机仓库为 null。 */
+  const remoteKey = $derived(opened && isRemoteRepositoryKey(opened.summary.path) ? opened.summary.path : null);
+  const remoteRepoState = $derived(remoteKey ? api.remoteRepositoryState(remoteKey) : null);
   /**
    * 只读文档阅读窗口的请求。
    *
@@ -492,7 +514,7 @@
    * 键盘、命令分发与写入入口都用这一份判定，不逐个列举 documentRequest（漏一处就会让
    * Ctrl+Enter 真的提交、Alt+箭头改掉底下的差异选择）。
    */
-  let taskLayerOpen = $derived(taskModal !== null || documentRequest !== null || remoteWorktreeOpen);
+  let taskLayerOpen = $derived(taskModal !== null || documentRequest !== null || remotePickerOpen);
   /** 阅读位置按「仓库 + 版本 + 路径」保存在这里，关闭再打开仍能接着读。 */
   const documentSession = createDocumentSession({ repository: () => opened?.summary.path ?? null });
   /** 从哪个任务 modal 跳过来的：例如从「分支与标签」打开合并，关闭合并时回到那里。 */
@@ -583,6 +605,39 @@
   let syncCancelling = $state(false);
   /** 会访问远程、可以取消的同步动作。 */
   const REMOTE_PENDING = new Set(["fetch", "pull", "push", "publish", "associate"]);
+
+  /**
+   * 远端仓库在主窗口只接通打开、刷新、状态、差异与整文件暂存/提交。
+   * 其余入口依赖本机 Git、本机文件系统或本机终端，明确不可用；
+   * 仓库键不会被当成路径交给本机命令，因此这些命令不能静默回退。
+   */
+  const REMOTE_BLOCKED_COMMANDS = new Set([
+    "view.files",
+    "view.history",
+    "files.quickOpen",
+    "files.search",
+    "file.reveal",
+    "file.back",
+    "file.forward",
+    "task.scope",
+    "task.publish",
+    "task.stash",
+    "task.merge",
+    "task.abortMerge",
+    "task.branch",
+    "task.remote",
+    "sync.fetch",
+    "sync.pull",
+    "sync.push",
+    "sync.upstream",
+    "commit.push",
+    "branch.switch",
+    "branch.create",
+    "terminal.toggle",
+    "terminal.new",
+    "stage.all",
+    "unstage.all",
+  ]);
   /**
    * 切换仓库时可以让路的动作：只等网络的远程操作。
    * 断网或远程卡住时，切换会先停下当前仓库的远程命令（本地提交不受影响），而不是把用户锁在这个仓库里。
@@ -826,7 +881,10 @@
     }
   });
   let paletteCommands = $derived(
-    paletteItems(commandState).map((item) => ({
+    paletteItems(commandState)
+      // 远端仓库只支持基础改动与提交：本机 Git、文件与终端入口不出现在面板里。
+      .filter((item) => !(remoteKey !== null && REMOTE_BLOCKED_COMMANDS.has(item.id)))
+      .map((item) => ({
       id: item.id,
       group: item.group,
       title: item.title,
@@ -965,6 +1023,10 @@
     // 任务级 modal 层（任务弹窗或只读阅读窗口）占着单槽时，写入类命令不落到背景：
     // 键盘与 inert 已经挡住主要入口，这里兜住原生菜单与程序化调用（R3/R6）。
     if (taskLayerOpen && WRITE_COMMANDS.has(id)) return;
+    if (remoteKey !== null && REMOTE_BLOCKED_COMMANDS.has(id)) {
+      notice("远端仓库暂不支持这个操作（" + id + "）。");
+      return;
+    }
     switch (id) {
       case "view.changes":
         showChanges();
@@ -1093,7 +1155,7 @@
         openPalette();
         return;
       case "repo.openRemote":
-        remoteWorktreeOpen = true;
+        void openRemotePicker();
         return;
       case "repo.add":
         void addRepo();
@@ -3215,18 +3277,261 @@
     );
   }
 
+  /*
+   * 远端仓库在主窗口打开（T6）：
+   * - 主机列表只读，来自主机簿；路径必须由用户给出或来自已校验的审查来源。
+   * - 组件安装需要显式确认，未确认不传输任何字节。
+   * - 任何失败都留在当前界面，绝不静默改用本机仓库。
+   */
+  function remoteProgressLabel(value: RemoteConnectionProgress): string {
+    if (value.phase === "connecting") return "正在连接主机…";
+    if (value.phase === "opening") return "正在打开远端工作树…";
+    if (value.totalBytes && value.sentBytes !== undefined) {
+      const percent = Math.round((value.sentBytes / value.totalBytes) * 100);
+      return "正在传输远端组件 " + String(percent) + "%";
+    }
+    return "正在传输并安装远端组件…";
+  }
+
+  const remoteTarget = $derived(remotePickerTargets.find((item) => item.targetId === remoteTargetId) ?? null);
+  const remotePathValid = $derived(remotePath.startsWith("/") && !remotePath.includes("\0"));
+  const remoteOpenReason = $derived(
+    remotePickerBusy ? "正在读取主机或连接远端。" :
+    !remoteTarget ? "请选择一台 SSH 主机。" :
+    remoteTarget.unavailableReason ? remoteTarget.unavailableReason :
+    !remotePathValid ? "请输入远端绝对路径。" : "",
+  );
+
+  async function openRemotePicker() {
+    closeSwitcher(false);
+    remoteReviewSource = null;
+    remotePickerOpen = true;
+    remotePickerError = null;
+    remoteProgress = null;
+    remoteInstall = null;
+    remoteTargetId = "";
+    remotePath = "";
+    await loadRemoteTargets();
+  }
+
+  async function loadRemoteTargets(prefill: { hostId: string; hostRevision: string } | null = null) {
+    remotePickerBusy = true;
+    try {
+      const targets = await api.remoteTargets();
+      remotePickerTargets = Array.isArray(targets) ? targets : [];
+      if (prefill) {
+        const exact = targets.find((item) => item.targetId === prefill.hostId);
+        // 审查来源绑定主机与配置修订：任一项变化都必须重新选择，不自动换成别的主机。
+        if (!exact || exact.unavailableReason || exact.targetRevision !== prefill.hostRevision) {
+          remoteTargetId = "";
+          remotePickerError = exact?.unavailableReason ?? "原远端主机的配置已变化，请重新选择主机。";
+        }
+        return;
+      }
+      if (!remoteTargetId) {
+        const first = targets.find((item) => !item.unavailableReason);
+        remoteTargetId = first?.targetId ?? "";
+        if (!remotePath) remotePath = first?.defaultPath ?? "";
+      }
+    } catch (error) {
+      remotePickerError = normalizeError(error).message;
+    } finally {
+      remotePickerBusy = false;
+    }
+  }
+
+  interface RemoteOpenSpec {
+    hostId: string;
+    hostRevision: string;
+    path: string;
+    reviewId: string | null;
+    source: RemoteReviewSource | null;
+  }
+
+  /** 打开远端仓库并把结果交给主窗口；安装待确认时停在选择层，不假装已打开。 */
+  async function attemptRemoteOpen(
+    spec: RemoteOpenSpec,
+    options: { allowInstall?: boolean; installConfirmation?: string | null } = {},
+  ): Promise<boolean> {
+    remotePickerBusy = true;
+    remotePickerError = null;
+    remoteProgress = null;
+    try {
+      const outcome = await api.openRemoteRepository(
+        { kind: "ssh", hostId: spec.hostId, hostRevision: spec.hostRevision, path: spec.path },
+        {
+          ...(spec.reviewId ? { reviewId: spec.reviewId } : {}),
+          // 安装始终显式：缺省为 false，只有用户确认后的那一次请求才是 true。
+          allowInstall: options.allowInstall === true,
+          ...(options.installConfirmation ? { installConfirmation: options.installConfirmation } : {}),
+          onProgress: (value) => {
+            remoteProgress = remoteProgressLabel(value);
+          },
+        },
+      );
+      if (outcome.kind === "install_required") {
+        remoteInstall = { version: outcome.version, size: outcome.size, confirmationId: outcome.confirmationId };
+        remoteProgress = null;
+        return false;
+      }
+      remoteInstall = null;
+      remoteProgress = null;
+      remotePickerOpen = false;
+      remotePickerError = null;
+      remoteReviewSource = spec.source;
+      banner = null;
+      rememberOpened(outcome.repository);
+      // 远端仓库在本次会话的最近列表里：键是 hostId + 远端路径，别的仓库不会串到它上面。
+      recent = [
+        {
+          name: repositoryBaseName(outcome.path),
+          path: outcome.key,
+          openedAtMs: Date.now(),
+          host: outcome.host,
+          remotePath: outcome.path,
+        },
+        ...recent.filter((repo) => repo.path !== outcome.key),
+      ];
+      live = "已打开远端仓库 " + outcome.host + "：" + outcome.path;
+      if (outcome.pending) {
+        notice("上一次远端操作的结果还没有核对：写入保持禁用，重新打开这个远端仓库可核对原操作。");
+      }
+      return true;
+    } catch (error) {
+      remotePickerError = normalizeError(error).message;
+      return false;
+    } finally {
+      remotePickerBusy = false;
+    }
+  }
+
+  /** 从选择层打开：先处理未保存草稿与在途写入，再建立远端连接。 */
+  async function openRemoteFromPicker() {
+    const target = remoteTarget;
+    if (!target || remoteOpenReason) return;
+    if (!(await confirmEditorLeave("打开远端仓库"))) return;
+    if ((await flushDraft(drafts.path)) === false) return;
+    if (switchBlocked(commandState)) {
+      notice(switchBlockedReason(commandState));
+      return;
+    }
+    try {
+      await api.cancelReads();
+    } catch {
+      // 取消失败不影响打开：远端打开自己不排队本机只读请求。
+    }
+    const source = remoteReviewSource;
+    await attemptRemoteOpen({
+      hostId: target.targetId,
+      hostRevision: target.targetRevision,
+      path: remotePath.trim(),
+      reviewId: source?.reviewId ?? null,
+      source,
+    });
+  }
+
+  /** 用户确认后的安装：只带待确认层给出的 confirmationId，不自行重放旧请求。 */
+  async function confirmRemoteInstall() {
+    const offer = remoteInstall;
+    if (!offer) return;
+    const source = remoteReviewSource;
+    if (source) {
+      await attemptRemoteOpen(
+        {
+          hostId: source.targetId,
+          hostRevision: source.targetRevision,
+          path: source.worktreePath,
+          reviewId: source.reviewId,
+          source,
+        },
+        { allowInstall: true, installConfirmation: offer.confirmationId },
+      );
+      return;
+    }
+    const target = remoteTarget;
+    if (!target) return;
+    await attemptRemoteOpen(
+      { hostId: target.targetId, hostRevision: target.targetRevision, path: remotePath.trim(), reviewId: null, source: null },
+      { allowInstall: true, installConfirmation: offer.confirmationId },
+    );
+  }
+
+  /** 关闭选择层：正在连接时不关闭；审查来源尚未打开则如实回送取消。 */
+  async function closeRemotePicker() {
+    if (remotePickerBusy) return;
+    remotePickerOpen = false;
+    remotePickerError = null;
+    remoteInstall = null;
+    remoteProgress = null;
+    const source = remoteReviewSource;
+    remoteReviewSource = null;
+    if (source) {
+      try {
+        await remoteReviewPort.end(source.reviewId, "cancelled");
+      } catch {
+        // 来源已失效时不再补发回执。
+      }
+    }
+  }
+
+  /** 把当前远端审查结果返回原 Cliora 会话：只发送真实结果，不改本机仓库。 */
+  async function returnRemoteReview() {
+    const key = remoteKey;
+    if (!key || remoteReturning) return;
+    remoteReturning = true;
+    try {
+      await api.remoteReturnReview(key);
+      phaseNote = "已向原 Cliora 会话返回远端审查结果。";
+    } catch (error) {
+      showError(error);
+    } finally {
+      remoteReturning = false;
+    }
+  }
+
   async function handleRemoteReviewLink(url: string) {
     const source = await remoteReviewPort.begin(url);
     if (!source) return;
-    if (remoteWorktreeOpen || openModalCount() > 0 || switchBlocked(commandState)) {
+    if (remotePickerOpen || openModalCount() > 0 || switchBlocked(commandState)) {
       await remoteReviewPort.end(source.reviewId, "busy");
       notice("请先完成当前操作，再从 Cliora 重新发起远端审查。");
       return;
     }
     // 只有真正要打开这条审查时才提示：被 busy 拒绝的跳转什么都不说。
     announceHostSyncHint(Boolean(source.hostSync));
+    if (!(await confirmEditorLeave("打开远端审查"))) {
+      await remoteReviewPort.end(source.reviewId, "cancelled");
+      return;
+    }
+    if ((await flushDraft(drafts.path)) === false) {
+      await remoteReviewPort.end(source.reviewId, "cancelled");
+      return;
+    }
+    try {
+      await api.cancelReads();
+    } catch {
+      // 取消失败不影响打开远端审查。
+    }
+    // 主窗口直接打开这条审查：主机、工作树与基线都绑在来源上，安装需要再确认一次。
     remoteReviewSource = source;
-    remoteWorktreeOpen = true;
+    remotePickerOpen = true;
+    remotePickerError = null;
+    remoteProgress = null;
+    remoteInstall = null;
+    remoteTargetId = source.targetId;
+    remotePath = source.worktreePath;
+    await loadRemoteTargets({ hostId: source.targetId, hostRevision: source.targetRevision });
+    if (remotePickerError) {
+      await remoteReviewPort.end(source.reviewId, "target_changed");
+      return;
+    }
+    await attemptRemoteOpen({
+      hostId: source.targetId,
+      hostRevision: source.targetRevision,
+      path: source.worktreePath,
+      reviewId: source.reviewId,
+      source,
+    });
   }
 
   /**
@@ -3497,6 +3802,8 @@
   }
 
   async function openRecent(path: string, onRequest?: (serial: number, request: Promise<OpenedRepository>) => void) {
+    // 最近列表与快捷入口打开的都不是审查来源：旧来源不能跟到新仓库上。
+    remoteReviewSource = null;
     // 任何确认层/任务弹窗打开时都不切换仓库：旧确认层不能留在新仓库上继续生效。
     if (openModalCount() > 0) {
       notice("请先关闭当前对话框，再切换仓库。");
@@ -3557,15 +3864,28 @@
   }
 
   async function forget(path: string) {
-    if (opened?.summary.path === path && !(await confirmEditorLeave("关闭并移除这个仓库"))) return;
+    if (
+      opened?.summary.path === path &&
+      !(await confirmEditorLeave(isRemoteRepositoryKey(path) ? "关闭并移除这个远端仓库" : "关闭并移除这个仓库"))
+    ) return;
     try {
       if (opened?.summary.path === path) {
         if (switchBlocked(commandState)) { notice(switchBlockedReason(commandState)); return; }
         if ((await flushDraft(path)) === false) return;
       }
-      recent = await api.forgetRecent(path);
+      if (isRemoteRepositoryKey(path)) {
+        // 远端仓库的最近记录只在本次会话里：结束连接并从列表移除，不写本机最近记录。
+        try {
+          await api.closeRemoteRepository(path);
+        } catch {
+          // 连接可能已经断开：记录移除仍要完成。
+        }
+        recent = recent.filter((repo) => repo.path !== path);
+      } else {
+        recent = await api.forgetRecent(path);
+      }
       if (opened?.summary.path === path) {
-        await api.closeRepository();
+        if (!isRemoteRepositoryKey(path)) await api.closeRepository();
         saveReadingContext();
         if (draftTimer) clearTimeout(draftTimer);
         drafts.unload();
@@ -4128,7 +4448,7 @@
 
   /** 键盘层：把按键翻成命令 id，再走与四个入口相同的 runCommand。 */
   function onWindowKeydown(event: KeyboardEvent) {
-    if (paletteOpen || remoteWorktreeOpen) return;
+    if (paletteOpen || remotePickerOpen) return;
     // 任务级 modal 层占着单槽（任务弹窗或只读阅读窗口）时按键全部让位：
     // 阅读窗口同样由 Modal 占层并让背景 inert，外壳键盘不能落到 inert 底下（R3/R6）。
     if (taskLayerOpen || cloneOpen || dependencyOpen || confirmPath !== null) return;
@@ -4968,6 +5288,29 @@
     </div>
   {/if}
 
+  {#if remoteKey}
+    <!-- 远端仓库的常驻状态：真实主机与远端路径，不把内部仓库键当成用户路径。 -->
+    <div class="infobar info" role="status" data-remote-repository={remoteKey}>
+      <Icon name="cloud" size={15} />
+      <span class="infobar-text">
+        {#if remoteRepoState?.pending}
+          远端操作结果待确认：写入已禁用，重新打开这个远端仓库可核对原操作。
+        {:else}
+          远端仓库 {remoteRepoState?.host ?? opened?.summary.host ?? ""} · {remoteRepoState?.path ?? opened?.summary.remotePath ?? ""}
+        {/if}
+      </span>
+      {#if remoteRepoState?.reviewId}
+        <button
+          type="button"
+          class="btn btn-sm btn-secondary"
+          title={remoteReturning ? "正在向原 Cliora 会话返回结果" : writeLocked ? "当前有写入在途，完成后才能返回" : "把这次审查的真实结果发回原 Cliora 会话"}
+          disabled={remoteReturning || writeLocked}
+          onclick={() => void returnRemoteReview()}
+        >{remoteReturning ? "正在返回…" : "返回 Cliora"}</button>
+      {/if}
+    </div>
+  {/if}
+
   <div class="workspace" data-sidebar={sidebarHidden ? "hidden" : "visible"} style={`--files:${paneWidth}px`}>
     <!-- 命令面板从 body 打开时，弹窗关闭后的焦点落到这里：主内容区本身可编程聚焦（不进 Tab 序），
          比回到 body 更接近用户离开的地方。 -->
@@ -5347,18 +5690,97 @@
 </div>
 
 
-{#if remoteWorktreeOpen}
+{#if remotePickerOpen}
+  <!-- 远端仓库在主窗口打开：这里只选主机与路径，不再有独立的远端工作台（T6）。 -->
   <Modal
-    title={remoteReviewSource ? "Cliora 远端审查" : "远端仓库"}
-    titleId="remote-worktree-title"
-    icon="folder-open"
-    size="xl"
-    width="min(1200px, 100%)"
-    fill
-    locked={remoteWorktreeWriting}
-    onClose={() => { remoteWorktreeOpen = false; remoteReviewSource = undefined; }}
+    title={remoteReviewSource ? "打开 Cliora 远端审查" : "打开远端仓库"}
+    titleId="remote-open-title"
+    icon="cloud"
+    size="md"
+    width="min(560px, 100%)"
+    description="远端仓库在主窗口打开；主机与路径来自当前主机簿，连接失败不会改用本机仓库。"
+    locked={remotePickerBusy}
+    onClose={() => void closeRemotePicker()}
   >
-    <RemoteWorktree reviewSource={remoteReviewSource} onWriting={(value) => (remoteWorktreeWriting = value)} />
+    <div class="confirm-body" data-modal-impact="remote-open">
+      <div>
+        <span class="hint">主机</span>
+        <select
+          class="select"
+          aria-label="SSH 主机"
+          title={remotePickerBusy ? "正在连接远端，完成后才能换主机" : "选择要连接的 SSH 主机"}
+          bind:value={remoteTargetId}
+          disabled={remotePickerBusy}
+        >
+          {#each remotePickerTargets as target (target.targetId)}
+            <option value={target.targetId} disabled={Boolean(target.unavailableReason)}>
+              {target.name}{target.unavailableReason ? " · " + target.unavailableReason : ""}
+            </option>
+          {/each}
+        </select>
+      </div>
+      <div>
+        <span class="hint">远端路径</span>
+        <input
+          class="input"
+          aria-label="远端路径"
+          bind:value={remotePath}
+          placeholder="/srv/repo"
+          title={remotePickerBusy
+            ? "正在连接远端，完成后才能修改路径"
+            : remoteReviewSource
+              ? "审查来源绑定原远端工作树，不能在这里改动"
+              : "远端工作树的绝对路径"}
+          readonly={remoteReviewSource !== null}
+          disabled={remotePickerBusy}
+        />
+      </div>
+      {#if remoteReviewSource}
+        <p class="hint">这条审查绑定原主机与远端工作树；任一项已变化时请从 Cliora 重新发起。</p>
+      {/if}
+      {#if remoteProgress}
+        <p class="hint" role="status">{remoteProgress}</p>
+      {/if}
+      {#if remoteInstall}
+        <p class="hint" role="status">
+          这台主机还没有可用的 Twiglane 远端组件（{remoteInstall.version}，{remoteInstall.size} 字节）。传输需要你确认。
+        </p>
+      {/if}
+      {#if remotePickerError}
+        <p class="hint" role="alert" data-remote-error>{remotePickerError}</p>
+      {/if}
+      {#if remoteOpenReason}
+        <p class="hint">{remoteOpenReason}</p>
+      {/if}
+    </div>
+    {#snippet footer()}
+      <span class="spacer"></span>
+      <button
+        type="button"
+        class="btn btn-secondary"
+        title={remotePickerBusy ? "连接进行中，完成后才能取消" : "不打开任何远端仓库"}
+        disabled={remotePickerBusy}
+        onclick={() => void closeRemotePicker()}
+      >取消</button>
+      {#if remoteInstall}
+        <button
+          type="button"
+          class="btn btn-primary"
+          title={remotePickerBusy ? "正在传输远端组件" : "确认后才会向这台主机传输并安装组件"}
+          disabled={remotePickerBusy}
+          onclick={() => void confirmRemoteInstall()}
+        >确认安装</button>
+      {:else}
+        <button
+          type="button"
+          class="btn btn-primary"
+          aria-busy={remotePickerBusy}
+          title={remoteOpenReason !== "" ? remoteOpenReason : remotePickerBusy ? "正在连接远端" : "在主窗口打开这个远端仓库"}
+          disabled={remotePickerBusy || remoteOpenReason !== ""}
+          onclick={() => void openRemoteFromPicker()}
+        >打开仓库</button>
+      {/if}
+    {/snippet}
   </Modal>
 {/if}
 

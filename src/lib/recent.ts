@@ -134,6 +134,10 @@ export interface WorktreeRow {
   recent: boolean;
   /** 最近列表里的打开时间；枚举出来的工作区是 0。 */
   openedAtMs: number;
+  /** 用户看到的位置：远端取真实远端路径，本机就是 path。 */
+  displayPath: string;
+  /** 远端主机地址；本机仓库为 null。 */
+  host: string | null;
   /** 后端读到状态的时间；没有读到状态时为空。 */
   checkedAtMs: number | null;
   /** 最近一次成功刷新没有确认到这一项：值来自更早的读取，不能当成当前状态。 */
@@ -170,7 +174,7 @@ export type WorktreeListRow =
   | { kind: "item"; key: string; group: WorktreeGroup; row: WorktreeRow; index: number };
 
 function rowOf(
-  repo: { name: string; path: string; openedAtMs: number },
+  repo: { name: string; path: string; openedAtMs: number; host?: string | null; remotePath?: string | null },
   item: WorktreeItem | null,
   head: RepoHead | null,
   current: string | null,
@@ -195,6 +199,9 @@ function rowOf(
     current: current !== null && key === current,
     recent,
     openedAtMs: repo.openedAtMs,
+    // 内部仓库键不进展示层：远端显示真实远端路径与主机。
+    displayPath: repo.remotePath ?? path,
+    host: repo.host ?? null,
     checkedAtMs: item?.checkedAtMs ?? null,
     stale: confirmed !== null && item !== null && !confirmed.has(key),
     state: item ? item.status : missing ? "missing" : "unknown",

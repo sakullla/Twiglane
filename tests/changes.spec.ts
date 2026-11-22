@@ -1474,19 +1474,54 @@ describe("差异空白显示与纯空白过滤（T3）", () => {
   const moreTrigger = () => screen.getByRole("button", { name: /更多差异工具/ });
   const toolsDialog = () => screen.getByRole("dialog", { name: "差异工具" });
   /* 显示偏好常驻「更多差异工具」：菜单项的 aria-selected 对应原来内联按钮的 aria-pressed；
-     条目可访问名带有「已开启/已关闭」状态文字，按前缀匹配。 */
+     条目可访问名带有状态文字，按前缀匹配。各类「忽略」规则在「比对规则」二级页里。 */
+  const findTool = async (name: string) => {
+    const root = within(toolsDialog()).queryByRole("option", { name: new RegExp(`^${name}`) });
+    if (root) return root;
+    await fireEvent.click(within(toolsDialog()).getByRole("option", { name: /^比对规则/ }));
+    return within(toolsDialog()).getByRole("option", { name: new RegExp(`^${name}`) });
+  };
   const openTool = async (name: string) => {
-    await fireEvent.click(moreTrigger());
-    await fireEvent.click(within(toolsDialog()).getByRole("option", { name: new RegExp(`^${name}`) }));
+    if (!screen.queryByRole("dialog", { name: "差异工具" })) await fireEvent.click(moreTrigger());
+    await fireEvent.click(await findTool(name));
+    // 规则切换后菜单留着方便连改；测试按「点一次」语义关掉它。
+    if (screen.queryByRole("dialog", { name: "差异工具" })) await fireEvent.keyDown(toolsDialog(), { key: "Escape" });
   };
   const toolSelected = async (name: string) => {
     await fireEvent.click(moreTrigger());
-    const selected = within(toolsDialog()).getByRole("option", { name: new RegExp(`^${name}`) }).getAttribute("aria-selected");
+    const selected = (await findTool(name)).getAttribute("aria-selected");
     await fireEvent.keyDown(toolsDialog(), { key: "Escape" });
     return selected;
   };
 
   beforeEach(() => resetDiffPrefs());
+
+  it("比对规则收在二级页：一级只有入口，规则连改不关菜单，搜索可直达", async () => {
+    render(DiffView, { props: base() });
+    await fireEvent.click(moreTrigger());
+    const options = () => within(toolsDialog()).getAllByRole("option").map((item) => item.textContent ?? "");
+    expect(options().some((text) => text.includes("忽略"))).toBe(false);
+    const entry = within(toolsDialog()).getByRole("option", { name: /^比对规则/ });
+    expect(entry.textContent).toContain("默认");
+    await fireEvent.click(entry);
+    await fireEvent.click(within(toolsDialog()).getByRole("option", { name: /^忽略行尾空白/ }));
+    await fireEvent.click(within(toolsDialog()).getByRole("option", { name: /^忽略大小写差异/ }));
+    // 两项都生效，菜单仍开着，并多出一键恢复。
+    expect(within(toolsDialog()).getByRole("option", { name: /^忽略行尾空白/ }).getAttribute("aria-selected")).toBe("true");
+    expect(within(toolsDialog()).getByRole("option", { name: /^恢复默认比对/ })).toBeTruthy();
+    await fireEvent.click(within(toolsDialog()).getByRole("option", { name: /^返回/ }));
+    expect(within(toolsDialog()).getByRole("option", { name: /^比对规则/ }).textContent).toContain("已开启 2 项");
+    expect(moreTrigger().getAttribute("aria-label")).toContain("2 项已开启");
+    // 搜索跨两级，直接列出规则本身。
+    await fireEvent.input(within(toolsDialog()).getByRole("combobox", { name: "搜索差异工具" }), { target: { value: "空行" } });
+    expect(within(toolsDialog()).getByRole("option", { name: /^忽略纯空行改动/ })).toBeTruthy();
+    // 第一次 Esc 清空搜索，第二次才收起。
+    await fireEvent.keyDown(toolsDialog(), { key: "Escape" });
+    await fireEvent.keyDown(toolsDialog(), { key: "Escape" });
+    // 重新打开总是从一级开始。
+    await fireEvent.click(moreTrigger());
+    expect(within(toolsDialog()).getByRole("option", { name: /^比对规则/ })).toBeTruthy();
+  });
 
   it("打开「显示空白」标出空格与制表符，代码文本仍是原文", async () => {
     render(DiffView, { props: base() });
@@ -2961,6 +2996,7 @@ describe("行选暂存（R6）", () => {
     expect(document.querySelector("[data-line-count]")?.textContent).toContain("1");
 
     await fireEvent.click(screen.getByRole("button", { name: /更多差异工具/ }));
+    await fireEvent.click(within(screen.getByRole("dialog", { name: "差异工具" })).getByRole("option", { name: /^比对规则/ }));
     await fireEvent.click(within(screen.getByRole("dialog", { name: "差异工具" })).getByRole("option", { name: /忽略纯空白改动/ }));
     await tick();
     // 可见行集合变了：选择与选行模式一起失效，看不见的行不会被写入。
@@ -3162,7 +3198,7 @@ describe("差异工具条随面板宽度收敛（R2）", () => {
       expect(search.getAttribute("aria-activedescendant")).toMatch(/-1$/);
       const closed = within(dialog).getByRole("option", { name: /显示空白字符/ });
       expect(closed.getAttribute("aria-selected")).toBe("false");
-      expect(closed.textContent).toContain("已关闭");
+      expect(closed.textContent).not.toContain("已开启");
       await fireEvent.click(closed);
 
       expect(screen.queryByRole("dialog", { name: "差异工具" })).toBeNull();

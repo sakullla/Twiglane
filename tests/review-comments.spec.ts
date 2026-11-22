@@ -59,6 +59,20 @@ beforeEach(() => {
 });
 
 describe("意见生命周期", () => {
+  it("整块意见仍是单行锚点，区间写进标签和送出的正文开头", () => {
+    const current = scope();
+    addComment(current, anchor({ newNo: 12, range: { from: 12, to: 18 } }), "这一块的失败分支要保留旧结果。");
+    expect(anchorLabel(commentsIn(current)[0].anchor)).toBe("第 12–18 行这一块");
+    const [sent] = feedbackComments(current);
+    expect(sent).toMatchObject({ hunkIndex: 0, kind: "add", oldNo: null, newNo: 12 });
+    expect(sent.body).toBe("（第 12–18 行这一块）\n这一块的失败分支要保留旧结果。");
+    // 本地保存的正文不带前缀，编辑时看到的是自己写的原话。
+    expect(commentsIn(current)[0].body).toBe("这一块的失败分支要保留旧结果。");
+    // 单行意见不加任何前缀。
+    addComment(current, anchor({ newNo: 30 }), "只改这一行。");
+    expect(feedbackComments(current)[1].body).toBe("只改这一行。");
+  });
+
   it("添加、编辑、删除都只改当前范围的这一批", () => {
     const current = scope();
     const first = addComment(current, anchor(), "这里要在失败时保留上一份结果。");

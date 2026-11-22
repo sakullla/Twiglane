@@ -73,6 +73,7 @@
       oldNo: number | null;
       newNo: number | null;
       quote: string;
+      range?: { from: number; to: number };
     }) => void;
   }
 

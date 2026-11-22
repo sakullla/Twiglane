@@ -2782,17 +2782,25 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 .hunk-btn.line-comment:hover:not(:disabled) { color: var(--fg); background: var(--hover); }
 .hunk-btn.line-comment.commented { color: var(--accent-text); background: var(--accent-soft); }
 .hunk-btn.line-comment.commented:hover:not(:disabled) { background: var(--accent); color: var(--accent-fg); }
+/* 每行一个气泡太吵：没挂意见的行只在悬停或键盘聚焦时露出来，已挂意见的行常显。 */
+.diff-line .line-comment:not(.commented), .side-row .line-comment:not(.commented) { opacity: 0; transition: opacity 120ms ease; }
+.diff-line:hover .line-comment, .side-row:hover .line-comment, .line-comment:focus-visible { opacity: 1; }
+/* 整块意见：放在块标题上，一次说一整段改动。 */
+.hunk-btn.hunk-comment { display: inline-flex; align-items: center; gap: 4px; margin-right: var(--space-8); padding: 0 var(--space-8) !important; font-family: var(--font); font-size: var(--text-xs); color: var(--fg-muted); }
+.hunk-btn.hunk-comment:hover:not(:disabled) { color: var(--accent-text); background: var(--accent-soft); }
+.hunk-btn.hunk-comment.commented { color: var(--accent-text); background: var(--accent-soft); }
 
 /* 任务审阅的意见栏：标题行只留一句计数与两个动作，展开后才是可编辑列表与整批预览。 */
-.task-comments { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8); }
-.task-comments-count { color: var(--fg-subtle); font-size: var(--text-xs); }
+.task-comments { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8); padding: var(--space-6) var(--space-12); }
+.task-comments-count { color: var(--fg); font-size: var(--text-xs); font-weight: 600; }
+.task-comments-route { flex: 1 1 auto; min-width: 0; color: var(--fg-subtle); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .task-comments-panel { display: flex; flex-direction: column; gap: var(--space-8); padding: var(--space-8) var(--space-12); border-top: 1px solid var(--border); max-height: 320px; overflow: auto; }
 .task-comment { display: flex; flex-direction: column; gap: 4px; padding: var(--space-6) var(--space-8); border: 1px solid var(--border); border-radius: var(--radius-sm); }
 .task-comment-head { display: flex; align-items: baseline; gap: var(--space-8); font-size: var(--text-xs); color: var(--fg-subtle); }
 .task-comment-path { font-family: var(--font-mono); color: var(--fg); overflow-wrap: anywhere; }
 .task-comment-quote { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--fg-subtle); white-space: pre-wrap; overflow-wrap: anywhere; }
 .task-comment-body { font-size: var(--text-sm); color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; }
-.task-comment-actions { display: flex; gap: var(--space-6); }
+.task-comment-actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-6); }
 .task-comment-preview { font-family: var(--font-mono); font-size: var(--text-xs); white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg-raised); padding: var(--space-8); border-radius: var(--radius-sm); }
 .task-comment-composer { display: flex; flex-direction: column; gap: var(--space-6); padding: var(--space-8) var(--space-12); border-top: 1px solid var(--border); }
 .task-comment-note { font-size: var(--text-xs); color: var(--fg-subtle); }

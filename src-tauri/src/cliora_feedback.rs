@@ -132,7 +132,7 @@ pub fn feedback_dir() -> PathBuf {
     std::env::temp_dir().join(DIR_NAME)
 }
 
-pub fn digest_of(feedback: &Feedback) -> String {
+fn canonical_bytes(feedback: &Feedback) -> Result<Vec<u8>, AppError> {
     let input = DigestInput {
         v: feedback.v,
         feedback_id: &feedback.feedback_id,
@@ -145,18 +145,12 @@ pub fn digest_of(feedback: &Feedback) -> String {
         head_oid: &feedback.head_oid,
         comments: &feedback.comments,
     };
-    let bytes = serde_json::to_vec(&input).expect("feedback digest input serializes");
-    sha256_hex(&bytes)
+    serde_json::to_vec(&input).map_err(|_| invalid("意见批次无法序列化"))
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+#[cfg(test)]
+fn digest_of(feedback: &Feedback) -> String {
+    format!("{:x}", Sha256::digest(canonical_bytes(feedback).unwrap()))
 }
 
 fn invalid(message: &str) -> AppError {
@@ -168,7 +162,7 @@ fn failed(message: &str) -> AppError {
 }
 
 /// 批次内容的完整校验。任何一条失败都在写文件与打开深链之前结束。
-pub fn validate_batch(feedback: &Feedback) -> Result<(), AppError> {
+fn validated_digest(feedback: &Feedback) -> Result<String, AppError> {
     if feedback.v != VERSION {
         return Err(AppError::new(
             UNSUPPORTED_VERSION,
@@ -234,26 +228,14 @@ pub fn validate_batch(feedback: &Feedback) -> Result<(), AppError> {
             return Err(invalid("意见正文含不可接受的字符"));
         }
     }
-    let bytes = serde_json::to_vec(&DigestInput {
-        v: feedback.v,
-        feedback_id: &feedback.feedback_id,
-        review_id: &feedback.review_id,
-        session_id: &feedback.session_id,
-        result_revision: feedback.result_revision,
-        worktree_path: &feedback.worktree_path,
-        range_version: &feedback.range_version,
-        baseline_oid: &feedback.baseline_oid,
-        head_oid: &feedback.head_oid,
-        comments: &feedback.comments,
-    })
-    .map_err(|_| invalid("意见批次无法序列化"))?;
+    let bytes = canonical_bytes(feedback)?;
     if bytes.len() > MAX_FILE_BYTES {
         return Err(AppError::new(
             BATCH_TOO_LARGE,
             "这批意见的总体积超过 1 MiB，请分批准备。",
         ));
     }
-    Ok(())
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 /// 建立（或核对）专用交接目录：Unix 0700 且属于当前用户，Windows 只接受普通目录。
@@ -293,9 +275,8 @@ pub fn ensure_dir(dir: &Path) -> Result<(), AppError> {
 /// 写入一次交接：校验 → create_new 临时文件 → fsync → rename → 回读核对。
 /// 目标已存在（含符号链接）一律失败，绝不覆盖另一批意见。
 pub fn prepare(dir: &Path, feedback: Feedback) -> Result<Feedback, AppError> {
-    validate_batch(&feedback)?;
     let mut feedback = feedback;
-    feedback.digest = digest_of(&feedback);
+    feedback.digest = validated_digest(&feedback)?;
     ensure_dir(dir)?;
     let target = dir.join(format!("{}.json", feedback.feedback_id));
     if fs::symlink_metadata(&target).is_ok() {
@@ -305,7 +286,12 @@ pub fn prepare(dir: &Path, feedback: Feedback) -> Result<Feedback, AppError> {
         ));
     }
     let bytes = serde_json::to_vec_pretty(&feedback).map_err(|_| invalid("意见批次无法序列化"))?;
-    let temp = dir.join(format!(".{}.part", feedback.feedback_id));
+    if bytes.len() > MAX_FILE_BYTES {
+        return Err(AppError::new(BATCH_TOO_LARGE, "意见交接文件超过 1 MiB。"));
+    }
+    let feedback_id = feedback.feedback_id;
+    drop(feedback.comments);
+    let temp = dir.join(format!(".{feedback_id}.part"));
     let write_result = (|| -> std::io::Result<()> {
         let mut file = create_private(&temp)?;
         file.write_all(&bytes)?;
@@ -313,6 +299,7 @@ pub fn prepare(dir: &Path, feedback: Feedback) -> Result<Feedback, AppError> {
         fs::rename(&temp, &target)?;
         Ok(())
     })();
+    drop(bytes);
     if let Err(error) = write_result {
         let _ = fs::remove_file(&temp);
         return Err(failed(&format!(
@@ -322,7 +309,7 @@ pub fn prepare(dir: &Path, feedback: Feedback) -> Result<Feedback, AppError> {
     }
     sync_dir(dir);
     // 回读一次：schema、上限与 digest 必须与刚写入的一致，才允许打开深链。
-    read_file(dir, &feedback.feedback_id)
+    read_file(dir, &feedback_id)
 }
 
 #[cfg(unix)]
@@ -381,8 +368,8 @@ pub fn read_file(dir: &Path, feedback_id: &str) -> Result<Feedback, AppError> {
     }
     let feedback: Feedback = serde_json::from_slice(&bytes)
         .map_err(|_| invalid("意见交接文件的 schema 不符合 feedback-v1"))?;
-    validate_batch(&feedback)?;
-    if feedback.digest != digest_of(&feedback) {
+    drop(bytes);
+    if feedback.digest != validated_digest(&feedback)? {
         return Err(AppError::new(
             DIGEST_MISMATCH,
             "意见批次的 digest 与正文不符，未接受。",
@@ -393,8 +380,7 @@ pub fn read_file(dir: &Path, feedback_id: &str) -> Result<Feedback, AppError> {
 
 /// 生成深链：只带标识、结果版本与 digest；正文、路径、代码与命令都不在 URL 里。
 pub fn feedback_url(feedback: &Feedback) -> Result<String, AppError> {
-    validate_batch(feedback)?;
-    if feedback.digest != digest_of(feedback) {
+    if feedback.digest != validated_digest(feedback)? {
         return Err(AppError::new(
             DIGEST_MISMATCH,
             "意见批次的 digest 与正文不符，未生成深链。",
@@ -701,6 +687,24 @@ mod tests {
     }
 
     #[test]
+    fn oversized_serialized_file_is_not_published() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = temp_dir(&root);
+        let mut feedback = batch();
+        feedback.comments = (0..MAX_COMMENTS)
+            .map(|index| comment(&format!("33333333-3333-4333-8333-{index:012x}"), "x"))
+            .collect();
+        let overhead = canonical_bytes(&feedback).unwrap().len() - MAX_COMMENTS;
+        let body = "x".repeat((MAX_FILE_BYTES - overhead) / MAX_COMMENTS);
+        for comment in &mut feedback.comments {
+            comment.body.clone_from(&body);
+        }
+        assert!(validated_digest(&feedback).is_ok());
+        assert_eq!(prepare(&dir, feedback).unwrap_err().code, BATCH_TOO_LARGE);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+    }
+
+    #[test]
     fn comment_limits_are_enforced_before_any_file_is_written() {
         let root = tempfile::tempdir().expect("temp root");
         let dir = temp_dir(&root);
@@ -741,29 +745,29 @@ mod tests {
             comment("55555555-5555-4555-8555-555555555555", "一"),
             comment("55555555-5555-4555-8555-555555555555", "二"),
         ];
-        assert_eq!(validate_batch(&duplicated).unwrap_err().code, INVALID_BATCH);
+        assert_eq!(validated_digest(&duplicated).unwrap_err().code, INVALID_BATCH);
 
         for path in ["/etc/passwd", "../outside", "src\\app.ts", "src/../app.ts", ""] {
             let mut wrong = signing(batch());
             wrong.comments[0].path = path.to_string();
-            assert_eq!(validate_batch(&wrong).unwrap_err().code, INVALID_BATCH, "{path}");
+            assert_eq!(validated_digest(&wrong).unwrap_err().code, INVALID_BATCH, "{path}");
         }
 
         let mut kind = signing(batch());
         kind.comments[0].kind = "meta".to_string();
-        assert_eq!(validate_batch(&kind).unwrap_err().code, INVALID_BATCH);
+        assert_eq!(validated_digest(&kind).unwrap_err().code, INVALID_BATCH);
 
         let mut unanchored = signing(batch());
         unanchored.comments[0].new_no = None;
-        assert_eq!(validate_batch(&unanchored).unwrap_err().code, INVALID_BATCH);
+        assert_eq!(validated_digest(&unanchored).unwrap_err().code, INVALID_BATCH);
 
         let mut v2 = signing(batch());
         v2.v = 2;
-        assert_eq!(validate_batch(&v2).unwrap_err().code, UNSUPPORTED_VERSION);
+        assert_eq!(validated_digest(&v2).unwrap_err().code, UNSUPPORTED_VERSION);
 
         let mut revision = signing(batch());
         revision.result_revision = MAX_SAFE_REVISION + 1;
-        assert_eq!(validate_batch(&revision).unwrap_err().code, INVALID_BATCH);
+        assert_eq!(validated_digest(&revision).unwrap_err().code, INVALID_BATCH);
     }
 
     #[test]
@@ -833,7 +837,7 @@ mod tests {
                 None => {
                     let feedback = parsed.expect(name);
                     assert_eq!(feedback.digest, digest_of(&feedback), "{name}: digest");
-                    validate_batch(&feedback).expect(name);
+                    validated_digest(&feedback).expect(name);
                     let url = feedback_url(&feedback).expect(name);
                     validate_url(&url).expect(name);
                     assert!(!url.contains(&feedback.worktree_path), "{name}");
@@ -846,7 +850,7 @@ mod tests {
                 }
                 Some("validation") => {
                     let feedback = parsed.expect(name);
-                    assert!(validate_batch(&feedback).is_err(), "{name}: 应该校验失败");
+                    assert!(validated_digest(&feedback).is_err(), "{name}: 应该校验失败");
                 }
                 Some(other) => panic!("未知的 reject 阶段 {other}"),
             }

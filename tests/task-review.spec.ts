@@ -940,6 +940,38 @@ describe("任务审阅的行意见（feedback-v1 准备侧）", () => {
     expect(mocks.created.get("stageLines")?.mock.calls.length ?? 0).toBe(0);
   });
 
+  it("评论此块：一次给整块写意见，锚点落在块内第一条改动行并带上行号区间", async () => {
+    const onAddComment = vi.fn();
+    // 真实差异的每块前面都有一条块标题行；按钮就挂在它上面。
+    mocks.api.loadTaskDiff.mockImplementation(async (_worktree: string, _base: string, _head: string, relative: string) => {
+      const base = diffFor(relative);
+      const header: DiffLine = { kind: "hunk", text: "@@ -1,6 +1,6 @@", oldNo: null, newNo: null, hunkIndex: 0 };
+      return { ...base, lines: [header, ...base.lines], totalLines: base.lines.length + 1 };
+    });
+    render(TaskReview, { props: reviewProps({ onAddComment, onPrepareFeedback: vi.fn() }) });
+    await screen.findByRole("listbox", { name: "任务文件" });
+    const button = await waitFor(() => {
+      const found = document.querySelector<HTMLButtonElement>("[data-hunk-comment]");
+      expect(found).toBeTruthy();
+      return found!;
+    });
+    await fireEvent.click(button);
+    const form = await screen.findByRole("form", { name: "给这一块添加意见" });
+    // 写意见时不顺手展开空的意见列表。
+    expect(screen.queryByLabelText("意见列表")).toBeNull();
+    const textarea = within(form).getByRole("textbox", { name: "意见正文" });
+    await fireEvent.input(textarea, { target: { value: "这一块的失败分支要保留旧结果。" } });
+    // Ctrl+Enter 直接加入批次。
+    await fireEvent.keyDown(textarea, { key: "Enter", ctrlKey: true });
+    expect(onAddComment).toHaveBeenCalledTimes(1);
+    const anchor = onAddComment.mock.calls[0][0] as { hunkIndex: number; kind: string; range?: { from: number; to: number } };
+    expect(anchor.hunkIndex).toBe(0);
+    expect(["add", "del"]).toContain(anchor.kind);
+    expect(anchor.range).toBeTruthy();
+    expect(anchor.range!.from).toBeLessThanOrEqual(anchor.range!.to);
+    await waitFor(() => expect(screen.queryByRole("form", { name: "给这一块添加意见" })).toBeNull());
+  });
+
   it("已存意见可查看、编辑、删除，并给出整批预览", async () => {
     const onEditComment = vi.fn();
     const onDeleteComment = vi.fn();
@@ -1011,6 +1043,6 @@ describe("任务审阅的行意见（feedback-v1 准备侧）", () => {
     const group = await screen.findByRole("group", { name: "审阅意见" });
     expect(within(group).getByText(/不会自动对应到新行号/)).toBeTruthy();
     await fireEvent.click(within(group).getByRole("button", { name: "查看意见列表" }));
-    expect(within(await screen.findByLabelText("意见列表")).getByText("还没有意见。在差异行右侧点气泡按钮，就能给那一行写一条。")).toBeTruthy();
+    expect(within(await screen.findByLabelText("意见列表")).getByText("还没有意见。点块标题上的「评论此块」一次说一整块，或用行尾气泡说某一行。")).toBeTruthy();
   });
 });

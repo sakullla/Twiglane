@@ -25,6 +25,11 @@ export interface ReviewCommentAnchor {
   newNo: number | null;
   /** 定位行的一小段原文，仅用于界面预览。 */
   quote: string;
+  /**
+   * 整块意见覆盖的行号区间。feedback-v1 只认单行锚点，所以整块意见仍挂在块内第一条
+   * 改动行上；区间只写进界面标签与送出的正文开头，让原任务知道说的是哪一段。
+   */
+  range?: { from: number; to: number };
 }
 
 export interface ReviewComment {
@@ -203,6 +208,7 @@ export function addComment(scope: CommentScope, anchor: ReviewCommentAnchor, bod
     createdAt: now,
     updatedAt: now,
   };
+  if (utf8Bytes(sentBody(comment)) > MAX_BODY_BYTES) throw new Error("单条意见超过 16 KiB，请拆开写。");
   writeBatch(scope, [...comments, comment]);
   return comment;
 }
@@ -213,6 +219,7 @@ export function editComment(scope: CommentScope, id: string, body: string): Revi
   const existing = comments.find((comment) => comment.id === id);
   if (!existing) return null;
   const next: ReviewComment = { ...existing, body: text, updatedAt: Date.now() };
+  if (utf8Bytes(sentBody(next)) > MAX_BODY_BYTES) throw new Error("单条意见超过 16 KiB，请拆开写。");
   writeBatch(scope, comments.map((comment) => (comment.id === id ? next : comment)));
   return next;
 }
@@ -224,11 +231,21 @@ export function deleteComment(scope: CommentScope, id: string): boolean {
   return true;
 }
 
-/** 意见的行号标签：新增看新侧，删除看旧侧，上下文两侧一致时只写一个。 */
+/** 意见的行号标签：新增看新侧，删除看旧侧，上下文两侧一致时只写一个；整块写区间。 */
 export function anchorLabel(anchor: ReviewCommentAnchor): string {
+  if (anchor.range) {
+    return anchor.range.from === anchor.range.to
+      ? "第 " + anchor.range.from + " 行这一块"
+      : "第 " + anchor.range.from + "–" + anchor.range.to + " 行这一块";
+  }
   if (anchor.kind === "del") return "删除第 " + (anchor.oldNo ?? "?") + " 行";
   if (anchor.kind === "add") return "新增第 " + (anchor.newNo ?? "?") + " 行";
   return "第 " + (anchor.newNo ?? anchor.oldNo ?? "?") + " 行";
+}
+
+/** 送出的正文：整块意见在开头写明区间，接收端只看得到单行锚点。 */
+function sentBody(comment: { anchor: ReviewCommentAnchor; body: string }): string {
+  return comment.anchor.range ? "（" + anchorLabel(comment.anchor) + "）" + chr10 + comment.body : comment.body;
 }
 
 /** 整批预览：只在本地展示与复制，不写文件、不打开任何深链。 */
@@ -254,7 +271,7 @@ export function feedbackComments(scope: CommentScope): ReviewFeedbackComment[] {
     kind: comment.anchor.kind,
     oldNo: comment.anchor.oldNo,
     newNo: comment.anchor.newNo,
-    body: comment.body,
+    body: sentBody(comment),
   }));
 }
 

@@ -277,11 +277,11 @@
   );
   /** 选中的这条路径是不是「工作区重建」：行数与单文件差异都按重建后的内容给。 */
   let selectedRebuilt = $derived(
-    selected ? (rows.find((row) => row.path === selected?.path)?.rebuilt ?? false) : false,
+    selected ? (rowsByPath.get(selected.path)?.rebuilt ?? false) : false,
   );
   /** 净结果里这条路径仍在工作区（不是删除、也不是未解决冲突）：只有这时才给编辑入口。 */
   let selectedEditable = $derived.by(() => {
-    const row = selected ? rows.find((item) => item.path === selected?.path) : null;
+    const row = selected ? rowsByPath.get(selected.path) : null;
     return Boolean(row && row.unstaged !== "deleted" && !row.unmerged);
   });
 
@@ -375,7 +375,6 @@
     draftBody = "";
     editingId = null;
     commentError = null;
-    commentsOpen = true;
   }
 
   function cancelDraft(): void {
@@ -811,6 +810,9 @@
     <!-- 意见是任务级的下一步：一行计数 + 两个动作，展开后才显示可编辑列表与整批预览。 -->
     <div class="task-comments" role="group" aria-label="审阅意见">
       <span class="task-comments-count">{comments.length > 0 ? comments.length + " 条意见" : "还没有意见"}</span>
+      <span class="task-comments-route" title="意见只存在这个窗口。送回后由 cliora 让你确认，才会写进发起审查的那个 CLI 会话；不会自动执行，也不改代码。">
+        {comments.length > 0 ? "送回后在 cliora 确认，再写进原会话" : "点块标题的「评论此块」或行尾气泡写意见，写完一起送回原会话"}
+      </span>
       <button
         type="button"
         class="btn btn-ghost btn-sm"
@@ -839,7 +841,7 @@
   {#if draftAnchor}
     <form
       class="task-comment-composer"
-      aria-label="给这一行添加意见"
+      aria-label={draftAnchor.range ? "给这一块添加意见" : "给这一行添加意见"}
       onsubmit={(event) => {
         event.preventDefault();
         saveDraft();
@@ -850,21 +852,35 @@
         <span>{anchorLabel(draftAnchor)}</span>
       </div>
       {#if draftAnchor.quote}<p class="task-comment-quote">{draftAnchor.quote}</p>{/if}
+      <!-- svelte-ignore a11y_autofocus -->
       <textarea
         class="textarea"
         rows={3}
+        autofocus
         bind:value={draftBody}
         aria-label="意见正文"
-        placeholder="这一行要改成什么样？说清楚就够了，不会自动发送。"
+        placeholder={draftAnchor.range ? "这一块要怎么改？说清楚就够了。" : "这一行要改成什么样？说清楚就够了。"}
+        onkeydown={(event) => {
+          if (event.isComposing) return;
+          if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+            event.preventDefault();
+            if (draftBody.trim() !== "") saveDraft();
+          } else if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            cancelDraft();
+          }
+        }}
       ></textarea>
       <div class="task-comment-actions">
         <button
           type="submit"
           class="btn btn-primary btn-sm"
           disabled={draftBody.trim() === ""}
-          title={draftBody.trim() === "" ? "先写一句这一行要改成什么" : "把这条意见加到当前批次"}
+          title={draftBody.trim() === "" ? "先写一句要怎么改" : "加到这批意见（Ctrl+Enter）"}
         >添加意见</button>
         <button type="button" class="btn btn-ghost btn-sm" onclick={cancelDraft}>取消</button>
+        <span class="task-comment-note">Ctrl+Enter 添加 · Esc 取消 · 只存在本窗口，不会自动发送</span>
       </div>
     </form>
   {/if}
@@ -872,7 +888,7 @@
   {#if commentsOpen}
     <div class="task-comments-panel" aria-label="意见列表">
       {#if comments.length === 0}
-        <p class="task-comment-note">还没有意见。在差异行右侧点气泡按钮，就能给那一行写一条。</p>
+        <p class="task-comment-note">还没有意见。点块标题上的「评论此块」一次说一整块，或用行尾气泡说某一行。</p>
       {:else}
         {#each comments as comment (comment.id)}
           <article class="task-comment" data-comment-id={comment.id}>

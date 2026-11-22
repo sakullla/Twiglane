@@ -83,6 +83,7 @@
     FileRow,
     FileSelection,
     GitInfo,
+    FileChange,
     OpenedRepository,
     PanelWidths,
     PreviewSources,
@@ -731,6 +732,14 @@
     inTask ? taskReviewNav : workspaceView === "changes" ? changesReviewNav : null,
   );
 
+  let snapshotFiles = $derived(opened?.snapshot.files);
+  let filesByPath = $derived.by(() => {
+    const index = new Map<string, FileChange>();
+    for (const file of snapshotFiles ?? []) {
+      if (!index.has(file.path)) index.set(file.path, file);
+    }
+    return index;
+  });
   let changeCount = $derived(opened?.snapshot.files.length ?? 0);
   let conflictCount = $derived(opened?.snapshot.files.filter((file) => file.unmerged).length ?? 0);
   let upstreamMissing = $derived(opened ? !opened.snapshot.branch.upstream : false);
@@ -817,7 +826,7 @@
   let activeFileStage = $derived.by<{ path: string | null; side: "staged" | "unstaged" | "none"; otherSide: boolean }>(() => {
     // 只有改动与任务视图把选择作用在真实 Git 状态上；文件/历史视图没有可写的这一侧。
     const path = workspaceView === "changes" || inTask ? activeSelectedPath : null;
-    const file = path ? opened?.snapshot.files.find((item) => item.path === path) : undefined;
+    const file = path ? filesByPath.get(path) : undefined;
     // 改动视图按用户选中的那一侧判定：同一路径同时有已暂存与未暂存时，选中已暂存就必须能取消暂存。
     // 任务行的侧别只是净结果（不等于真实索引状态），所以任务视图只按真实文件状态判定。
     const chosen = workspaceView === "changes" ? (selected?.side ?? null) : null;
@@ -1978,7 +1987,7 @@
   let changesEditPath = $derived.by(() => {
     if (!filesViewEnabled || !opened || !selected || multiActive || selected.side !== "unstaged") return null;
     const path = selected.path;
-    const file = opened.snapshot.files.find((item) => item.path === path);
+    const file = filesByPath.get(path);
     if (!file || file.unmerged || file.unstaged === "deleted") return null;
     return path;
   });
@@ -2100,7 +2109,7 @@
    * 这里转到同一文件的真实未提交差异，部分暂存仍走写锁内重读与过期保护。
    */
   function openUnstagedDiff(path: string): void {
-    const file = opened?.snapshot.files.find((item) => item.path === path);
+    const file = filesByPath.get(path);
     if (!file || file.unmerged) {
       notice("这个文件当前没有可部分暂存的未提交差异：任务净差异不能直接做块/行补丁。");
       return;
@@ -2120,7 +2129,7 @@
    * 列表按钮、空格与命令面板读的都是这一份判定，界面声明的动作与写入方向才不会相反。
    */
   function taskFileStage(path: string): "staged" | "unstaged" | "none" {
-    return fileStageSide(opened?.snapshot.files.find((item) => item.path === path) ?? null);
+    return fileStageSide(filesByPath.get(path) ?? null);
   }
 
   /** 在真实状态下把这个任务文件整文件暂存；任务净差异本身不被写入。 */
@@ -3939,7 +3948,7 @@
    */
   function stashFileMenu(path: string, kind: "tracked" | "untracked" | "ignored", point: { x: number; y: number }) {
     const busy = writeLocked ? switchBlockedReason(commandState) : undefined;
-    const row = opened?.snapshot.files.find((file) => file.path === path) ?? null;
+    const row = filesByPath.get(path) ?? null;
     const deleted = row ? row.unstaged === "deleted" || (row.unstaged === "none" && row.staged === "deleted") : false;
     const name = path.split("/").pop() ?? path;
     const entries: ContextMenuEntry[] = [];
@@ -5333,7 +5342,7 @@
                   fileCount={opened.snapshot.files.length}
                   onRetry={() => void loadSelectedDiff()}
                   onHunkNav={reportChangesHunk}
-                  conflicted={selected ? (opened.snapshot.files.find((file) => file.path === selected?.path)?.unmerged ?? false) : false}
+                  conflicted={selected ? (filesByPath.get(selected.path)?.unmerged ?? false) : false}
                   onResolve={() => {
                     if (selected) openConflict(selected.path);
                   }}

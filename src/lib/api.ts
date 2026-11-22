@@ -20,9 +20,12 @@ import {
   type RemoteDiffView,
   type RemoteOpenRequest,
   type RemoteOpenResult,
+  type RemoteCallOp,
   type RemotePatch,
   type RemotePendingWrite,
+  type RemoteReviewOutcome,
   type RemoteTarget,
+  type RemoteWriteOp,
   type RemoteWorktreeSnapshot,
   type RemoteWriteAction,
   type RemoteWriteRequest,
@@ -235,6 +238,11 @@ interface RemoteRepositorySession {
   reviewId: string | null;
   pending: RemotePendingWrite | null;
   /**
+   * 这次远端会话里实际做成的 Git 结果阶段：只由已经核对完成的写入推进，
+   * 返回 Cliora 时按它声明结果（没有提交或合入就是 reviewed）。
+   */
+  outcome: RemoteReviewOutcome;
+  /**
    * 连接断开后只读：已读内容保留，但写入与新的读取都不再发送，
    * 直到重新打开这个远端仓库。绝不因为断线改用本机 Git。
    */
@@ -385,6 +393,8 @@ async function loadRemotePatch(
   let pages = 0;
   let total = 0;
   let truncated = false;
+  // 块级可暂存只认远端第一页给的标记：续页是同一份差异，不能用后面的页改口径。
+  let hunksStageable = false;
   while (pages < REMOTE_DIFF_PAGE_LIMIT) {
     let page: RemoteDiffPage;
     try {
@@ -398,6 +408,7 @@ async function loadRemotePatch(
     } catch (error) {
       throw normalizeError(error);
     }
+    if (pages === 0) hunksStageable = page.hunksStageable === true;
     const bytes = decodeBase64(page.data);
     chunks.push(bytes);
     total += bytes.length;
@@ -412,8 +423,32 @@ async function loadRemotePatch(
     joined.set(chunk, at);
     at += chunk.length;
   }
-  const patch = parseRemotePatch(new TextDecoder().decode(joined));
+  const patch = parseRemotePatch(new TextDecoder().decode(joined), { hunksStageable });
   return truncated ? { ...patch, truncated: true } : patch;
+}
+
+/**
+ * 每个写入 op 做成的结果阶段。只有提交类 op 才是 committed，合并要在完成时才推进到 merged：
+ * 停在冲突的合并没有产生任何合入结果，返回 Cliora 时仍然只是 reviewed。
+ */
+const REVIEW_OUTCOME_BY_OP: Record<string, RemoteReviewOutcome> = {
+  commit: "committed",
+  amendCommit: "committed",
+  cherryPick: "committed",
+  revert: "committed",
+  undoCommit: "committed",
+  mergeComplete: "merged",
+};
+
+const REVIEW_OUTCOME_ORDER: RemoteReviewOutcome[] = ["reviewed", "committed", "merged"];
+
+/** 记录这次会话真正做成的阶段；阶段只前进，回退的写入不会把声明降下来。 */
+function noteRemoteOutcome(session: RemoteRepositorySession, op: string): void {
+  const reached = REVIEW_OUTCOME_BY_OP[op];
+  if (!reached) return;
+  if (REVIEW_OUTCOME_ORDER.indexOf(reached) > REVIEW_OUTCOME_ORDER.indexOf(session.outcome)) {
+    session.outcome = reached;
+  }
 }
 
 async function settleRemoteWrite(
@@ -424,6 +459,7 @@ async function settleRemoteWrite(
   if (result.state === "completed") {
     session.pending = null;
     noteRemoteState();
+    noteRemoteOutcome(session, op);
     if (result.snapshot.repo !== session.repo) {
       throw remoteError("target_changed", "远端工作树身份已变化，请重新打开这个远端仓库。", session.generation);
     }
@@ -600,6 +636,7 @@ async function openRemote(
     latest: opened.snapshot,
     reviewId: options.reviewId ?? null,
     pending: opened.pendingWrite ?? null,
+    outcome: "reviewed",
     disconnected: false,
     diffs: new Map(),
   };
@@ -658,18 +695,34 @@ export function remoteRepositoryState(key: string): RemoteRepositoryState | null
   };
 }
 
+/**
+ * 一次「返回 Cliora」的结果：sent 是这次真的送出了新阶段；
+ * duplicate 表示远端已经记过这一阶段（重复点击或阶段回退），本次没有发送任何内容。
+ */
+export type RemoteReturnOutcome =
+  | { state: "sent"; outcome: RemoteReviewOutcome }
+  | { state: "duplicate"; message: string };
+
 /** 向原 Cliora 会话返回审查结果：只发送真实 Git 结果，不推进任何本地仓库状态。 */
-export async function remoteReturnReview(key: string): Promise<void> {
+export async function remoteReturnReview(key: string): Promise<RemoteReturnOutcome> {
   const session = remoteSession(key);
   if (!session.reviewId) throw remoteError("remote_review", "这次打开不是 Cliora 远端审查，没有可返回的来源。");
   if (session.pending) {
     throw remoteError("write_pending", "请先核对远端操作结果，再返回 Cliora。", session.generation);
   }
   try {
-    await remoteReviewPort.returnReview(session.reviewId, session.sessionId);
+    // 阶段由这次会话里真正做成的提交或合入决定；什么都没做就是 reviewed。
+    await remoteReviewPort.returnReview(session.reviewId, session.sessionId, session.outcome);
   } catch (error) {
-    throw normalizeError(error);
+    const failure = normalizeError(error);
+    // 同一阶段重复点击（或阶段回退）由远端按 conflict 拒绝：这一阶段已经送达过，
+    // 本次没有送出任何新结果，因此按幂等刷新处理，不把 conflict 抛给用户。
+    if (failure.code === "conflict") {
+      return { state: "duplicate", message: "这一阶段已经送回 Cliora，本次没有重复发送。" };
+    }
+    throw failure;
   }
+  return { state: "sent", outcome: session.outcome };
 }
 
 
@@ -1536,6 +1589,197 @@ const apiBase = {
  * 分派：同一个方法名按仓库键落到本机或远端；远端仓库绝不落回本机 Git。
  * ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ *
+ * 远端桥接（B2）：历史、分支标签、同步、stash、合并与 worktree
+ *
+ * 这些能力全部经 remote_worktree_call 走 op 白名单：未列入白名单的 op 由后端直接拒绝
+ * （remote_unsupported），这里既不回退本机 Git，也不假装成功。只读 op 直接返回 agent v2
+ * 的同名 DTO；写入 op 只回一次新状态与回执，因此 DTO 由「回执 + 重新读取一次只读 op」组成，
+ * 由重新读取得到的字段都在 note 里注明来源，绝不把没读到的证据写成成功。
+ * ------------------------------------------------------------------ */
+
+type BridgePayload = Record<string, unknown>;
+
+/** 明确「远端这次什么都没写」的桥接错误：可以放心把结果说成失败，也不需要核对。 */
+const BRIDGE_DEFINITIVE_CODES = new Set([
+  ...DEFINITIVE_WRITE_CODES,
+  "remote_unsupported",
+  "invalid_request",
+  "unsupported_operation",
+  "unsupported_capability",
+  "state_mismatch",
+  "operation_conflict",
+  "invalid_operation",
+  "invalid_patch",
+  "write_locked",
+]);
+
+/** 桥接方法共用的前置检查：断线只读、迟到的代次不发送。 */
+function remoteBridgeSession(path: string, generation: number): RemoteRepositorySession {
+  const session = remoteSession(path);
+  if (session.disconnected) {
+    throw remoteError("remote_disconnected", "远端连接已断开，这次操作没有发送；请重新打开这个远端仓库。");
+  }
+  if (generation !== session.generation) {
+    throw remoteError("stale", "远端仓库已有变化，请刷新后重试。", session.generation);
+  }
+  return session;
+}
+
+function bridgePayload(value: unknown, op: string): BridgePayload {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw remoteError("remote_protocol", "远端返回的数据无效（" + op + "）。");
+  }
+  return value as BridgePayload;
+}
+
+/** 取结果里的那个 DTO 字段；缺字段说明协议不对，不能当成空结果。 */
+function bridgeField<T>(result: BridgePayload, name: string): T {
+  const value = result[name];
+  if (value === undefined || value === null) {
+    throw remoteError("remote_protocol", "远端返回的数据缺少 " + name + " 字段。");
+  }
+  return value as T;
+}
+
+/**
+ * 只读 op：字段直通，结果原样带回。
+ *
+ * 不带 generation：代次只用于写入的新旧核对，只读入口按 v2 的字段表也不收它；
+ * 多带一个字段会让远端把整条请求判成无效，读不到东西。
+ */
+async function remoteBridgeRead(
+  session: RemoteRepositorySession,
+  op: RemoteCallOp,
+  fields: BridgePayload = {},
+): Promise<BridgePayload> {
+  let result: unknown;
+  try {
+    result = await remoteWorktreePort.call({
+      sessionId: session.sessionId,
+      op,
+      fields,
+    });
+  } catch (error) {
+    const failure = normalizeError(error);
+    if (DISCONNECT_CODES.has(failure.code) && !session.disconnected) {
+      session.disconnected = true;
+      noteRemoteState();
+    }
+    throw failure;
+  }
+  return bridgePayload(result, op);
+}
+
+/**
+ * 写入 op：与 write 共用同一套待确认语义。
+ *
+ * 远端只回「有没有生效」与新状态，具体 DTO 由调用方再读一次；没有回执时按结果未知处理，
+ * 记一条待确认把写入关掉（operationId 只有远端有，重新打开时由持久记录带回）。
+ */
+async function remoteBridgeWrite(
+  session: RemoteRepositorySession,
+  generation: number,
+  op: RemoteWriteOp,
+  fields: BridgePayload = {},
+): Promise<RemoteWorktreeSnapshot> {
+  if (generation !== session.generation) {
+    throw remoteError("stale", "远端仓库已有变化，请刷新后重试。", session.generation);
+  }
+  if (session.pending) {
+    throw remoteError(
+      "write_pending",
+      "上一次远端操作的结果还没有核对，请重新打开这个远端仓库核对后再写入。",
+      session.generation,
+    );
+  }
+  let result: RemoteWriteResult;
+  try {
+    // 状态令牌由原生桥接从最近一次 status/diff 刷新里带上；这里给的是同一个数值代次，
+    // 后端只在能解析成 u64 时才把它转成数字 generation 发给 v2 远端。
+    result = (await remoteWorktreePort.call({
+      sessionId: session.sessionId,
+      op,
+      fields,
+      generation: session.token,
+    })) as RemoteWriteResult;
+  } catch (error) {
+    const failure = normalizeError(error);
+    if (BRIDGE_DEFINITIVE_CODES.has(failure.code)) throw failure;
+    session.pending = { operationId: "", op: op as RemotePendingWrite["op"] };
+    noteRemoteState();
+    throw remoteError(
+      "write_pending",
+      failure.message || "远端操作结果待确认，请重新打开这个远端仓库核对。",
+      session.generation,
+    );
+  }
+  return settleRemoteWrite(session, result, op as RemotePendingWrite["op"]);
+}
+
+/**
+ * 写入之后的分支状态：远端回执只有新状态，分支列表要再读一次。
+ * 代次换成本会话的数值代次，旧响应比较与其它仓库一致。
+ */
+async function remoteBranchStateOf(
+  session: RemoteRepositorySession,
+  snapshot: RemoteWorktreeSnapshot,
+): Promise<BranchState> {
+  const result = await remoteBridgeRead(session, "branchState");
+  const state = bridgeField<BranchState>(result, "branchState");
+  return { ...state, generation: session.generation, snapshot: remoteStatus(snapshot, session.generation) };
+}
+
+async function remoteTagStateOf(
+  session: RemoteRepositorySession,
+  snapshot: RemoteWorktreeSnapshot,
+): Promise<TagState> {
+  const result = await remoteBridgeRead(session, "tagState");
+  const state = bridgeField<TagState>(result, "tags");
+  return { ...state, generation: session.generation, snapshot: remoteStatus(snapshot, session.generation) };
+}
+
+async function remoteRemoteStateOf(
+  session: RemoteRepositorySession,
+  snapshot: RemoteWorktreeSnapshot,
+): Promise<RemoteState> {
+  const result = await remoteBridgeRead(session, "remoteState");
+  const state = bridgeField<RemoteState>(result, "remote");
+  return { ...state, generation: session.generation, snapshot: remoteStatus(snapshot, session.generation) };
+}
+
+async function remoteStashStateOf(
+  session: RemoteRepositorySession,
+  snapshot: RemoteWorktreeSnapshot,
+  includeUntracked: boolean,
+): Promise<StashState> {
+  const result = await remoteBridgeRead(session, "stashState", { includeUntracked });
+  const state = bridgeField<StashState>(result, "stash");
+  return { ...state, generation: session.generation, snapshot: remoteStatus(snapshot, session.generation) };
+}
+
+async function remoteMergeSessionOf(
+  session: RemoteRepositorySession,
+  snapshot: RemoteWorktreeSnapshot,
+): Promise<MergeSession> {
+  const result = await remoteBridgeRead(session, "mergeSession");
+  const state = bridgeField<MergeSession>(result, "merge");
+  return { ...state, generation: session.generation, snapshot: remoteStatus(snapshot, session.generation) };
+}
+
+/**
+ * 远端不接受的方法仍然明确失败：这些 DTO 里的证据（写回执给出的影响面、本机最近列表、
+ * 远端 v2 尚未列入桥接白名单的 op）现在拿不到，就不用推测值冒充。
+ */
+/** 合并完成时声明的是哪一类操作：远端会话用的是可读名字，这里收窄成 DTO 的联合类型。 */
+function mergeOperationName(value: string): MergeComplete["operation"] {
+  return value === "rebase" || value === "cherry-pick" || value === "revert" ? value : "merge";
+}
+
+function remoteUnsupported(what: string, why: string): never {
+  throw remoteError("remote_unsupported", "远端仓库暂不支持" + what + "：" + why);
+}
+
 async function remoteStageMany(
   path: string,
   paths: string[],
@@ -1766,6 +2010,746 @@ const remoteOverrides: Record<string, unknown> = {
   async forgetRecent(path: string): Promise<RecentRepo[]> {
     if (!isRemoteRepositoryKey(path)) return apiBase.forgetRecent(path);
     throw remoteError("remote_unsupported", "远端仓库的最近记录只在本次会话内，移除请从仓库弹层里操作。");
+  },
+
+  /* ---------------------------------------------------------------- *
+   * 远端桥接：历史
+   * ---------------------------------------------------------------- */
+
+  async historyPage(
+    path: string,
+    query: string,
+    offset: number,
+    generation: number,
+    requestId: number,
+    filters?: HistoryFilters,
+  ): Promise<HistoryPage> {
+    if (!isRemoteRepositoryKey(path)) {
+      return apiBase.historyPage(path, query, offset, generation, requestId, filters);
+    }
+    const session = remoteBridgeSession(path, generation);
+    const result = await remoteBridgeRead(session, "history", {
+      query,
+      offset,
+      ...historyFilterPayload(filters, false),
+    });
+    const page = bridgeField<HistoryPage>(result, "page");
+    return { ...page, generation: session.generation };
+  },
+
+  async fileHistory(
+    path: string,
+    relative: string,
+    offset: number,
+    generation: number,
+    requestId: number,
+    filters?: HistoryFilters,
+  ): Promise<FileHistoryPage> {
+    if (!isRemoteRepositoryKey(path)) {
+      return apiBase.fileHistory(path, relative, offset, generation, requestId, filters);
+    }
+    const session = remoteBridgeSession(path, generation);
+    const result = await remoteBridgeRead(session, "fileHistory", {
+      path: relative,
+      offset,
+      ...historyFilterPayload(filters, true),
+    });
+    const page = bridgeField<FileHistoryPage>(result, "page");
+    return { ...page, generation: session.generation };
+  },
+
+  async commitDetail(
+    path: string,
+    oid: string,
+    parent: string | null,
+    generation: number,
+    requestId: number,
+  ): Promise<CommitDetail> {
+    if (!isRemoteRepositoryKey(path)) {
+      return apiBase.commitDetail(path, oid, parent, generation, requestId);
+    }
+    const session = remoteBridgeSession(path, generation);
+    const result = await remoteBridgeRead(session, "commitDetail", { oid, parent });
+    return { ...bridgeField<CommitDetail>(result, "commit"), generation: session.generation };
+  },
+
+  async commitFileDiff(
+    path: string,
+    oid: string,
+    parent: string | null,
+    relative: string,
+    generation: number,
+    requestId: number,
+    offset = 0,
+    limit = 0,
+    context?: number,
+    asText?: boolean,
+  ): Promise<DiffResponse> {
+    if (!isRemoteRepositoryKey(path)) {
+      return apiBase.commitFileDiff(path, oid, parent, relative, generation, requestId, offset, limit, context, asText);
+    }
+    const session = remoteBridgeSession(path, generation);
+    const result = await remoteBridgeRead(session, "commitDiff", {
+      oid,
+      parent,
+      path: relative,
+      offset,
+      limit,
+      ...(context === undefined ? {} : { context }),
+      ...(asText ? { asText } : {}),
+    });
+    return { ...bridgeField<DiffResponse>(result, "diff"), generation: session.generation };
+  },
+
+  async compareFiles(
+    path: string,
+    base: string | null,
+    head: string,
+    generation: number,
+    requestId: number,
+  ): Promise<CompareFiles> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.compareFiles(path, base, head, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    const result = await remoteBridgeRead(session, "compare", { base, head });
+    return { ...bridgeField<CompareFiles>(result, "compare"), generation: session.generation };
+  },
+
+  async compareFileDiff(
+    path: string,
+    base: string,
+    head: string,
+    relative: string,
+    generation: number,
+    requestId: number,
+    offset = 0,
+    limit = 0,
+    context?: number,
+  ): Promise<DiffResponse> {
+    if (!isRemoteRepositoryKey(path)) {
+      return apiBase.compareFileDiff(path, base, head, relative, generation, requestId, offset, limit, context);
+    }
+    const session = remoteBridgeSession(path, generation);
+    const result = await remoteBridgeRead(session, "compareFileDiff", {
+      base,
+      head,
+      path: relative,
+      offset,
+      limit,
+      ...(context === undefined ? {} : { context }),
+    });
+    return { ...bridgeField<DiffResponse>(result, "compareFileDiff"), generation: session.generation };
+  },
+
+  async commitBranches(
+    path: string,
+    oid: string,
+    generation: number,
+    requestId: number,
+  ): Promise<CommitBranches> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.commitBranches(path, oid, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    const result = await remoteBridgeRead(session, "commitBranches", { oid });
+    return { ...bridgeField<CommitBranches>(result, "commitBranches"), generation: session.generation };
+  },
+
+  /* ---------------------------------------------------------------- *
+   * 远端桥接：分支、标签与远程
+   * ---------------------------------------------------------------- */
+
+  async branchList(path: string, generation: number, requestId: number): Promise<BranchListing> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.branchList(path, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    const result = await remoteBridgeRead(session, "branchList");
+    return { ...bridgeField<BranchListing>(result, "branches"), generation: session.generation };
+  },
+
+  async branchState(path: string, generation: number, requestId: number): Promise<BranchState> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.branchState(path, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    return await remoteBranchStateOf(session, session.latest);
+  },
+
+  async branchTracking(path: string, generation: number, requestId: number): Promise<BranchTracking> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.branchTracking(path, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    const result = await remoteBridgeRead(session, "branchTracking");
+    return { ...bridgeField<BranchTracking>(result, "branchTracking"), generation: session.generation };
+  },
+
+  async tagState(path: string, generation: number, requestId: number): Promise<TagState> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.tagState(path, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    return await remoteTagStateOf(session, session.latest);
+  },
+
+  async tagRemoteState(path: string, remote: string): Promise<RemoteTag[]> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.tagRemoteState(path, remote);
+    // 只读查询：不校验也不推进代次，过期响应由调用方按仓库键丢弃（与本机一致）。
+    const session = remoteSession(path);
+    if (session.disconnected) {
+      throw remoteError("remote_disconnected", "远端连接已断开，这次远程标签读取没有发送。");
+    }
+    const result = await remoteBridgeRead(session, "tagRemoteState", { remote });
+    return bridgeField<RemoteTag[]>(result, "tagRemoteState");
+  },
+
+  async remoteState(path: string, generation: number, requestId: number): Promise<RemoteState> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.remoteState(path, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    return await remoteRemoteStateOf(session, session.latest);
+  },
+
+  async createBranch(path: string, name: string, generation: number, requestId: number): Promise<BranchState> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.createBranch(path, name, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    const snapshot = await remoteBridgeWrite(session, generation, "branchCreate", { name });
+    return await remoteBranchStateOf(session, snapshot);
+  },
+
+  async createBranchFrom(
+    path: string,
+    name: string,
+    start: string,
+    checkout: boolean,
+    generation: number,
+    requestId: number,
+  ): Promise<BranchState> {
+    if (!isRemoteRepositoryKey(path)) {
+      return apiBase.createBranchFrom(path, name, start, checkout, generation, requestId);
+    }
+    const session = remoteBridgeSession(path, generation);
+    const snapshot = await remoteBridgeWrite(session, generation, "branchCreate", { name, start, checkout });
+    return await remoteBranchStateOf(session, snapshot);
+  },
+
+  async switchBranch(path: string, name: string, generation: number, requestId: number): Promise<BranchState> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.switchBranch(path, name, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    const snapshot = await remoteBridgeWrite(session, generation, "branchSwitch", { name });
+    return await remoteBranchStateOf(session, snapshot);
+  },
+
+  async renameBranch(
+    path: string,
+    oldName: string,
+    newName: string,
+    generation: number,
+    requestId: number,
+  ): Promise<BranchState> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.renameBranch(path, oldName, newName, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    const snapshot = await remoteBridgeWrite(session, generation, "branchRename", { old: oldName, new: newName });
+    return await remoteBranchStateOf(session, snapshot);
+  },
+
+  async deleteBranch(
+    path: string,
+    name: string,
+    confirmUnmerged: boolean,
+    generation: number,
+    requestId: number,
+  ): Promise<BranchState> {
+    if (!isRemoteRepositoryKey(path)) {
+      return apiBase.deleteBranch(path, name, confirmUnmerged, generation, requestId);
+    }
+    const session = remoteBridgeSession(path, generation);
+    const snapshot = await remoteBridgeWrite(session, generation, "branchDelete", { name, confirmUnmerged });
+    return await remoteBranchStateOf(session, snapshot);
+  },
+
+  async trackRemoteAs(
+    path: string,
+    remoteBranch: string,
+    local: string,
+    generation: number,
+    requestId: number,
+  ): Promise<BranchState> {
+    if (!isRemoteRepositoryKey(path)) {
+      return apiBase.trackRemoteAs(path, remoteBranch, local, generation, requestId);
+    }
+    const session = remoteBridgeSession(path, generation);
+    const snapshot = await remoteBridgeWrite(session, generation, "branchTrack", { remoteBranch, name: local });
+    return await remoteBranchStateOf(session, snapshot);
+  },
+
+  async updateBranch(path: string, name: string, generation: number, requestId: number): Promise<BranchState> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.updateBranch(path, name, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    const snapshot = await remoteBridgeWrite(session, generation, "branchUpdate", { name });
+    return await remoteBranchStateOf(session, snapshot);
+  },
+
+  async pushLocalBranch(path: string, name: string, generation: number, requestId: number): Promise<BranchState> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.pushLocalBranch(path, name, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    const snapshot = await remoteBridgeWrite(session, generation, "branchPublish", { name });
+    return await remoteBranchStateOf(session, snapshot);
+  },
+
+  async createTag(
+    path: string,
+    name: string,
+    target: string,
+    message: string,
+    generation: number,
+    requestId: number,
+  ): Promise<TagState> {
+    if (!isRemoteRepositoryKey(path)) {
+      return apiBase.createTag(path, name, target, message, generation, requestId);
+    }
+    const session = remoteBridgeSession(path, generation);
+    const fields: BridgePayload = { name, target };
+    if (message) fields.message = message;
+    const snapshot = await remoteBridgeWrite(session, generation, "tagCreate", fields);
+    return await remoteTagStateOf(session, snapshot);
+  },
+
+  async deleteTag(
+    path: string,
+    name: string,
+    confirm: boolean,
+    generation: number,
+    requestId: number,
+  ): Promise<TagState> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.deleteTag(path, name, confirm, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    const snapshot = await remoteBridgeWrite(session, generation, "tagDelete", { name, confirm });
+    return await remoteTagStateOf(session, snapshot);
+  },
+
+  async pushTag(
+    path: string,
+    remote: string,
+    name: string,
+    generation: number,
+    requestId: number,
+  ): Promise<TagState> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.pushTag(path, remote, name, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    const snapshot = await remoteBridgeWrite(session, generation, "tagPush", { remote, name });
+    return await remoteTagStateOf(session, snapshot);
+  },
+
+  async addRemote(
+    path: string,
+    name: string,
+    url: string,
+    generation: number,
+    requestId: number,
+  ): Promise<RemoteState> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.addRemote(path, name, url, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    const snapshot = await remoteBridgeWrite(session, generation, "remoteAdd", { name, url });
+    return await remoteRemoteStateOf(session, snapshot);
+  },
+
+  async setRemoteUrl(
+    path: string,
+    name: string,
+    url: string,
+    generation: number,
+    requestId: number,
+  ): Promise<RemoteState> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.setRemoteUrl(path, name, url, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    const snapshot = await remoteBridgeWrite(session, generation, "remoteSetUrl", { name, url });
+    return await remoteRemoteStateOf(session, snapshot);
+  },
+
+  /* ---------------------------------------------------------------- *
+   * 远端桥接：同步
+   * ---------------------------------------------------------------- */
+
+  async fetchRemote(path: string, generation: number, requestId: number): Promise<StatusSnapshot> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.fetchRemote(path, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    const snapshot = await remoteBridgeWrite(session, generation, "fetch");
+    return remoteStatus(snapshot, session.generation);
+  },
+
+  async pullFastForward(path: string, generation: number, requestId: number): Promise<StatusSnapshot> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.pullFastForward(path, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    const snapshot = await remoteBridgeWrite(session, generation, "pull");
+    return remoteStatus(snapshot, session.generation);
+  },
+
+  async pushBranch(path: string, generation: number, requestId: number): Promise<StatusSnapshot> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.pushBranch(path, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    const snapshot = await remoteBridgeWrite(session, generation, "push");
+    return remoteStatus(snapshot, session.generation);
+  },
+
+  async pushToRemote(path: string, remote: string, generation: number, requestId: number): Promise<StatusSnapshot> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.pushToRemote(path, remote, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    const snapshot = await remoteBridgeWrite(session, generation, "pushToRemote", { remote });
+    return remoteStatus(snapshot, session.generation);
+  },
+
+  async publishBranch(path: string, remote: string, generation: number, requestId: number): Promise<StatusSnapshot> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.publishBranch(path, remote, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    const snapshot = await remoteBridgeWrite(session, generation, "publishBranch", { remote });
+    return remoteStatus(snapshot, session.generation);
+  },
+
+  async setUpstream(
+    path: string,
+    upstream: string,
+    generation: number,
+    requestId: number,
+  ): Promise<BranchState> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.setUpstream(path, upstream, generation, requestId);
+    remoteUnsupported("修改上游分支", "远端组件还没有把 setUpstream 列入桥接白名单。");
+  },
+
+  async associateUpstream(path: string, remote: string, generation: number, requestId: number): Promise<StatusSnapshot> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.associateUpstream(path, remote, generation, requestId);
+    remoteUnsupported("关联上游分支", "远端组件还没有把 associateUpstream 列入桥接白名单。");
+  },
+
+  async fetchBranches(path: string, generation: number, requestId: number): Promise<BranchState> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.fetchBranches(path, generation, requestId);
+    remoteUnsupported("获取全部分支", "远端组件还没有把 fetchBranches 列入桥接白名单。");
+  },
+
+  async deleteRemoteBranch(
+    path: string,
+    remote: string,
+    name: string,
+    confirm: boolean,
+    generation: number,
+    requestId: number,
+  ): Promise<BranchState> {
+    if (!isRemoteRepositoryKey(path)) {
+      return apiBase.deleteRemoteBranch(path, remote, name, confirm, generation, requestId);
+    }
+    remoteUnsupported("删除远程分支", "远端组件还没有把 deleteRemoteBranch 列入桥接白名单。");
+  },
+
+  /* ---------------------------------------------------------------- *
+   * 远端桥接：stash
+   * ---------------------------------------------------------------- */
+
+  async stashState(
+    path: string,
+    includeUntracked: boolean,
+    generation: number,
+    requestId: number,
+  ): Promise<StashState> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.stashState(path, includeUntracked, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    return await remoteStashStateOf(session, session.latest, includeUntracked);
+  },
+
+  async saveStash(
+    path: string,
+    includeUntracked: boolean,
+    message: string,
+    generation: number,
+    requestId: number,
+  ): Promise<StashSaveResult> {
+    if (!isRemoteRepositoryKey(path)) {
+      return apiBase.saveStash(path, includeUntracked, message, generation, requestId);
+    }
+    const session = remoteBridgeSession(path, generation);
+    const fields: BridgePayload = { includeUntracked };
+    if (message) fields.message = message;
+    const snapshot = await remoteBridgeWrite(session, generation, "stashSave", fields);
+    const state = await remoteStashStateOf(session, snapshot, includeUntracked);
+    // 回执只给新状态：记录标识取自重新读取的列表，读不到就说读不到。
+    const oid = state.records[0]?.oid ?? "";
+    return {
+      oid,
+      note: oid
+        ? "远端已把这批改动临时保存。"
+        : "远端已临时保存，但列表里暂时读不到这条记录。",
+      state,
+    };
+  },
+
+  async applyStash(path: string, oid: string, generation: number, requestId: number): Promise<StashApplyResult> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.applyStash(path, oid, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    const snapshot = await remoteBridgeWrite(session, generation, "stashApply", { oid });
+    const state = await remoteStashStateOf(session, snapshot, true);
+    const kept = state.records.some((record) => record.oid === oid);
+    const conflictPaths = remoteChanges(snapshot.files)
+      .filter((file) => file.unmerged)
+      .map((file) => file.path);
+    return {
+      generation: session.generation,
+      oid,
+      kept,
+      operation: "apply",
+      conflicted: conflictPaths.length > 0,
+      conflictPaths,
+      // 有冲突才需要撤销入口：撤销的是这次恢复本身，不是另一条记录。
+      canAbortMerge: conflictPaths.length > 0,
+      note: kept
+        ? "远端已恢复这批改动，这条临时保存仍然保留在列表里。"
+        : "远端已恢复这批改动，这条临时保存已不在列表里。",
+      snapshot: remoteStatus(snapshot, session.generation),
+    };
+  },
+
+  async deleteStash(
+    path: string,
+    oid: string,
+    confirm: boolean,
+    generation: number,
+    requestId: number,
+  ): Promise<StashState> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.deleteStash(path, oid, confirm, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    const snapshot = await remoteBridgeWrite(session, generation, "stashDelete", { oid, confirm });
+    return await remoteStashStateOf(session, snapshot, true);
+  },
+
+  /* ---------------------------------------------------------------- *
+   * 远端桥接：合并与冲突
+   * ---------------------------------------------------------------- */
+
+  async mergePreview(
+    path: string,
+    source: string,
+    target: string | null,
+    generation: number,
+    requestId: number,
+  ): Promise<MergePreview> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.mergePreview(path, source, target, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    const result = await remoteBridgeRead(session, "mergePreview", { source, target });
+    return { ...bridgeField<MergePreview>(result, "preview"), generation: session.generation };
+  },
+
+  async startMerge(
+    path: string,
+    source: string,
+    target: string | null,
+    mode: "merge" | "ff-only" | "rebase",
+    generation: number,
+    requestId: number,
+  ): Promise<MergeSession> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.startMerge(path, source, target, mode, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    // v2 的 mergeStart 只有 merge 与 rebase：能快进时由共享实现直接快进，不需要另一套模式。
+    const snapshot = await remoteBridgeWrite(session, generation, "mergeStart", {
+      source,
+      target,
+      mode: mode === "rebase" ? "rebase" : "merge",
+    });
+    return await remoteMergeSessionOf(session, snapshot);
+  },
+
+  async completeMerge(
+    path: string,
+    message: string,
+    generation: number,
+    requestId: number,
+    operation: string | null = null,
+  ): Promise<MergeComplete> {
+    if (!isRemoteRepositoryKey(path)) {
+      return apiBase.completeMerge(path, message, generation, requestId, operation);
+    }
+    const session = remoteBridgeSession(path, generation);
+    // 完成的是哪一类操作由调用方说明或从会话里读回；两处都没有时按合并处理并如实说明。
+    let before: MergeSession | null = null;
+    try {
+      before = await remoteMergeSessionOf(session, session.latest);
+    } catch {
+      before = null;
+    }
+    const snapshot = await remoteBridgeWrite(session, generation, "mergeComplete", { message });
+    const head = snapshot.head ?? "";
+    let detail: CommitDetail | null = null;
+    if (head) {
+      try {
+        const result = await remoteBridgeRead(session, "commitDetail", { oid: head });
+        detail = bridgeField<CommitDetail>(result, "commit");
+      } catch {
+        detail = null;
+      }
+    }
+    return {
+      operation: mergeOperationName(operation ?? before?.operation ?? "merge"),
+      oid: head,
+      generation: session.generation,
+      summary: detail?.commit.summary ?? "",
+      files: (detail?.files ?? []).map((file) => file.path),
+      snapshot: remoteStatus(snapshot, session.generation),
+    };
+  },
+
+  async abortMerge(path: string, confirm: boolean, generation: number, requestId: number): Promise<AbortImpact> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.abortMerge(path, confirm, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    let before: MergeSession | null = null;
+    try {
+      before = await remoteMergeSessionOf(session, session.latest);
+    } catch {
+      before = null;
+    }
+    const paths = (before?.conflicts ?? []).map((entry) => entry.path);
+    if (!confirm) {
+      // 预览：什么都不写，只说明这次撤销会影响哪些路径。
+      return {
+        generation: session.generation,
+        wrote: false,
+        paths,
+        stashOids: [],
+        note: "远端只读预览：撤销会恢复上面这些冲突路径；自动临时保存的标识无法从远端读到。",
+        snapshot: remoteStatus(session.latest, session.generation),
+      };
+    }
+    const snapshot = await remoteBridgeWrite(session, generation, "mergeAbort", { confirm });
+    return {
+      generation: session.generation,
+      wrote: true,
+      paths,
+      stashOids: [],
+      note: "远端已撤销这次操作；恢复的路径按撤销前的冲突列表给出，自动临时保存的标识无法从远端读到。",
+      snapshot: remoteStatus(snapshot, session.generation),
+    };
+  },
+
+  async resolveConflict(
+    path: string,
+    relative: string,
+    choice: string,
+    content: string | null,
+    generation: number,
+    requestId: number,
+  ): Promise<MergeSession> {
+    if (!isRemoteRepositoryKey(path)) {
+      return apiBase.resolveConflict(path, relative, choice, content, generation, requestId);
+    }
+    const session = remoteBridgeSession(path, generation);
+    const fields: BridgePayload = { path: relative, choice };
+    if (content !== null) fields.content = content;
+    const snapshot = await remoteBridgeWrite(session, generation, "resolveConflict", fields);
+    return await remoteMergeSessionOf(session, snapshot);
+  },
+
+  async checkoutCommit(path: string, oid: string, generation: number, requestId: number): Promise<StatusSnapshot> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.checkoutCommit(path, oid, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    const snapshot = await remoteBridgeWrite(session, generation, "checkoutCommit", { oid });
+    return remoteStatus(snapshot, session.generation);
+  },
+
+  /* ---------------------------------------------------------------- *
+   * 远端桥接：拿不到证据的写入口仍然明确失败
+   *
+   * 这些方法的本机 DTO 由写锁内的计划器给出（影响面文案、撤销目标、创建数量、
+   * 本机最近列表），而桥接回执只回新状态。与其猜一个值，不如明确说不出。
+   * ---------------------------------------------------------------- */
+
+  async discardChanges(
+    path: string,
+    paths: string[],
+    confirm: boolean,
+    generation: number,
+    requestId: number,
+  ): Promise<DiscardResult> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.discardChanges(path, paths, confirm, generation, requestId);
+    remoteUnsupported("丢弃改动", "丢弃的影响面与恢复说明由本机计划器给出，远端回执只回新状态。");
+  },
+
+  async cherryPickCommits(path: string, oids: string[], generation: number, requestId: number): Promise<CherryPickOutcome> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.cherryPickCommits(path, oids, generation, requestId);
+    remoteUnsupported("拣选提交", "拣选结果里的创建数量与被跳过项由回执证明，远端桥接还没有带回它。");
+  },
+
+  async revertCommits(
+    path: string,
+    oids: string[],
+    expectedHead: string,
+    confirm: boolean,
+    generation: number,
+    requestId: number,
+  ): Promise<RevertOutcome> {
+    if (!isRemoteRepositoryKey(path)) {
+      return apiBase.revertCommits(path, oids, expectedHead, confirm, generation, requestId);
+    }
+    remoteUnsupported("还原提交", "还原的目标清单与创建数量由回执证明，远端桥接还没有带回它。");
+  },
+
+  async undoCommit(
+    path: string,
+    expectedHead: string,
+    confirm: boolean,
+    generation: number,
+    requestId: number,
+  ): Promise<UndoResult> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.undoCommit(path, expectedHead, confirm, generation, requestId);
+    remoteUnsupported("撤销最近提交", "撤销的预览与写入结果由回执证明，远端桥接还没有带回它。");
+  },
+
+  async amendCommit(
+    path: string,
+    expectedHead: string,
+    message: string | null,
+    includeStaged: boolean,
+    stagedToken: string | null,
+    confirm: boolean,
+    generation: number,
+    requestId: number,
+  ): Promise<AmendOutcome> {
+    if (!isRemoteRepositoryKey(path)) {
+      return apiBase.amendCommit(path, expectedHead, message, includeStaged, stagedToken, confirm, generation, requestId);
+    }
+    remoteUnsupported("修订最近提交", "预览里的暂存快照令牌由本机计划器给出，远端回执只回新状态。");
+  },
+
+  async removeWorktree(path: string, force: boolean, requestId: number): Promise<RecentRepo[]> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.removeWorktree(path, force, requestId);
+    // 远端 worktreeRemove 删除的始终是「当前打开的那棵工作树」，不接受 path；返回值又是本机最近列表。
+    remoteUnsupported("删除工作区", "远端组件只删除当前打开的工作树，且这条命令要返回本机最近列表。");
+  },
+
+  async stageHunks(
+    path: string,
+    relative: string,
+    staged: boolean,
+    hunks: number[],
+    snapshot: string,
+    generation: number,
+    requestId: number,
+    original: string | null = null,
+  ): Promise<StatusSnapshot> {
+    if (!isRemoteRepositoryKey(path)) {
+      return apiBase.stageHunks(path, relative, staged, hunks, snapshot, generation, requestId, original);
+    }
+    remoteUnsupported("按块暂存", "远端组件还没有把 patch 列入桥接白名单，块级写入无法发送。");
+  },
+
+  async stageLines(
+    path: string,
+    relative: string,
+    staged: boolean,
+    lines: DiffLineSelection[],
+    snapshot: string,
+    generation: number,
+    requestId: number,
+    original: string | null = null,
+  ): Promise<StatusSnapshot> {
+    if (!isRemoteRepositoryKey(path)) {
+      return apiBase.stageLines(path, relative, staged, lines, snapshot, generation, requestId, original);
+    }
+    remoteUnsupported("逐行暂存", "远端组件还没有把 patch 列入桥接白名单，逐行写入无法发送。");
+  },
+
+  async commitAndPush(
+    path: string,
+    message: string,
+    generation: number,
+    requestId: number,
+  ): Promise<CommitPushReport> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.commitAndPush(path, message, generation, requestId);
+    remoteUnsupported("提交并推送", "远端桥接按 op 分开执行；这一条要一次回两段结果，桥接还没有对应 op。");
   },
 };
 

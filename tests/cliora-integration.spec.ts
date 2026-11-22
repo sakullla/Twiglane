@@ -1035,7 +1035,7 @@ describe("Cliora 远端审查入口", () => {
       reviewId: REVIEW_A,
       connected: true,
     });
-    mocks.api.remoteReturnReview.mockResolvedValue(undefined);
+    mocks.api.remoteReturnReview.mockResolvedValue({ state: "sent", outcome: "reviewed" });
 
     const handle = await mountShell();
     const install = await screen.findByRole("button", { name: "确认安装" });

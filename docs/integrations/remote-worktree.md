@@ -13,18 +13,71 @@
 
 - 仓库键是 `ssh://<hostId>/<远端绝对路径>`，不含显示名、连接会话或秘密；最近记录、草稿、
   选择与审阅进度都按这个键隔离。两台主机的同名路径是两个仓库，切换后旧连接的响应不会被贴到新仓库上。
-- 主窗口当前只提供打开、刷新、状态、分页差异、整文件暂存/取消暂存与提交。历史、分支、同步、
-  stash、合并、文件树、搜索与终端仍是本机 Git 的能力：在远端仓库上明确不可用并给出原因，
-  仓库键不会被当成路径交给本机命令，也不会静默改用本机 Git。
 - 远端状态读取失败（断线、超时、认证失败）后该仓库转为只读：已读内容保留，写入与新的读取都不再发送，
   直到重新打开。
 - 远端写入按操作 ID 记录：明确未生效的失败会清掉待确认记录；未收到回执一律按「结果未知」处理，
   不重发、不冒充失败。
 - Cliora 远端审查来源同样在主窗口打开：主机、远端工作树与基线按来源绑定校验，安装仍需用户确认；
-  「返回 Cliora」只发送真实结果。
+  「返回 Cliora」只发送真实结果，阶段按这次会话真正做成的提交/合入声明（什么都没有就是 `reviewed`）。
 - 本机草稿库只按本机仓库路径保存，远端仓库的提交说明草稿存在会话内存里、按仓库键分开：
   切到别的仓库再回来仍是原来那份，但进程重启后不会出现。最近记录同理。应用内 host-sync
   接收接线仍未接入。
+
+### 会话优先 v2，三条必须知道的事实
+
+1. **发行包必须带 `agent-v2` 产物，否则回退 v1。** 选组件时先看本机资源目录里有没有匹配
+   目标平台的可执行文件；没有（空仓库、未跑 `scripts/remote-worktree/agent-v2-manifest.mjs`
+   的构建）就静默用内嵌的 v1 组件，界面行为不变，但没有 v2 的按块暂存能力、数值 generation
+   与 `stateToken`。这不是失败路径，只是能力更低的一条路。
+2. **带 `reviewId` 或 `baseline` 的打开强制走 v1。** 审查来源与任务基线只有 v1 组件支持，
+   所以这条会话即使本机有 v2 产物也不会用 v2；它的写入令牌是字符串 generation，没有
+   `stateToken`。
+3. **v2 差异是分页游标读取的。** 远端给出 `nextCursor`，桌面把整份差异续读完后一次解析；
+   跨页被切开的 UTF-8 字节在拼接后才解码，游标只在本机内部使用（`v2:<行偏移>`），不暴露给界面。
+   续读达到页数上限时明确标为截断，不当成完整差异。
+
+### 远端桥接：op 白名单
+
+主窗口的历史、分支标签、同步、stash、合并冲突、撤销与 worktree 都经同一条命令
+`remote_worktree_call(sessionId, op, fields, generation)`，op 必须在白名单里：
+
+- 只读：`history`、`fileHistory`、`commitDetail`、`commitDiff`、`compare`、
+  `commitBranches`、`compareFileDiff`、`branchList`、`branchState`、`branchTracking`、
+  `tagState`、`tagRemoteState`、`remoteState`、`stashState`、`mergePreview`、
+  `mergeSession`、`conflictView`、`worktrees`。
+- 写入：`branchCreate/Switch/Rename/Delete/Track/Update/Publish`、`tagCreate/Delete/Push`、
+  `remoteAdd`、`remoteSetUrl`、`fetch`、`pull`、`push`、`pushToRemote`、`publishBranch`、
+  `stashSave/Apply/Delete`、`mergeStart/Complete/Abort`、`resolveConflict`、`cherryPick`、
+  `revert`、`undoCommit`、`checkoutCommit`、`amendCommit`、`discard`、`worktreeRemove`。
+
+规则与边界：
+
+- 未列入白名单的 op 一律返回 `remote_unsupported`，远端不执行、也不会转到本机 Git。
+- 参数里出现 `program`、`command`、`shell`、`cwd`、`env`、`args` 直接
+  `invalid_request`：桥接不引入任何任意执行面。
+- 只读 op 的 result 就是桌面的同名 DTO（`page`、`commit`、`diff`、`branches`、
+  `branchState`、`tags`、`remote`、`stash`、`preview`、`merge`、`conflict`）；
+  写入 op 只回「有没有生效」与新状态，因此前端再用一次只读 op 拼出与本机同名方法相同的
+  DTO，由重新读取得到的字段在 `note` 里说明来源，不把没读到的证据写成成功。
+- v2 写入必须带最新 `stateToken`（由原生桥接从最近一次 status/diff 刷新里取），前端只按
+  数值 generation 判断新旧；generation 只在能解析成 u64 时才发给 v2 远端。
+- 同一 `operationId` 已完成时重放只回原回执，客户端应重读状态而不是把响应当成完整结果。
+- 远端 diff 的 `hunksStageable` / `hunksStageableReason` 只由远端声明的能力与视图决定：
+  界面与解析器都不自行推断，缺省（旧载荷）按不可暂存处理，二进制差异即使标了也不给按块写入。
+
+**仍然不可用的入口**（命令面板同步隐藏，直接调用返回 `remote_unsupported` 并说明原因）：
+
+| 入口 | 原因 |
+|---|---|
+| 文件视图、文件搜索、在文件管理器里显示 | 依赖本机文件系统，远端没有对应桥接 op |
+| 任务范围 / 发布任务 | `task_review` 计划器在本机，远端还没有同名 op |
+| 关联上游、修改上游、获取全部分支、删除远程分支 | v2 有这些 op，但还没列入桥接白名单 |
+| 提交并推送 | 桥接按 op 分开执行，没有一次回两段结果的 op |
+| 终端 | 远端 PTY 是另一组会话 op，本版本未接 |
+| 丢弃改动、拣选、还原、撤销最近提交、修订最近提交 | 本机 DTO 由写锁内的计划器给出（影响面文案、目标清单、创建数量、暂存快照令牌），桥接回执只回新状态 |
+| 按块 / 逐行暂存 | v2 的 `patch` op 还没列入桥接白名单 |
+| 删除工作区 | 远端 `worktreeRemove` 只删「当前打开的那棵工作树」，不接受 `path`；这条命令还要返回本机最近列表 |
+| 工作区总览（仓库切换器） | 只枚举本机最近路径与 `git worktree` 元数据；远端 `worktrees` op 还没有接进这块界面 |
 
 ## 发行与联调
 

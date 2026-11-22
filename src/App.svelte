@@ -621,36 +621,29 @@
   const REMOTE_PENDING = new Set(["fetch", "pull", "push", "publish", "associate"]);
 
   /**
-   * 远端仓库在主窗口只接通打开、刷新、状态、差异与整文件暂存/提交。
-   * 其余入口依赖本机 Git、本机文件系统或本机终端，明确不可用；
-   * 仓库键不会被当成路径交给本机命令，因此这些命令不能静默回退。
+   * 远端仓库在主窗口的可用范围：打开、刷新、状态、差异、整文件暂存/提交，以及
+   * 历史、分支标签、同步、暂存（stash）、合并冲突与远端审查返回（都经 op 白名单桥接）。
+   *
+   * 这里挡住的入口依赖本机 Git、本机文件系统或本机终端，或者远端组件还没有对应的桥接 op
+   * （文件视图与搜索、任务范围与发布、关联/修改上游、提交并推送、终端、块级与逐行暂存）。
+   * 仓库键不会被当成路径交给本机命令，所以这些命令既不执行也不静默回退。
    */
   const REMOTE_BLOCKED_COMMANDS = new Set([
     "view.files",
-    "view.history",
     "files.quickOpen",
     "files.search",
     "file.reveal",
     "file.back",
     "file.forward",
+    // 任务范围由本机 task_review 计划器给出；远端还没有同名桥接 op。
     "task.scope",
     "task.publish",
-    "task.stash",
-    "task.merge",
-    "task.abortMerge",
-    "task.branch",
-    "task.remote",
-    "sync.fetch",
-    "sync.pull",
-    "sync.push",
+    // v2 的 setUpstream / associateUpstream / deleteRemoteBranch 还没有列入桥接白名单。
     "sync.upstream",
+    // 提交并推送要一次回两段结果，远端桥接按 op 分开执行，还没有对应 op。
     "commit.push",
-    "branch.switch",
-    "branch.create",
     "terminal.toggle",
     "terminal.new",
-    "stage.all",
-    "unstage.all",
   ]);
   /**
    * 切换仓库时可以让路的动作：只等网络的远程操作。
@@ -896,7 +889,7 @@
   });
   let paletteCommands = $derived(
     paletteItems(commandState)
-      // 远端仓库只支持基础改动与提交：本机 Git、文件与终端入口不出现在面板里。
+      // 远端仓库的可用范围见 REMOTE_BLOCKED_COMMANDS：仍依赖本机 Git、文件系统与终端的入口不出现在面板里。
       .filter((item) => !(remoteKey !== null && REMOTE_BLOCKED_COMMANDS.has(item.id)))
       .map((item) => ({
       id: item.id,
@@ -3522,8 +3515,11 @@
     if (!key || remoteReturning) return;
     remoteReturning = true;
     try {
-      await api.remoteReturnReview(key);
-      phaseNote = "已向原 Cliora 会话返回远端审查结果。";
+      const returned = await api.remoteReturnReview(key);
+      phaseNote =
+        returned.state === "duplicate"
+          ? returned.message
+          : "已向原 Cliora 会话返回远端审查结果。";
     } catch (error) {
       showError(error);
     } finally {

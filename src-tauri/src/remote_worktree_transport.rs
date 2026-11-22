@@ -647,6 +647,9 @@ where
 struct AgentError {
     code: String,
     message: String,
+    // Agent generations are not the desktop's translated UI generations.
+    #[serde(default, rename = "generation", deserialize_with = "present")]
+    _generation: Option<u64>,
 }
 
 /// 读一帧：解析成通用 JSON 后先分流事件帧，再按会话期望的协议版本校验响应。
@@ -877,6 +880,24 @@ function receive(req) {
             );
             agent.close().await;
         }
+    }
+
+    #[tokio::test]
+    async fn git_error_with_agent_generation_keeps_the_receipt_channel_open() {
+        let (agent, _) = helper_version(r#"
+function receive(req) {
+    if (req.op === 'push') {
+        send({v:2,id:req.id,ok:false,error:{code:'push_failed',message:'rejected',generation:3}});
+        return;
+    }
+    result(req, {receipt:{state:'failed',reason:'push_failed'}});
+}"#, 2);
+        let failure = agent.rpc("push", json!({})).await.unwrap_err();
+        assert_eq!(failure.code, "push_failed");
+        assert!(failure.generation.is_none());
+        let receipt = agent.rpc("receipt", json!({})).await.unwrap();
+        assert_eq!(receipt["receipt"]["state"], "failed");
+        agent.close().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

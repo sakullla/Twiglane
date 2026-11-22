@@ -338,10 +338,12 @@ describe("远端仓库在主窗口：写入与仓库键隔离", () => {
   it("暂存与提交复用同一个 StatusSnapshot / CommitResult，且不落回本机 Git", async () => {
     const repository = await openHost();
     const staged = snapshot({ generation: "g2" });
-    port.write.mockResolvedValueOnce({ state: "completed", operationId: "op-1", snapshot: staged });
+    port.call.mockResolvedValueOnce({ state: "completed", operationId: "op-1", snapshot: staged });
 
-    const afterStage = await api.stageFiles(keyA, ["small.txt"], repository.generation, 7);
-    expect(port.write.mock.calls[0][0]).toMatchObject({ op: "stage", path: "small.txt", generation: "g1" });
+    const afterStage = await api.stageFiles(keyA, ["small.txt", "new.txt"], repository.generation, 7);
+    expect(port.call).toHaveBeenCalledExactlyOnceWith({
+      sessionId: "session-a", op: "stage", fields: { paths: ["small.txt", "new.txt"] }, generation: "g1",
+    });
     expect(afterStage.generation).toBeGreaterThan(repository.generation);
 
     port.status.mockResolvedValue(staged);
@@ -351,10 +353,177 @@ describe("远端仓库在主窗口：写入与仓库键隔离", () => {
       snapshot: snapshot({ generation: "g3", files: [], head: "b".repeat(40) }),
     });
     const commit = await api.commitChanges(keyA, "远端提交\n\n正文不进入 summary", afterStage.generation, 8);
-    expect(port.write.mock.calls[1][0]).toMatchObject({ op: "commit", message: "远端提交\n\n正文不进入 summary" });
+    expect(port.write.mock.calls[0][0]).toMatchObject({ op: "commit", message: "远端提交\n\n正文不进入 summary" });
     expect(commit).toMatchObject({ oid: "b".repeat(40), branch: "feature", pushed: false, summary: "远端提交" });
     expect(commit.snapshot.files).toEqual([]);
     expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("uses the Git snapshot for hunk and line writes, and sends batches as arrays", async () => {
+    const repo = await openHost();
+    const token = "f".repeat(64);
+    port.diff.mockResolvedValueOnce({
+      ...page("@@ -1 +1 @@\n-old\n+new\n"),
+      snapshot: token, hunksStageable: true, stageableHunks: [0],
+    });
+    const diff = await api.loadDiff(keyA, "small.txt", false, repo.generation, 1);
+    expect(diff.snapshot).toBe(token);
+    expect(diff.hunks[0].stageable).toBe(true);
+    const success = { state: "completed", operationId: "patch", snapshot: snapshot({ generation: "g2" }) };
+    port.call.mockResolvedValue(success);
+    const staged = await api.stageHunks(keyA, "small.txt", false, [0], diff.snapshot, repo.generation, 2, "before.txt");
+    const lines = [{ hunkIndex: 0, kind: "add", oldNo: null, newNo: 1 }] as const;
+    await api.stageLines(keyA, "small.txt", true, [...lines], diff.snapshot, staged.generation, 3);
+    await api.unstageFiles(keyA, ["small.txt", "new.txt"], staged.generation, 4);
+    expect(port.call.mock.calls.map(([request]) => [request.op, request.fields])).toEqual([
+      ["patch", { path: "small.txt", staged: false, hunks: [0], original: "before.txt", snapshot: token }],
+      ["patch", { path: "small.txt", staged: true, lines, original: null, snapshot: token }],
+      ["unstage", { paths: ["small.txt", "new.txt"] }],
+    ]);
+    expect(port.write).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("retains the confirmed commit after a rejected push and only pushes after reconnect", async () => {
+    const repo = await openHost();
+    const head = "c".repeat(40);
+    const committed = snapshot({ generation: "g2", head, files: [] });
+    const continuation = { head, branch: "feature" };
+    port.write.mockResolvedValueOnce({
+      state: "completed", operationId: "commit1", snapshot: committed, pushContinuation: continuation,
+    });
+    port.call.mockResolvedValueOnce({
+      state: "failed", operationId: "push1", code: "push_failed", message: "upstream rejected the push",
+    });
+    port.status.mockResolvedValue(committed);
+    const report = await api.commitAndPush(keyA, "new commit", repo.generation, 1);
+    expect(report).toMatchObject({ committed: true, pushed: false, retryPush: true, oid: head });
+    expect(port.write).toHaveBeenCalledWith(expect.objectContaining({ op: "commit", pushAfter: true }));
+
+    port.open.mockResolvedValueOnce({ ...opened("session-reopened", committed), pushContinuation: continuation });
+    const reopened = await api.openRepository(keyA, 2);
+    expect(remoteRepositoryState(keyA)?.pushContinuation).toEqual(continuation);
+    await expect(api.commitAndPush(keyA, "do not repeat", reopened.generation, 3))
+      .rejects.toMatchObject({ code: "push_pending" });
+    port.call.mockResolvedValueOnce({
+      state: "completed", operationId: "push2", snapshot: committed, pushContinuation: null,
+    });
+    await api.pushBranch(keyA, reopened.generation, 4);
+    expect(port.write).toHaveBeenCalledTimes(1);
+    expect(port.call.mock.calls.map(([request]) => request.op)).toEqual(["push", "push"]);
+    expect(remoteRepositoryState(keyA)?.pushContinuation).toBeNull();
+  });
+
+  it("reconciles the original uncertain push after reconnect without repeating either stage", async () => {
+    const repo = await openHost();
+    const head = "c".repeat(40);
+    const committed = snapshot({ generation: "g2", head, files: [] });
+    const continuation = { head, branch: "feature" };
+    port.write.mockResolvedValueOnce({
+      state: "completed", operationId: "commit1", snapshot: committed, pushContinuation: continuation,
+    });
+    port.call.mockResolvedValueOnce({ state: "unknown", operationId: "push1", op: "push", message: "连接已断开" });
+    const report = await api.commitAndPush(keyA, "new commit", repo.generation, 1);
+    expect(report).toMatchObject({ committed: true, pushed: false, oid: head, pushUnconfirmed: true });
+    expect(remoteRepositoryState(keyA)?.pending).toBe(true);
+
+    port.open.mockResolvedValueOnce({
+      ...opened("session-reopened", committed, { operationId: "push1", op: "push" }),
+      pushContinuation: continuation,
+    });
+    port.recover.mockResolvedValueOnce({
+      state: "completed", operationId: "push1", snapshot: committed, pushContinuation: null,
+    });
+    await api.openRepository(keyA, 2);
+    expect(port.recover).toHaveBeenCalledExactlyOnceWith("session-reopened", "push1");
+    expect(port.write).toHaveBeenCalledTimes(1);
+    expect(port.call).toHaveBeenCalledTimes(1);
+    expect(remoteRepositoryState(keyA)).toMatchObject({ pending: false, pushContinuation: null });
+  });
+
+  it("reconciles a lost commit receipt and only pushes the confirmed commit", async () => {
+    const repo = await openHost();
+    const head = "c".repeat(40);
+    const committed = snapshot({ generation: "g2", head, files: [] });
+    const continuation = { head, branch: "feature" };
+    port.write.mockImplementationOnce(async (request) => ({
+      state: "unknown", operationId: request.operationId, op: "commitAndPush", message: "连接已断开",
+    }));
+    await expect(api.commitAndPush(keyA, "new commit", repo.generation, 1)).rejects.toMatchObject({ code: "write_pending" });
+    const pendingWrite = { operationId: port.write.mock.lastCall![0].operationId, op: "commitAndPush" };
+    expect(port.call).not.toHaveBeenCalled();
+
+    port.open.mockResolvedValueOnce(opened("session-reopened", committed, pendingWrite));
+    port.recover.mockResolvedValueOnce({
+      state: "completed", operationId: pendingWrite.operationId, snapshot: committed, pushContinuation: continuation,
+    });
+    const reopened = await api.openRepository(keyA, 2);
+    expect(port.recover).toHaveBeenCalledExactlyOnceWith("session-reopened", pendingWrite.operationId);
+    expect(remoteRepositoryState(keyA)).toMatchObject({ pending: false, pushContinuation: continuation });
+    port.call.mockResolvedValueOnce({
+      state: "completed", operationId: "push1", snapshot: committed, pushContinuation: null,
+    });
+    await api.pushBranch(keyA, reopened.generation, 3);
+    expect(port.call.mock.calls.map(([request]) => request.op)).toEqual(["push"]);
+    expect(port.write).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps linked-worktree actions on the active SSH host and checks the deletion preview", async () => {
+    const repo = await openHost();
+    const target = "/srv/other";
+    const preview = { target, token: "f".repeat(64), branch: "topic", head: "a".repeat(40) };
+    port.call.mockResolvedValueOnce({ repo: "repo-a", preview });
+    expect(await api.previewLinkedWorktreeRemoval(keyA, target, repo.generation)).toEqual(preview);
+    port.call.mockResolvedValueOnce({
+      state: "completed", operationId: "remove", snapshot: snapshot({ generation: "g2" }),
+    });
+    await api.removeLinkedWorktree(keyA, preview, false, repo.generation);
+    expect(port.call.mock.calls[1][0]).toMatchObject({
+      sessionId: "session-a", op: "worktreeRemoveTarget", fields: { target, targetToken: preview.token, force: false },
+    });
+    port.call.mockResolvedValueOnce({ repo: "repo-a", worktrees: { items: [{ path: target, missing: false }] } });
+    port.open.mockResolvedValueOnce(opened("sibling", snapshot({ repo: "repo-sibling", root: target })));
+    const sibling = await api.openLinkedWorktree(keyA, target);
+    expect(sibling.summary.path).toBe(remoteRepositoryKey(hostA.targetId, target));
+    expect(port.open.mock.lastCall?.[0]).toMatchObject({ targetId: hostA.targetId, targetRevision: hostA.targetRevision, path: target });
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("keeps case-sensitive Windows worktrees distinct during preview and opening", async () => {
+    const repo = await openHost();
+    const target = "C:/repo/topic";
+    const other = "C:/repo/Topic";
+    port.call.mockResolvedValueOnce({
+      repo: "repo-a", preview: { target: other, token: "f".repeat(64) },
+    });
+    await expect(api.previewLinkedWorktreeRemoval(keyA, target, repo.generation))
+      .rejects.toMatchObject({ code: "remote_protocol" });
+
+    port.call.mockResolvedValueOnce({ repo: "repo-a", worktrees: { items: [
+      { path: other, missing: false },
+      { path: "c:\\repo\\topic", missing: false },
+    ] } });
+    port.open.mockResolvedValueOnce(opened("sibling", snapshot({ repo: "repo-sibling", root: target })));
+    const sibling = await api.openLinkedWorktree(keyA, target);
+    expect(sibling.summary.path).toBe(remoteRepositoryKey(hostA.targetId, target));
+    expect(port.open.mock.lastCall?.[0]).toMatchObject({ path: "c:\\repo\\topic" });
+  });
+
+  it("rereads a linked-worktree preview when the anchor watcher advances the generation", async () => {
+    const repo = await openHost();
+    const target = "/srv/other";
+    const preview = { target, token: "f".repeat(64), branch: "topic", head: "a".repeat(40) };
+    const first = deferred<{ repo: string; preview: typeof preview }>();
+    port.call.mockReturnValueOnce(first.promise).mockResolvedValueOnce({ repo: "repo-a", preview });
+    const pending = api.previewLinkedWorktreeRemoval(keyA, target, repo.generation);
+    port.status.mockResolvedValueOnce(snapshot({ generation: "g2" }));
+    await api.refreshStatus(keyA, repo.generation, 2);
+    first.resolve({ repo: "repo-a", preview });
+    await expect(pending).resolves.toEqual(preview);
+    expect(port.call.mock.calls.map(([request]) => [request.op, request.fields])).toEqual([
+      ["worktreeRemovalPreview", { target }],
+      ["worktreeRemovalPreview", { target }],
+    ]);
   });
 
   it("两台主机的同名工作树路径是不同的仓库,切换后旧会话不再接受写入", async () => {

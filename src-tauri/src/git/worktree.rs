@@ -23,6 +23,16 @@ pub async fn remove_worktree(
     force: bool,
     request_id: u64,
 ) -> Result<Vec<RecentRepo>, AppError> {
+    remove_linked_worktree(backend, path, force, request_id).await?;
+    forget_recent(backend, path)
+}
+
+pub(crate) async fn remove_linked_worktree(
+    backend: &Backend,
+    path: &str,
+    force: bool,
+    request_id: u64,
+) -> Result<(), AppError> {
     let input = validate_input_path(path)?;
     let root = canonical_existing(&input)?;
     let main = resolve_git_dir(&root)
@@ -64,7 +74,7 @@ pub async fn remove_worktree(
             AppError::new("worktree_remove_failed", format!("Git 没有删除这个工作区。{detail}"))
         });
     }
-    forget_recent(backend, path)
+    Ok(())
 }
 
 #[cfg(test)]

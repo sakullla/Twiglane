@@ -21,7 +21,7 @@ use serde_json::{json, Map, Value};
 
 use crate::protocol;
 // 与桌面后端同一个去抖窗口：本地和远端对「一次写入」的失效延迟是同一份定义。
-use crate::watch::{DebounceClock, WATCH_DEBOUNCE};
+use crate::watch::{is_ignored, DebounceClock, WATCH_DEBOUNCE};
 
 /// 连续不断的变化也必须上报：攒满这个时间就发出一条，不让通知被无穷的写入饿死。
 const MAX_COALESCE_DELAY: Duration = Duration::from_millis(900);
@@ -151,7 +151,7 @@ impl ChangeFeed {
                         .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
                         .unwrap_or(WATCH_DEBOUNCE);
                     match raw_rx.recv_timeout(wait) {
-                        Ok(Ok(event)) => {
+                        Ok(Ok(event)) if !is_ignored(&root, &event) => {
                             for path in &event.paths {
                                 pending.record(path.starts_with(&git_dir), &display(path, &root));
                             }
@@ -161,6 +161,7 @@ impl ChangeFeed {
                             clock.touch(std::time::Instant::now());
                             since.get_or_insert_with(std::time::Instant::now);
                         }
+                        Ok(Ok(_)) => {}
                         Ok(Err(_)) => clock.touch(std::time::Instant::now()),
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                         Err(mpsc::RecvTimeoutError::Disconnected) => return,

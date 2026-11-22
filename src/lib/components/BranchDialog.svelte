@@ -1,7 +1,8 @@
 <script lang="ts">
   import { BUSY_REASON } from "../ui";
   import { tick, untrack } from "svelte";
-  import { api } from "../api";
+  import { api, type LinkedWorktreeRemoval } from "../api";
+  import { isRemoteRepositoryKey } from "../remote-worktree";
   import { bucketBranches, filterBranches, groupIsOpen, isDefaultBranch, mainBranchNames, trackNameFor } from "../branches";
   import { normalizeError } from "../errors";
   import type { BranchRecord, BranchState, OpenedRepository, RecentRepo, RepoHead, StatusSnapshot } from "../types";
@@ -101,7 +102,9 @@
    */
   let worktreeHeads = $state<Record<string, RepoHead>>({});
   /** 删除工作区的确认：force 在 Git 报告有未提交改动后才置真，由用户再确认一次。 */
-  let worktreePrompt = $state<{ branch: BranchRecord; path: string; force: boolean; error: string | null } | null>(null);
+  let worktreePrompt = $state<{ branch: BranchRecord; path: string; force: boolean; error: string | null; preview?: LinkedWorktreeRemoval } | null>(null);
+  let worktreePreviewRequest = 0;
+  let worktreePreviewBusy = $state(false);
   /** 删除工作区后顺手删掉这个本地分支。默认不勾：分支和工作区是两件事。 */
   let alsoDeleteBranch = $state(false);
   let branchQuery = $state(untrack(() => initialView?.query ?? ""));
@@ -344,7 +347,9 @@
       return;
     }
     try {
-      const heads = await api.repoHeads(paths);
+      const anchor = opened.summary.path;
+      const heads = isRemoteRepositoryKey(anchor) ? await api.linkedWorktreeHeads(anchor, paths) : await api.repoHeads(paths);
+      if (opened.summary.path !== anchor) return;
       worktreeHeads = Object.fromEntries(heads.map((head) => [head.path, head]));
     } catch {
       worktreeHeads = {};
@@ -728,10 +733,29 @@
     alsoDeleteBranch = false;
     rememberOrigin();
     worktreePrompt = { branch, path, force: false, error: null };
+    const anchor = opened.summary.path;
+    if (!isRemoteRepositoryKey(anchor)) return;
+    const request = ++worktreePreviewRequest;
+    worktreePreviewBusy = true;
+    void api.previewLinkedWorktreeRemoval(anchor, path, opened.generation).then((preview) => {
+      if (request === worktreePreviewRequest && opened.summary.path === anchor && worktreePrompt?.path === path) {
+        worktreePrompt = preview.branch === branch.name
+          ? { ...worktreePrompt, preview }
+          : { ...worktreePrompt, error: "工作区已切换分支，请关闭确认框并刷新分支列表。" };
+      }
+    }).catch((failure) => {
+      if (request === worktreePreviewRequest && opened.summary.path === anchor && worktreePrompt?.path === path) {
+        worktreePrompt = { ...worktreePrompt, error: normalizeError(failure).message };
+      }
+    }).finally(() => {
+      if (request === worktreePreviewRequest) worktreePreviewBusy = false;
+    });
   }
 
   function cancelWorktreePrompt() {
     if (writing) return;
+    worktreePreviewRequest += 1;
+    worktreePreviewBusy = false;
     worktreePrompt = null;
     void restoreOrigin();
   }
@@ -773,7 +797,8 @@
   async function confirmRemoveWorktree() {
     const prompt = worktreePrompt;
     const currentRepo = opened;
-    if (!prompt || blocked) return;
+    const remote = isRemoteRepositoryKey(currentRepo.summary.path);
+    if (!prompt || blocked || (remote && !prompt.preview)) return;
     const dropBranch = alsoDeleteBranch && !prompt.branch.remote;
     let branchNote: string | null = null;
     let branchUnmerged = false;
@@ -784,8 +809,13 @@
     onBusy("branch");
     worktreePrompt = { ...prompt, error: null };
     try {
-      const recent = await api.removeWorktree(prompt.path, prompt.force, nextId());
-      onRecent?.(recent);
+      if (remote && prompt.preview) {
+        const snapshot = await api.removeLinkedWorktree(currentRepo.summary.path, prompt.preview, prompt.force, currentRepo.generation);
+        if (opened.summary.path === currentRepo.summary.path) onSnapshot(snapshot);
+      } else {
+        const recent = await api.removeWorktree(prompt.path, prompt.force, nextId());
+        onRecent?.(recent);
+      }
       if (dropBranch) {
         try {
           deletedBranchState = await deleteLocalBranch(currentRepo, prompt.branch.name, false);
@@ -866,7 +896,9 @@
     }
     onBusy("open");
     try {
-      const next = await api.openRepository(path, nextId());
+      const next = isRemoteRepositoryKey(currentRepo.summary.path)
+        ? await api.openLinkedWorktree(currentRepo.summary.path, path)
+        : await api.openRepository(path, nextId());
       if (opened.summary.path !== currentRepo.summary.path) return;
       onOpened?.(next);
       onClose();
@@ -954,6 +986,7 @@
     if (!target || blocked) return;
     const twin = target.kind === "local" && alsoRemote ? target.twin : null;
     let remoteFailure: string | null = null;
+    let remoteUnconfirmed = false;
     removalRemote = target.kind === "remote" || Boolean(twin);
     abortingRemoval = false;
     const result = await write(async () => {
@@ -967,7 +1000,8 @@
         return await api.deleteRemoteBranch(currentRepo.summary.path, twin.remote, twin.name, true, local.generation, nextId());
       } catch (error) {
         const failure = normalizeError(error);
-        remoteFailure = failure.code === "cancelled" ? "已取消。远程可能已经收到请求，请刷新后确认。" : failure.message;
+        remoteFailure = failure.message;
+        remoteUnconfirmed = failure.code === "write_pending" || failure.code === "cancelled";
         return local;
       }
     });
@@ -997,7 +1031,9 @@
     if (target.kind === "remote") {
       onNotice(`已删除远程分支 ${target.remote}/${target.name}`);
     } else if (twin && remoteFailure) {
-      errorText = `本地分支 ${target.name} 已删除；远程分支 ${twin.full} 没有删除：${remoteFailure}`;
+      errorText = remoteUnconfirmed
+        ? `本地分支 ${target.name} 已删除。远程分支 ${twin.full} 的删除结果待确认。${remoteFailure}`
+        : `本地分支 ${target.name} 已删除；远程分支 ${twin.full} 没有删除：${remoteFailure}`;
     } else if (twin) {
       onNotice(`已删除本地分支 ${target.name} 和远程分支 ${twin.full}`);
     } else {
@@ -1485,7 +1521,10 @@
       confirmIcon="trash"
       busy={writing}
       error={prompt.error}
-      confirmBlocked={blocked && !writing ? (blockedReason ?? BUSY_REASON) : null}
+      confirmBlocked={blocked && !writing ? (blockedReason ?? BUSY_REASON)
+        : isRemoteRepositoryKey(opened.summary.path) && !prompt.preview
+          ? (worktreePreviewBusy ? "正在读取远端工作区预览。" : "请重新读取远端工作区预览。")
+          : null}
       focusKey={prompt.force}
       impact="worktree-remove"
       onConfirm={() => void confirmRemoveWorktree()}

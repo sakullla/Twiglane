@@ -91,7 +91,7 @@ fn is_noise_path(root: &Path, path: &Path) -> bool {
 }
 
 /// 带重扫标记的事件说明有事件丢失（macOS 上还带路径），不能按路径或类型判断，必须放行。
-fn is_ignored(root: &Path, event: &Event) -> bool {
+pub(crate) fn is_ignored(root: &Path, event: &Event) -> bool {
     !event.need_rescan() && (is_read_access(&event.kind) || is_internal_noise(root, &event.paths))
 }
 

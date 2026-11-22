@@ -171,6 +171,18 @@ struct Pending {
     worktree_identity: Option<String>,
 }
 
+impl Pending {
+    fn wire_op(&self) -> &str {
+        if self.op == "commitAndPush" { "commit" } else { &self.op }
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct PushContinuation {
+    head: String,
+    branch: Option<String>,
+}
+
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 enum WriteKind {
@@ -223,6 +235,7 @@ struct LegacyCliora {
 #[derive(Default)]
 struct SessionState {
     status_request: u64,
+    status_response: u64,
     last_state: Option<(u64, String)>,
 }
 
@@ -230,14 +243,23 @@ impl Session {
     /// 记录远端刷新出来的写入令牌。v1 的响应里没有这个字段，因此保持为空。
     fn remember_state(&self, value: &Value, status_request: Option<u64>) -> Result<()> {
         let mut state = self.state_token.lock().unwrap_or_else(|e| e.into_inner());
-        if status_request.is_some_and(|request| request != state.status_request) {
+        let observed = value["generation"].as_u64().zip(value["stateToken"].as_str());
+        if status_request.is_some_and(|request| request < state.status_response) {
+            if observed.is_some_and(|(generation, token)| state.last_state.as_ref().is_some_and(|(last, latest)| {
+                generation == *last && token == latest
+            })) {
+                return Ok(());
+            }
             return Err(AppError::new("stale_state", "较旧的远端状态响应已丢弃。"));
         }
-        if let (Some(generation), Some(token)) = (value["generation"].as_u64(), value["stateToken"].as_str()) {
+        if let Some((generation, token)) = observed {
             if state.last_state.as_ref().is_some_and(|(seen, _)| *seen > generation) {
                 return Err(AppError::new("stale_state", "较旧的远端状态响应已丢弃。"));
             }
             state.last_state = Some((generation, token.to_string()));
+        }
+        if let Some(request) = status_request {
+            state.status_response = request;
         }
         Ok(())
     }
@@ -270,6 +292,10 @@ impl Session {
         let worktree = self.worktree_identity.as_deref().unwrap_or(&self.repo);
         let key = json!([self.journal_identity, worktree]);
         base.join(format!("journal-{:x}.json", Sha256::digest(key.to_string().as_bytes())))
+    }
+
+    fn push_continuation_path(&self, base: &Path) -> PathBuf {
+        self.journal(base).with_extension("push")
     }
 
     fn legacy_worktree_journal(&self, base: &Path, host_identity: &str) -> PathBuf {
@@ -366,6 +392,7 @@ fn flatten_v2(result: &Value) -> Result<Value> {
         "head": branch["headOid"],
         "branch": branch["name"],
         "files": files,
+        "status": snapshot,
     });
     for key in ["root", "name", "baseline", "worktreeIdentity", "reviewFiles", "reviewFilesTruncated", "reviewError", "watchDegraded"] {
         if let Some(value) = result.get(key) {
@@ -1077,9 +1104,9 @@ async fn connect_planned(
             hello["os"].as_str().unwrap_or_default(),
             hello["arch"].as_str().unwrap_or_default(),
         ) != remote_ssh::platform(&plan.system, &plan.architecture)
-        || ["open", "status", "diff", "reviewIdentity", "receipt"]
+        || ["open", "status", "diff", "reviewIdentity", "receipt", "commit", "journalIdentity"]
             .iter().copied().chain(BRIDGE_READ_OPS.iter().copied())
-            .chain(FILE_WRITE_OPS.iter().copied()).chain(TERMINAL_OPS.iter().copied())
+            .chain(BRIDGE_WRITE_OPS.iter().copied()).chain(TERMINAL_OPS.iter().copied())
             .any(|required| !capabilities.iter().any(|value| value.as_str() == Some(required)))
     {
         return Err(protocol_mismatch());
@@ -1265,6 +1292,39 @@ fn save_pending(path: &Path, pending: &Pending) -> Result<()> {
         .map_err(|_| AppError::new("remote_journal", "无法持久保存操作记录。"))
 }
 
+fn read_push_continuation(path: &Path) -> Result<Option<PushContinuation>> {
+    match std::fs::read(path) {
+        Ok(data) => serde_json::from_slice(&data).map(Some).map_err(|_| remote_error("remote_journal")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(remote_error("remote_journal")),
+    }
+}
+
+fn update_push_continuation(base: &Path, session: &Session, pending: &Pending, result: &Value) -> Result<Option<PushContinuation>> {
+    let path = session.push_continuation_path(base);
+    if result["state"] != "completed" {
+        return read_push_continuation(&path);
+    }
+    let snapshot = &result["snapshot"];
+    let head = snapshot["head"].as_str();
+    let branch = snapshot["branch"].as_str();
+    if pending.op == "commitAndPush" {
+        let head = head.ok_or_else(|| remote_error("remote_journal"))?;
+        let resume = PushContinuation { head: head.to_owned(), branch: branch.map(str::to_owned) };
+        let bytes = serde_json::to_vec(&resume).map_err(|_| remote_error("remote_journal"))?;
+        crate::atomic::atomic_write(&path, &bytes).map_err(|_| remote_error("remote_journal"))?;
+        return Ok(Some(resume));
+    }
+    let resume = read_push_continuation(&path)?;
+    if matches!(pending.op.as_str(), "push" | "publishBranch") && resume.as_ref().is_some_and(|entry| {
+        Some(entry.head.as_str()) == head && entry.branch.as_deref() == branch
+    }) {
+        std::fs::remove_file(path).map_err(|_| remote_error("remote_journal"))?;
+        return Ok(None);
+    }
+    Ok(resume)
+}
+
 fn native_targets(store: &AppStore) -> Vec<Target> {
     if !store.remote_ssh_enabled() {
         return Vec::new();
@@ -1378,9 +1438,12 @@ pub async fn remote_worktree_open(
             }));
         }
     };
-    let pending = {
+    let (pending, push_continuation) = {
         let _guard = state.mutations.lock().unwrap();
-        find_pending(&state.data, &session)?.map(|file| file.record)
+        (
+            find_pending(&state.data, &session)?.map(|file| file.record),
+            read_push_continuation(&session.push_continuation_path(&state.data))?,
+        )
     };
     let protocol = session.protocol();
     let agent_version = session.agent_version.clone();
@@ -1398,6 +1461,7 @@ pub async fn remote_worktree_open(
         "sessionId":session_id,
         "snapshot":snapshot,
         "pendingWrite":pending,
+        "pushContinuation":push_continuation,
         "protocol":protocol,
         "events":protocol == 2,
         "agentVersion":agent_version,
@@ -1548,8 +1612,18 @@ async fn diff_v2(session: &Session, request: &DiffRequest) -> Result<Value> {
     let page = json!({
         "data": base64::engine::general_purpose::STANDARD.encode(text.as_bytes()),
         "nextCursor": next,
+        "snapshot": diff["snapshot"],
+        "truncated": diff["truncated"],
+        "stageableHunks": diff["hunks"].as_array().into_iter().flatten()
+            .filter(|hunk| hunk["stageable"].as_bool() == Some(true))
+            .filter_map(|hunk| hunk["index"].as_u64()).collect::<Vec<_>>(),
     });
-    Ok(annotate_diff(session, &request.view, page))
+    let mut page = annotate_diff(session, &request.view, page);
+    if request.view != "task" && (request.context.is_some_and(|context| context != 3) || request.as_text == Some(true)) {
+        page["hunksStageable"] = json!(false);
+        page["hunksStageableReason"] = json!("切换到默认上下文和原始差异后可以按块或按行暂存。");
+    }
+    Ok(page)
 }
 
 #[tauri::command]
@@ -1589,7 +1663,14 @@ const BRIDGE_READ_OPS: &[&str] = &[
     "mergePreview",
     "mergeSession",
     "conflictView",
+    "mergeAbortPreview",
+    "revertPreview",
+    "undoCommitPreview",
+    "amendCommitPreview",
+    "discardPreview",
+    "cancelRemote",
     "worktrees",
+    "worktreeRemovalPreview",
     "directory",
     "fileContent",
     "filePreview",
@@ -1603,6 +1684,9 @@ const BRIDGE_READ_OPS: &[&str] = &[
 
 /// 写入 op：每类写入自成一类回执，因此 op 名原样进入 journal，不作为「同类」合并。
 const BRIDGE_WRITE_OPS: &[&str] = &[
+    "stage",
+    "unstage",
+    "patch",
     "branchCreate",
     "branchSwitch",
     "branchRename",
@@ -1610,6 +1694,10 @@ const BRIDGE_WRITE_OPS: &[&str] = &[
     "branchTrack",
     "branchUpdate",
     "branchPublish",
+    "setUpstream",
+    "associateUpstream",
+    "fetchBranches",
+    "deleteRemoteBranch",
     "tagCreate",
     "tagDelete",
     "tagPush",
@@ -1633,7 +1721,7 @@ const BRIDGE_WRITE_OPS: &[&str] = &[
     "checkoutCommit",
     "amendCommit",
     "discard",
-    "worktreeRemove",
+    "worktreeRemoveTarget",
     "editSave",
     "createEntry",
     "copyEntry",
@@ -1641,7 +1729,6 @@ const BRIDGE_WRITE_OPS: &[&str] = &[
     "deleteEntries",
 ];
 
-const FILE_WRITE_OPS: &[&str] = &["editSave", "createEntry", "copyEntry", "moveEntry", "deleteEntries"];
 const FILE_READ_OPS: &[&str] = &[
     "directory", "fileContent", "filePreview", "document", "documentResource",
     "documentRemoteImage", "pathSearch", "contentSearch", "editSnapshot",
@@ -1798,6 +1885,8 @@ pub struct WriteRequest {
     op: WriteKind,
     path: Option<String>,
     message: Option<String>,
+    #[serde(default)]
+    push_after: bool,
 }
 
 fn unknown(operation_id: &str) -> Value {
@@ -1837,6 +1926,7 @@ fn definitive_error(code: &str) -> bool {
             | "operation_conflict"
             | "invalid_operation"
             | "invalid_patch"
+            | "stale_patch"
             | "edit_conflict"
             | "edit_write_failed"
             | "edit_digest"
@@ -1893,6 +1983,35 @@ fn write_proof(response: &Value) -> Option<WriteProof<'_>> {
     })
 }
 
+fn matching_proof<'a>(response: &'a Value, session: &Session, pending: &Pending, strict: bool) -> Option<WriteProof<'a>> {
+    write_proof(response).filter(|proof| {
+        proof.operation_id == pending.operation_id
+            && response["repo"].as_str().is_none_or(|repo| repo == pending.repo)
+            && if strict || session.protocol() == 2 && session.worktree_identity.is_some() {
+                proof.repo == Some(&pending.repo) && proof.op == Some(pending.wire_op())
+            } else {
+                proof.repo.is_none_or(|repo| repo == pending.repo)
+                    && proof.op.is_none_or(|op| op == pending.wire_op())
+            }
+    })
+}
+
+fn write_result_field(op: &str) -> Option<&'static str> {
+    match op {
+        "editSave" => Some("edit"),
+        "deleteEntries" => Some("delete"),
+        "commit" => Some("commit"),
+        "mergeStart" | "mergeComplete" | "mergeAbort" | "resolveConflict" => Some("merge"),
+        "stashSave" | "stashApply" | "stashDelete" => Some("stash"),
+        "cherryPick" => Some("cherryPick"),
+        "revert" => Some("revert"),
+        "undoCommit" => Some("undo"),
+        "amendCommit" => Some("amend"),
+        "discard" => Some("discard"),
+        _ => None,
+    }
+}
+
 async fn finish_write(
     state: &RemoteWorktrees,
     session: &Session,
@@ -1904,16 +2023,7 @@ async fn finish_write(
     let mut outcome = None;
     let mut completed = match response {
         Ok(response) => {
-            let Some(proof) = write_proof(&response).filter(|proof| {
-                proof.operation_id == pending.operation_id
-                    && response["repo"].as_str().is_none_or(|repo| repo == pending.repo)
-                    && if receipt_lookup || session.protocol() == 2 && session.worktree_identity.is_some() {
-                        proof.repo == Some(&pending.repo) && proof.op == Some(&pending.op)
-                    } else {
-                        proof.repo.is_none_or(|repo| repo == pending.repo)
-                            && proof.op.is_none_or(|op| op == pending.op)
-                    }
-            }) else {
+            let Some(proof) = matching_proof(&response, session, pending, receipt_lookup) else {
                 return Ok(unknown(&pending.operation_id));
             };
             match proof.state {
@@ -1930,19 +2040,16 @@ async fn finish_write(
                     {
                         return Ok(unknown(&pending.operation_id));
                     }
-                    outcome = match (pending.op.as_str(), proof.op, proof.review_outcome) {
+                    outcome = match (pending.wire_op(), proof.op, proof.review_outcome) {
                         ("commit", Some("commit"), Some("committed") | None) => Some(review::Outcome::Committed),
+                        ("amendCommit" | "cherryPick" | "revert", _, Some("committed")) => Some(review::Outcome::Committed),
                         ("mergeStart" | "mergeComplete", Some("mergeStart" | "mergeComplete"), Some("merged")) => Some(review::Outcome::Merged),
                         ("mergeComplete", Some("mergeComplete"), Some("committed")) => Some(review::Outcome::Committed),
                         _ => None,
                     };
                     let mut result = json!({"state":"completed","operationId":pending.operation_id,"snapshot":snapshot,"head":snapshot["head"]});
                     if !receipt_lookup {
-                        let field = match pending.op.as_str() {
-                            "editSave" => Some("edit"),
-                            "deleteEntries" => Some("delete"),
-                            _ => None,
-                        };
+                        let field = write_result_field(pending.wire_op());
                         if let Some((field, value)) = field.and_then(|field| response.get(field).map(|value| (field, value))) {
                             result[field] = value.clone();
                         }
@@ -1965,11 +2072,27 @@ async fn finish_write(
         Err(error) if !receipt_lookup && definitive_error(&error.code) => {
             json!({"state":"failed","operationId":pending.operation_id,"code":error.code,"message":error.message})
         }
+        Err(error) if !receipt_lookup && session.protocol() == 2 => {
+            // A normal rejection (e.g. rejected push) carries an agent failure
+            // receipt, whereas a dropped or cancelled transfer stays pending.
+            let receipt = session.agent.rpc("receipt", json!({
+                "repo": pending.repo, "operationId": pending.operation_id,
+            })).await;
+            let confirmed = receipt.as_ref().ok()
+                .and_then(|value| matching_proof(value, session, pending, true))
+                .is_some_and(|proof| proof.state == "failed" && proof.reason == Some(&error.code));
+            if !confirmed {
+                return Ok(unknown(&pending.operation_id));
+            }
+            json!({"state":"failed","operationId":pending.operation_id,"code":error.code,"message":error.message})
+        }
         _ => return Ok(unknown(&pending.operation_id)),
     };
     let _guard = state.mutations.lock().unwrap();
     let cleared = match find_pending(&state.data, session)? {
         Some(current) if current.path == journal && current.record == *pending => {
+            let continuation = update_push_continuation(&state.data, session, pending, &completed)?;
+            completed["pushContinuation"] = json!(continuation);
             if std::fs::remove_file(journal).is_err() {
                 return Ok(pending_unknown(pending));
             }
@@ -2034,7 +2157,11 @@ pub async fn remote_worktree_write(state: Managed<'_>, request: WriteRequest) ->
     let pending = Pending {
         review_id: session.review_id.clone(),
         operation_id: request.operation_id,
-        op: request.op.name().to_owned(),
+        op: if request.push_after && request.op == WriteKind::Commit {
+            "commitAndPush".to_owned()
+        } else {
+            request.op.name().to_owned()
+        },
         repo: session.repo.clone(),
         worktree_identity: session.worktree_identity.clone(),
     };
@@ -2328,6 +2455,91 @@ input.on("line", line => {
         }
     }
 
+    #[tokio::test]
+    async fn equivalent_status_replies_do_not_interrupt_a_receipt_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(fake_agent(dir.path(), "complete"));
+        session.state_token.lock().unwrap().status_request = 2;
+        let first = json!({"generation":7,"stateToken":"first"});
+        let newest = json!({"generation":8,"stateToken":"latest"});
+
+        session.remember_state(&first, Some(1)).unwrap();
+        session.remember_state(&newest, Some(2)).unwrap();
+        session.remember_state(&newest, Some(1)).unwrap();
+        assert_eq!(session.remember_state(&first, Some(1)).unwrap_err().code, "stale_state");
+        let different_at_same_generation = json!({"generation":8,"stateToken":"wrong"});
+        assert_eq!(
+            session.remember_state(&different_at_same_generation, Some(1)).unwrap_err().code,
+            "stale_state"
+        );
+        assert_eq!(session.state_token.lock().unwrap().last_state, Some((8, "latest".into())));
+        session.agent.close().await;
+    }
+
+    #[tokio::test]
+    async fn confirmed_commit_stays_resumable_until_its_branch_is_pushed() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(fake_agent(dir.path(), "complete"));
+        let mut operation = Pending {
+            review_id: None,
+            operation_id: Uuid::new_v4().to_string(),
+            op: "commitAndPush".into(),
+            repo: session.repo.clone(),
+            worktree_identity: None,
+        };
+        let head = "a".repeat(40);
+        let completed = json!({"state":"completed","snapshot":{"head":head,"branch":"main"}});
+        let saved = update_push_continuation(dir.path(), &session, &operation, &completed).unwrap().unwrap();
+        assert_eq!(saved.head, head);
+        assert_eq!(operation.wire_op(), "commit");
+
+        operation.op = "push".into();
+        let wrong_branch = json!({"state":"completed","snapshot":{"head":head,"branch":"another"}});
+        assert!(update_push_continuation(dir.path(), &session, &operation, &wrong_branch).unwrap().is_some());
+        assert!(update_push_continuation(dir.path(), &session, &operation, &json!({"state":"failed"})).unwrap().is_some());
+        assert!(read_push_continuation(&session.push_continuation_path(dir.path())).unwrap().is_some());
+        assert!(update_push_continuation(dir.path(), &session, &operation, &completed).unwrap().is_none());
+        assert!(!session.push_continuation_path(dir.path()).exists());
+        session.agent.close().await;
+    }
+
+    #[tokio::test]
+    async fn push_failure_is_confirmed_by_the_original_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = RemoteWorktrees::new(dir.path().to_path_buf());
+        let mut child = Command::new("node");
+        child.args(["-e", r#"
+const input = require("node:readline").createInterface({input: process.stdin});
+const send = frame => process.stdout.write(JSON.stringify(frame) + "\n");
+let written;
+input.on("line", line => {
+    const req = JSON.parse(line);
+    if (req.op === "push" && !written) {
+        written = req;
+        send({v:2,id:req.id,ok:false,error:{code:"push_failed",message:"Upstream declined",generation:3}});
+    } else if (req.op === "receipt" && req.operationId === written?.operationId && req.repo === written.repo) {
+        send({v:2,id:req.id,ok:true,result:{receipt:{
+            operationId:written.operationId,repo:written.repo,op:"push",state:"failed",reason:"push_failed",
+        }}});
+    } else {
+        process.exit(1);
+    }
+});
+"#]);
+        let session = test_session(AgentTransport::spawn_v2(&mut child).unwrap());
+        session.state_token.lock().unwrap().last_state = Some((3, "state".into()));
+        let journal = session.journal(&state.data);
+        state.sessions.lock().unwrap().insert("s".into(), Arc::new(session));
+        let result = bridge_call(&state, CallRequest {
+            session_id: "s".into(), op: "push".into(), fields: json!({}), generation: Some("3".into()), read_id: None,
+        }).await.unwrap();
+        assert_eq!(result["state"], "failed");
+        assert_eq!(result["code"], "push_failed");
+        assert_eq!(result["message"], "Upstream declined");
+        assert!(!journal.exists());
+        state.session("s").unwrap().agent.close().await;
+    }
+
     fn requests(dir: &Path) -> Vec<String> {
         std::fs::read_to_string(dir.join("requests.log"))
             .unwrap_or_default()
@@ -2344,8 +2556,10 @@ input.on("line", line => {
             Ok(BridgeKind::Read)
         ));
         assert!(matches!(bridge_kind("fetch"), Ok(BridgeKind::Write)));
-        assert!(matches!(bridge_kind("worktreeRemove"), Ok(BridgeKind::Write)));
-        for op in ["stage", "commit", "open", "targets", "receipt"] {
+        assert!(matches!(bridge_kind("worktreeRemoveTarget"), Ok(BridgeKind::Write)));
+        assert!(matches!(bridge_kind("stage"), Ok(BridgeKind::Write)));
+        assert!(matches!(bridge_kind("patch"), Ok(BridgeKind::Write)));
+        for op in ["commit", "open", "targets", "receipt", "worktreeRemove"] {
             assert_eq!(
                 bridge_kind(op).unwrap_err().code,
                 "remote_unsupported",

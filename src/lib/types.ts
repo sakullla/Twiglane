@@ -580,25 +580,10 @@ export interface TaskReviewToken {
 /**
  * 远端块级/逐行暂存不可用的真实原因。
  *
- * 桥接白名单里没有 patch 写入，按块与逐行暂存对远端恒为 unsupported，因此解析器永远
- * 拿不到「可暂存」标记。界面必须说清是远端不支持，而不是「块被截断」。
+ * 只有远端返回了可写入的块与完整快照，界面才显示局部暂存入口。
  */
 export const REMOTE_HUNKS_UNSTAGEABLE_REASON =
-  "远端暂不支持块级/逐行暂存：桥接没有开通 patch 写入，只能整文件暂存或取消暂存。";
-
-/**
- * 远端差异解析结果里由 api 层补上的那一项。
- *
- * RemotePatch 自身声明在 remote-worktree.ts（远端差异的解析与分页都归它），这里只声明
- * 离开解析器后补上的字段，避免把界面文案常量塞回解析模块。
- */
-export interface RemotePatchStageability {
-  /**
-   * 这份差异不能按块/按行暂存时的真实原因。缺省表示原因是本地原因（例如块被截断），
-   * 不表示远端支持块级写入。
-   */
-  hunksStageableReason?: string | null;
-}
+  "远端没有为这份差异提供可核对的局部暂存快照。可以暂存或撤出整个文件。";
 
 export interface DiffResponse {
   preview?: PreviewSources;
@@ -901,6 +886,7 @@ export interface CommitPushReport {
   committed: boolean;
   pushed: boolean;
   retryPush: boolean;
+  pushUnconfirmed?: boolean;
   oid: string;
   branch: string;
   summary: string;

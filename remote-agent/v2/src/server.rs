@@ -93,18 +93,7 @@ pub struct Context {
 /// 会启动远程命令的操作：取消时必须交给共享 sync 层的取消通道，而不能只看本地标记。
 /// 读类只有 `tagRemoteState` 走 ls-remote，它的取消同样经由同一条远程通道生效。
 fn remote_op(op: &str) -> bool {
-    matches!(
-        op,
-        "fetch"
-            | "pull"
-            | "push"
-            | "pushToRemote"
-            | "publishBranch"
-            | "fetchBranches"
-            | "deleteRemoteBranch"
-            | "tagPush"
-            | "tagRemoteState"
-    )
+    op == "tagRemoteState" || WriteOp::parse(op).is_some_and(WriteOp::uses_upstream)
 }
 
 /// 写操作分类：请求摘要、回执与执行分支都以它为准。
@@ -152,6 +141,7 @@ enum WriteOp {
     AmendCommit,
     Discard,
     WorktreeRemove,
+    WorktreeRemoveTarget,
     // 文件与目录写入（T3）：与 Git 写入同一套锁、令牌与回执顺序。
     EditSave,
     CreateEntry,
@@ -201,6 +191,7 @@ const WRITE_OPS: &[WriteOp] = &[
     WriteOp::AmendCommit,
     WriteOp::Discard,
     WriteOp::WorktreeRemove,
+    WriteOp::WorktreeRemoveTarget,
     WriteOp::EditSave,
     WriteOp::CreateEntry,
     WriteOp::CopyEntry,
@@ -209,6 +200,23 @@ const WRITE_OPS: &[WriteOp] = &[
 ];
 
 impl WriteOp {
+    fn uses_upstream(self) -> bool {
+        matches!(
+            self,
+            Self::Fetch
+                | Self::FetchBranches
+                | Self::AssociateUpstream
+                | Self::BranchUpdate
+                | Self::BranchPublish
+                | Self::Pull
+                | Self::Push
+                | Self::PushToRemote
+                | Self::PublishBranch
+                | Self::DeleteRemoteBranch
+                | Self::TagPush
+        )
+    }
+
     fn name(self) -> &'static str {
         match self {
             Self::Stage => "stage",
@@ -250,6 +258,7 @@ impl WriteOp {
             Self::AmendCommit => "amendCommit",
             Self::Discard => "discard",
             Self::WorktreeRemove => "worktreeRemove",
+            Self::WorktreeRemoveTarget => "worktreeRemoveTarget",
             Self::EditSave => "editSave",
             Self::CreateEntry => "createEntry",
             Self::CopyEntry => "copyEntry",
@@ -563,7 +572,17 @@ impl Context {
             "mergePreview" => self.merge_preview(&request.fields, cancel).await,
             "mergeSession" => self.merge_session(&request.fields, cancel).await,
             "conflictView" => self.conflict_view(&request.fields, cancel).await,
+            "mergeAbortPreview" => self.write_preview(WriteOp::MergeAbort, &request.fields, cancel).await,
+            "revertPreview" => self.write_preview(WriteOp::Revert, &request.fields, cancel).await,
+            "undoCommitPreview" => self.write_preview(WriteOp::UndoCommit, &request.fields, cancel).await,
+            "amendCommitPreview" => self.write_preview(WriteOp::AmendCommit, &request.fields, cancel).await,
+            "discardPreview" => self.write_preview(WriteOp::Discard, &request.fields, cancel).await,
+            "cancelRemote" => {
+                let session = self.session(&request.fields)?;
+                Ok(json!({"repo": session.key, "cancelled": self.stop_remote()}))
+            }
             "worktrees" => self.worktrees(&request.fields, cancel).await,
+            "worktreeRemovalPreview" => self.worktree_removal_preview(&request.fields, cancel).await,
             // 主窗口已在调用、v2 必须同名可用的只读入口。
             "branchState" => self.branch_state(&request.fields, cancel).await,
             "branchTracking" => self.branch_tracking(&request.fields, cancel).await,
@@ -937,7 +956,7 @@ impl Context {
                 offset,
                 limit,
                 context,
-                false,
+                as_text,
             )
             .await?
         };
@@ -1269,6 +1288,22 @@ impl Context {
         Ok(json!({ "repo": session.key, "conflict": view }))
     }
 
+    async fn write_preview(
+        &self,
+        op: WriteOp,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.repo_session(fields).await?;
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        let mut preview_fields = fields.clone();
+        preview_fields.insert("confirm".into(), Value::Bool(false));
+        check_cancel(cancel)?;
+        let (key, preview) = self.execute(op, &preview_fields, &session, generation).await?;
+        check_cancel(cancel)?;
+        Ok(json!({"repo": session.key, (key): preview}))
+    }
+
     /// worktree 总览：默认只看当前仓库；显式 paths 时按给定顺序逐项读取。
     async fn worktrees(
         &self,
@@ -1284,6 +1319,33 @@ impl Context {
         let overview = heads::worktree_overview(&self.backend, &paths, internal_request_id()).await?;
         check_cancel(cancel)?;
         Ok(json!({ "repo": session.key, "worktrees": overview }))
+    }
+
+    async fn linked_worktree_state(&self, session: &Session, target: &str) -> Result<(WorktreeIdentity, RepoState), AppError> {
+        let root = ops::canonical_existing(&ops::validate_input_path(target)?)?;
+        if root == session.root || heads::resolve_git_dir(&root)
+            .and_then(|git_dir| heads::linked_main(&root, &git_dir)).is_none()
+        {
+            return Err(AppError::new("not_worktree", "请选择同一仓库的另一棵附属工作区。"));
+        }
+        session.git_dir_identity.check(&self.common_dir(&root).await?)?;
+        let identity = WorktreeIdentity::read(&self.backend, &root).await?;
+        let state = ops::state_token(&self.backend, &root, internal_request_id()).await?;
+        Ok((identity, state))
+    }
+
+    async fn worktree_removal_preview(&self, fields: &Map<String, Value>, cancel: &AtomicBool) -> Result<Value, AppError> {
+        let session = self.repo_session(fields).await?;
+        let target = string_field(fields, "target")?;
+        check_cancel(cancel)?;
+        let (identity, state) = self.linked_worktree_state(&session, &target).await?;
+        check_cancel(cancel)?;
+        Ok(json!({"repo": session.key, "preview": {
+            "target": identity.path,
+            "token": worktree_removal_token(&identity, &state),
+            "branch": state.branch,
+            "head": state.head,
+        }}))
     }
 
     /// 分支跟踪：领先/落后与 gone 由共享实现读取，客户端不能从 BranchListing 推出来。
@@ -1869,6 +1931,38 @@ impl Context {
         }
     }
 
+    async fn edit_base_changed(
+        &self,
+        session: &Session,
+        fields: &Map<String, Value>,
+        generation: u64,
+    ) -> bool {
+        let (Ok(relative), Ok(digest)) = (
+            string_field(fields, "path"),
+            string_field(fields, "expectedDigest"),
+        ) else {
+            return false;
+        };
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return false;
+        }
+        files::repository_edit_snapshot(
+            &self.backend,
+            &session.key,
+            &relative,
+            generation,
+            internal_request_id(),
+        )
+        .await
+        .is_ok_and(|snapshot| {
+            !snapshot.editable
+                || !snapshot
+                    .digest
+                    .as_deref()
+                    .is_some_and(|current| current.eq_ignore_ascii_case(&digest))
+        })
+    }
+
     /// 一次写入的完整顺序：跨进程写锁 → 回执查重 → 令牌核对 → 登记 registered →
     /// 执行共享写入 → 取得新状态 → 改为 completed。
     ///
@@ -1939,6 +2033,21 @@ impl Context {
             ops::state_token(&self.backend, &session.root, internal_request_id()).await?;
         let generation = self.backend.scheduler.current_generation(&session.key);
         if guarded.token != expected {
+            // 编辑器需要区分仓库的其他变化与草稿所对应文件的变化。
+            // 令牌不匹配始终拒绝写入，此处只在锁内读取文件以明确拒绝原因。
+            let error = if op == WriteOp::EditSave
+                && self.edit_base_changed(&session, fields, generation).await
+            {
+                AppError::new(
+                    "edit_conflict",
+                    "文件在编辑期间已变化，保存未写入，草稿仍保留。",
+                )
+            } else {
+                AppError::new(
+                    "state_mismatch",
+                    "仓库状态在读取之后已经变化，未写入。请刷新后重试。",
+                )
+            };
             let receipt = Receipt::registered(
                 &operation_id,
                 &session.key,
@@ -1947,13 +2056,11 @@ impl Context {
                 guarded.head,
                 generation,
             );
-            store.fail(receipt, "state_mismatch")?;
-            return Err(AppError::new(
-                "state_mismatch",
-                "仓库状态在读取之后已经变化，未写入。请刷新后重试。",
-            ));
+            store.fail(receipt, &error.code)?;
+            return Err(error);
         }
 
+        let before_branch = guarded.branch;
         let mut receipt = Receipt::registered(
             &operation_id,
             &session.key,
@@ -1985,7 +2092,19 @@ impl Context {
         // 读不到新状态不等于写入失败：worktreeRemove 删掉的正是被读取的那个工作区。
         // 这种情况仍然如实登记为 completed，只是不附令牌，由客户端重新打开仓库。
         let state = match ops::state_token(&self.backend, &session.root, internal_request_id()).await {
+            Ok(state) if op == WriteOp::Commit && (
+                state.branch != before_branch
+                    || state.head == receipt.before_head
+                    || state.head.as_deref() != value["oid"].as_str()
+            ) => {
+                store.pending(receipt, "commit_unverified")?;
+                return Err(AppError::new("operation_pending", "提交命令已执行，但当前分支或提交已变化。请重新连接并核对原操作。"));
+            }
             Ok(state) => Some(state),
+            Err(error) if op == WriteOp::Commit => {
+                store.pending(receipt, error.code)?;
+                return Err(AppError::new("operation_pending", "提交命令已执行，新的分支状态无法核对。请重新连接并核对原操作。"));
+            }
             Err(error) if matches!(op, WriteOp::EditSave | WriteOp::CreateEntry | WriteOp::CopyEntry | WriteOp::MoveEntry | WriteOp::DeleteEntries) => {
                 store.pending(receipt, error.code)?;
                 return Err(AppError::new("operation_pending", "文件操作已执行，写入后的状态无法核对。请重新连接并检查工作树。"));
@@ -2001,6 +2120,10 @@ impl Context {
             let head = state.head.as_deref()?;
             match op {
                 WriteOp::Commit if value["oid"].as_str() == Some(head) => Some("committed"),
+                WriteOp::AmendCommit if value["wrote"].as_bool() == Some(true) && value["headOid"].as_str() == Some(head) => Some("committed"),
+                WriteOp::CherryPick | WriteOp::Revert
+                    if value["created"].as_u64().is_some_and(|created| created > 0)
+                        && value["headOid"].as_str() == Some(head) => Some("committed"),
                 WriteOp::MergeStart
                     if (value["fastForwarded"].as_bool() == Some(true) || value["rebased"].as_bool() == Some(true))
                         && receipt.before_head.as_deref() != Some(head) => Some("merged"),
@@ -2501,6 +2624,16 @@ impl Context {
                     worktree_ops::remove_worktree(backend, path, force, request_id).await?;
                 Ok(("recent".to_string(), to_value(recent)?))
             }
+            WriteOp::WorktreeRemoveTarget => {
+                let target = string_field(fields, "target")?;
+                let expected = string_field(fields, "targetToken")?;
+                let (identity, state) = self.linked_worktree_state(session, &target).await?;
+                if identity.path != target || worktree_removal_token(&identity, &state) != expected {
+                    return Err(AppError::new("stale_worktree", "附属工作区已变化，请重新预览后确认。"));
+                }
+                worktree_ops::remove_linked_worktree(backend, &identity.path, bool_field(fields, "force"), request_id).await?;
+                Ok(("removedWorktree".to_string(), json!(identity.path)))
+            }
             // 文件保存：预期内容版本（digest）就是这次写入的状态前提，写前写后都要核实。
             WriteOp::EditSave => {
                 let relative = string_field(fields, "path")?;
@@ -2820,6 +2953,14 @@ fn cursor_expired() -> AppError {
     )
 }
 
+fn worktree_removal_token(identity: &WorktreeIdentity, state: &RepoState) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(identity.digest.as_bytes());
+    hasher.update(state.token.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 fn request_digest(op: WriteOp, fields: &Map<String, Value>) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -2859,20 +3000,8 @@ fn reject_undeclared(
 /// 远程写入在取消、超时、网络中断时结果未知：远端可能已经收到请求。
 /// 这类错误不能记成 failed，否则客户端会把一次可能成功的写入当成可重发。
 fn remote_write_unconfirmed(op: WriteOp, error: &AppError) -> bool {
-    if error.write_unconfirmed {
-        return true;
-    }
-    matches!(
-        op,
-        WriteOp::Fetch
-            | WriteOp::FetchBranches
-            | WriteOp::Pull
-            | WriteOp::Push
-            | WriteOp::PushToRemote
-            | WriteOp::PublishBranch
-            | WriteOp::DeleteRemoteBranch
-            | WriteOp::TagPush
-    ) && matches!(error.code.as_str(), "cancelled" | "timeout" | "network")
+    error.write_unconfirmed
+        || op.uses_upstream() && matches!(error.code.as_str(), "cancelled" | "timeout" | "network")
 }
 
 fn check_cancel(cancel: &AtomicBool) -> Result<(), AppError> {

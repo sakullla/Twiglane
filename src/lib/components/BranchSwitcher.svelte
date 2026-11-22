@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { blockTops, blockWindow } from "../ui";
   import { api } from "../api";
+  import { isRemoteRepositoryKey, parseRemoteRepositoryKey, remoteRepositoryKey } from "../remote-worktree";
   import { bucketBranches, filterBranches, groupIsOpen, isDefaultBranch, mainBranchNames, trackingMap, trackingSummary, trackNameFor } from "../branches";
   import { normalizeError } from "../errors";
   import type { IconName } from "../icons";
@@ -54,7 +55,7 @@
      * 打开其他工作区之前的外壳关卡。返回 false 时弹层不读取、不切换：用户取消了，
      * 或外壳已经收起弹层、改由自己走带确认的打开路径（弹层挡不住叠在上面的确认框）。
      */
-    beforeOpen?: (path: string) => Promise<boolean>;
+    beforeOpen?: (path: string, anchor?: string) => Promise<boolean>;
     /** 读到全部本地分支的领先/落后后交给外壳：标题栏分支按钮据此汇总提醒。 */
     onTracking?: (tracks: BranchTrack[]) => void;
     onClose: (refocus?: boolean) => void;
@@ -288,12 +289,15 @@
     const path = branch.worktree;
     if (!path || blockedReason || openingWorktree) return;
     const repo = opened;
+    const endpoint = parseRemoteRepositoryKey(repo.summary.path);
     errorText = null;
     openingWorktree = true;
     if (beforeOpen) {
       let proceed = false;
       try {
-        proceed = await beforeOpen(path);
+        proceed = endpoint
+          ? await beforeOpen(remoteRepositoryKey(endpoint.hostId, path), repo.summary.path)
+          : await beforeOpen(path);
       } catch {
         proceed = false;
       }
@@ -304,7 +308,9 @@
     }
     onBusy("open");
     try {
-      const next = await api.openRepository(path, nextId());
+      const next = isRemoteRepositoryKey(repo.summary.path)
+        ? await api.openLinkedWorktree(repo.summary.path, path)
+        : await api.openRepository(path, nextId());
       if (!mounted || opened.summary.path !== repo.summary.path) return;
       onOpened?.(next);
       onClose();

@@ -40,6 +40,7 @@ export interface RemoteWorktreeSnapshot {
   branch: string | null;
   generation: string;
   files: { path: string; xy: string }[];
+  status?: StatusSnapshot;
   reviewFiles?: string[];
   reviewFilesTruncated?: boolean;
   reviewError?: { code: string; message: string } | null;
@@ -70,7 +71,7 @@ export interface RemoteConnectionProgress {
 }
 
 export type RemoteOpenResult =
-  | { kind: "open"; sessionId: string; snapshot: RemoteWorktreeSnapshot; pendingWrite: RemotePendingWrite | null; reviewOutcome?: RemoteReviewOutcome | null; events?: boolean }
+  | { kind: "open"; sessionId: string; snapshot: RemoteWorktreeSnapshot; pendingWrite: RemotePendingWrite | null; pushContinuation?: RemotePushContinuation | null; reviewOutcome?: RemoteReviewOutcome | null; events?: boolean }
   | { kind: "install_required"; version: string; size: number; confirmationId?: string };
 
 export type RemoteDiffView = "staged" | "unstaged" | "task";
@@ -90,6 +91,9 @@ export interface RemoteDiffRequest {
 export interface RemoteDiffPage {
   data: string;
   nextCursor: string | null;
+  snapshot?: string | null;
+  truncated?: boolean;
+  stageableHunks?: number[];
   /**
    * 这份差异里的块能不能按块暂存。由远端命令按会话能力与视图给出，
    * 界面与解析器都不自行推断；缺省（旧载荷）一律按不可暂存处理。
@@ -101,11 +105,16 @@ export interface RemoteDiffPage {
 
 export type RemoteWriteAction =
   | { op: "stage" | "unstage"; path: string }
-  | { op: "commit"; message: string };
+  | { op: "commit"; message: string; pushAfter?: boolean };
+
+export interface RemotePushContinuation {
+  head: string;
+  branch: string | null;
+}
 
 export interface RemotePendingWrite {
   operationId: string;
-  op: RemoteWriteAction["op"] | RemoteWriteOp;
+  op: RemoteWriteAction["op"] | RemoteWriteOp | "commitAndPush";
 }
 
 export type RemoteWriteRequest = RemoteWriteAction & {
@@ -139,7 +148,14 @@ export const REMOTE_READ_OPS = [
   "mergePreview",
   "mergeSession",
   "conflictView",
+  "mergeAbortPreview",
+  "revertPreview",
+  "undoCommitPreview",
+  "amendCommitPreview",
+  "discardPreview",
+  "cancelRemote",
   "worktrees",
+  "worktreeRemovalPreview",
   "directory",
   "fileContent",
   "filePreview",
@@ -152,6 +168,9 @@ export const REMOTE_READ_OPS = [
 ] as const;
 
 export const REMOTE_WRITE_OPS = [
+  "stage",
+  "unstage",
+  "patch",
   "branchCreate",
   "branchSwitch",
   "branchRename",
@@ -159,6 +178,10 @@ export const REMOTE_WRITE_OPS = [
   "branchTrack",
   "branchUpdate",
   "branchPublish",
+  "setUpstream",
+  "associateUpstream",
+  "fetchBranches",
+  "deleteRemoteBranch",
   "tagCreate",
   "tagDelete",
   "tagPush",
@@ -182,7 +205,7 @@ export const REMOTE_WRITE_OPS = [
   "checkoutCommit",
   "amendCommit",
   "discard",
-  "worktreeRemove",
+  "worktreeRemoveTarget",
   "editSave",
   "createEntry",
   "copyEntry",
@@ -229,7 +252,7 @@ export interface RemoteEventBatch {
 export type RemoteCallResult = RemoteWriteResult | Record<string, unknown>;
 
 export type RemoteWriteResult =
-  | { state: "completed"; operationId: string; snapshot: RemoteWorktreeSnapshot; head?: string | null; reviewOutcome?: RemoteReviewOutcome | null; edit?: RepositoryEditSnapshot; delete?: BatchDeleteResult }
+  | { state: "completed"; operationId: string; snapshot: RemoteWorktreeSnapshot; head?: string | null; reviewOutcome?: RemoteReviewOutcome | null; pushContinuation?: RemotePushContinuation | null; edit?: RepositoryEditSnapshot; delete?: BatchDeleteResult }
   // Return "failed" only when the outcome is verified and the write had no effect.
   | { state: "failed" | "unknown"; operationId: string; op?: RemotePendingWrite["op"]; message: string; code?: string };
 
@@ -549,6 +572,7 @@ export function remoteBranch(snapshot: RemoteWorktreeSnapshot): BranchInfo {
 }
 
 export function remoteStatus(snapshot: RemoteWorktreeSnapshot, generation: number): StatusSnapshot {
+  if (snapshot.status) return { ...snapshot.status, generation };
   return { generation, branch: remoteBranch(snapshot), files: remoteChanges(snapshot.files) };
 }
 

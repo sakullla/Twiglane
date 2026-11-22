@@ -436,6 +436,86 @@ fn open_returns_the_full_snapshot_and_diff_pages_by_cursor() {
 }
 
 #[test]
+fn destructive_previews_use_real_git_evidence_without_writing() {
+    let fixture = Fixture::new("git-previews");
+    fixture.init();
+    fixture.write("note.txt", "first\n");
+    fixture.commit_all("first");
+    fixture.write("note.txt", "second\n");
+    fixture.commit_all("second");
+    fixture.write("note.txt", "uncommitted\n");
+    let repo = fixture.repo_str();
+    let head = git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD"]);
+    let mut agent = fixture.agent();
+    let opened = open(&mut agent, &repo);
+
+    let discard = agent.ok("discard-preview", "discardPreview", json!({
+        "repo":repo,"paths":["note.txt"],"confirm":true
+    }));
+    assert_eq!(discard["discard"]["wrote"], false);
+    assert_eq!(discard["discard"]["files"][0]["path"], "note.txt");
+    let amend = agent.ok("amend-preview", "amendCommitPreview", json!({
+        "repo":repo,"expectedHead":head,"message":"new summary","includeStaged":true,"confirm":true
+    }));
+    assert_eq!(amend["amend"]["wrote"], false);
+    assert_eq!(amend["amend"]["stagedToken"].as_str().unwrap().len(), 64);
+    let undo = agent.ok("undo-preview", "undoCommitPreview", json!({
+        "repo":repo,"expectedHead":head,"confirm":true
+    }));
+    assert_eq!(undo["undo"]["wrote"], false);
+    let revert = agent.ok("revert-preview", "revertPreview", json!({
+        "repo":repo,"expectedHead":head,"oids":[head],"confirm":true
+    }));
+    assert_eq!(revert["revert"]["wrote"], false);
+
+    let after = agent.ok("same-state", "status", json!({"repo":repo}));
+    assert_eq!(after["stateToken"], opened["stateToken"]);
+    assert_eq!(git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD"]), head);
+    assert_eq!(std::fs::read_to_string(fixture.repo.join("note.txt")).unwrap(), "uncommitted\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn linked_worktree_removal_checks_the_confirmed_target_and_preserves_refs() {
+    let fixture = Fixture::new("linked-target");
+    fixture.init();
+    fixture.write("note.txt", "first\n");
+    fixture.commit_all("initial");
+    let sibling = fixture.root.path().join("sibling");
+    git(&fixture.repo, &fixture.config, &["worktree", "add", "-b", "topic", sibling.to_str().unwrap()]);
+    let target = dunce::canonicalize(&sibling).unwrap().to_string_lossy().into_owned();
+    let repo = fixture.repo_str();
+    let mut agent = fixture.agent();
+    let opened = open(&mut agent, &repo);
+    let state_token = &opened["stateToken"];
+    let preview = |agent: &mut Agent, id: &str| {
+        agent.ok(id, "worktreeRemovalPreview", json!({"repo":repo,"target":target}))["preview"].clone()
+    };
+    let before = preview(&mut agent, "preview-clean");
+    assert_eq!(before["branch"], "topic");
+    assert_eq!(before["target"], target);
+    assert_eq!(agent.error_code("reject-self", "worktreeRemovalPreview", json!({"repo":repo,"target":repo})), "not_worktree");
+    std::fs::write(sibling.join("note.txt"), "deeply valuable\n").unwrap();
+    let request = |token: &Value, operation_id: &str, force: bool| json!({
+        "repo":repo,"operationId":operation_id,"stateToken":state_token,
+        "target":target,"targetToken":token,"force":force,
+    });
+    assert_eq!(agent.error_code("stale-target", "worktreeRemoveTarget", request(&before["token"], "op-stale-wt", true)), "stale_worktree");
+    assert!(sibling.exists());
+    let after = preview(&mut agent, "preview-dirty");
+    assert_eq!(agent.error_code("dirty-target", "worktreeRemoveTarget", request(&after["token"], "op-dirty-wt", false)), "worktree_dirty");
+    let removed = agent.ok("force-target", "worktreeRemoveTarget", request(&after["token"], "op-force-wt", true));
+    assert_eq!(removed["receipt"]["state"], "completed");
+    assert_eq!(removed["removedWorktree"], target);
+    assert!(!sibling.exists());
+    assert!(fixture.repo.join("note.txt").is_file());
+    assert_eq!(
+        git(&fixture.repo, &fixture.config, &["rev-parse", "topic"]).trim(),
+        before["head"].as_str().unwrap()
+    );
+}
+
+#[test]
 fn stage_and_commit_write_real_git_state_and_leave_queryable_receipts() {
     let fixture = Fixture::new("write");
     fixture.init();
@@ -575,6 +655,57 @@ fn stale_state_token_is_rejected_without_writing_the_index() {
     );
     assert_eq!(receipt["receipt"]["state"], json!("failed"));
     assert_eq!(receipt["receipt"]["reason"], json!("state_mismatch"));
+}
+
+#[test]
+fn stale_repository_state_distinguishes_file_edit_conflicts() {
+    let fixture = Fixture::new("stale-edit");
+    fixture.init();
+    fixture.write("note.txt", "base\n");
+    fixture.write("other.txt", "base\n");
+    fixture.commit_all("init");
+
+    let repo = fixture.repo_str();
+    let mut agent = fixture.agent();
+    let opened = open(&mut agent, &repo);
+    let snapshot = agent.ok(
+        "edit-snapshot",
+        "editSnapshot",
+        json!({ "repo": repo, "relative": "note.txt" }),
+    );
+    fixture.write("other.txt", "changed elsewhere\n");
+    for (operation, expected, contents) in [
+        ("op-edit-elsewhere", "state_mismatch", "base\n"),
+        ("op-edit-conflict", "edit_conflict", "external change\n"),
+    ] {
+        if expected == "edit_conflict" {
+            fixture.write("note.txt", contents);
+        }
+        let code = agent.error_code(
+            operation,
+            "editSave",
+            json!({
+                "repo": repo,
+                "operationId": operation,
+                "stateToken": opened["stateToken"],
+                "path": "note.txt",
+                "expectedDigest": snapshot["edit"]["digest"],
+                "content": "user draft\n",
+            }),
+        );
+        assert_eq!(code, expected);
+        let receipt = agent.ok(
+            "edit-receipt",
+            "receipt",
+            json!({ "repo": repo, "operationId": operation }),
+        );
+        assert_eq!(receipt["receipt"]["state"], json!("failed"));
+        assert_eq!(receipt["receipt"]["reason"], json!(expected));
+        assert_eq!(
+            std::fs::read_to_string(fixture.repo.join("note.txt")).unwrap(),
+            contents
+        );
+    }
 }
 
 #[test]
@@ -2224,6 +2355,47 @@ fn an_index_lock_is_reported_without_touching_the_repository() {
 }
 
 #[test]
+fn a_checkout_after_commit_cannot_turn_an_unrelated_head_into_a_push_receipt() {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new("commit-moved-head");
+    fixture.init();
+    fixture.write("a.txt", "initial\n");
+    fixture.commit_all("init");
+    let repo = fixture.repo_str();
+    let branch = git(&fixture.repo, &fixture.config, &["branch", "--show-current"]);
+    let branch = branch.trim();
+    let initial = git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD"]);
+    git(&fixture.repo, &fixture.config, &["branch", "other"]);
+    fixture.write("b.txt", "staged\n");
+    git(&fixture.repo, &fixture.config, &["add", "--", "b.txt"]);
+    let hook = fixture.repo.join(".git/hooks/post-commit");
+    std::fs::write(&hook, "#!/bin/sh\ngit switch other\n").unwrap();
+    #[cfg(unix)]
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut agent = fixture.agent();
+    let state = open(&mut agent, &repo);
+    let request = json!({
+        "repo": repo,
+        "operationId": "op-commit-moved-head",
+        "stateToken": state["stateToken"],
+        "message": "commit on original branch",
+    });
+    let reply = agent.call("commit-moved-head", "commit", request.clone());
+    assert_eq!(reply["error"]["code"], json!("operation_pending"));
+    let receipt = agent.ok("receipt-moved-head", "receipt", json!({
+        "repo": repo, "operationId": "op-commit-moved-head",
+    }));
+    assert_eq!(receipt["receipt"]["state"], json!("pending"));
+    let repeated = agent.call("repeat-moved-head", "commit", request);
+    assert_eq!(repeated["error"]["code"], json!("operation_pending"));
+    assert_eq!(git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD"]), initial);
+    assert_eq!(git(&fixture.repo, &fixture.config, &["rev-list", "--count", branch]).trim(), "2");
+}
+
+#[test]
 fn an_unreadable_receipt_blocks_a_repeat_write() {
     let fixture = Fixture::new("corrupt-receipt");
     fixture.init();
@@ -3823,6 +3995,28 @@ fn change_events_carry_repo_and_merge_bursts() {
         json!({ "repo": repo, "after": watermark + 10 }),
     );
     assert_eq!(ahead["events"], json!([]));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn repository_reads_do_not_invalidate_the_event_cursor() {
+    let fixture = Fixture::new("read-watch");
+    fixture.init();
+    fixture.write("note.txt", "tracked\n");
+    fixture.commit_all("initial");
+    let mut agent = fixture.agent();
+    let repo = fixture.repo_str();
+    assert_eq!(open(&mut agent, &repo)["watchDegraded"], false);
+
+    std::thread::sleep(Duration::from_millis(250));
+    let start = agent.ok("cursor-before-reads", "events", json!({"repo":repo,"after":0}));
+    let seq = start["seq"].as_u64().unwrap();
+    agent.ok("status-read", "status", json!({"repo":repo}));
+    agent.ok("file-read", "fileContent", json!({"repo":repo,"relative":"note.txt"}));
+    std::thread::sleep(Duration::from_millis(1200));
+    let result = agent.ok("cursor-after-reads", "events", json!({"repo":repo,"after":seq}));
+    assert_eq!(result["seq"], seq, "reads produced worktree invalidations: {result}");
+    assert_eq!(result["events"], json!([]));
 }
 
 /// watch 不可用时如实降级：没有事件，只有显式刷新能拿到新状态。

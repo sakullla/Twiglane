@@ -585,14 +585,16 @@ pub async fn commit_index(
             Some(current),
         )
         .await
-    })?;
+    })
+    .map_err(AppError::after_unconfirmed_write)?;
     if head.output.exit_code != 0 {
         return Err(git_failure(
             "commit_unverified",
             &head.output,
             "提交命令已返回，但无法确认新的提交。请刷新后查看历史，不要重复提交。",
         )
-        .with_generation(head.generation));
+        .with_generation(head.generation)
+        .after_unconfirmed_write());
     }
     let oid = String::from_utf8_lossy(&head.output.stdout)
         .trim()
@@ -603,7 +605,8 @@ pub async fn commit_index(
         current,
         internal_request_id()
     )
-    .await)?;
+    .await)
+    .map_err(AppError::after_unconfirmed_write)?;
     let branch = snapshot
         .branch
         .name

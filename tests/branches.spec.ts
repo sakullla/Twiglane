@@ -75,12 +75,13 @@ function opened(sessionId = "session-a", snap: unknown = snapshot(), pendingWrit
   return { kind: "open", sessionId, snapshot: snap, pendingWrite };
 }
 
-function completed(snap: unknown) {
+function completed(snap: unknown, result: Record<string, unknown> = {}) {
   return {
     state: "completed",
     operationId: "op-1",
     snapshot: snap,
     head: (snap as { head?: string }).head ?? null,
+    ...result,
   };
 }
 
@@ -219,266 +220,203 @@ describe("远端桥接：历史、分支、同步、stash、合并都走 op 白�
     expect(pushed.generation).toBe(fetched.generation + 1);
   });
 
-  it("临时保存：写入后重新读一次列表，标识取自读回的最新记录", async () => {
+  it("临时保存：从已核对回执读取标识和具体结果", async () => {
     const repository = await openHost();
-    port.call
-      .mockResolvedValueOnce(completed(snapshot({ generation: "g2", files: [] })))
-      .mockResolvedValueOnce({
-        repo: "repo-a",
-        stash: {
+    const oid = "b".repeat(40);
+    const after = snapshot({ generation: "g2", files: [] });
+    port.call.mockResolvedValueOnce(completed(after, {
+      stash: {
+        oid,
+        note: "已保存",
+        state: {
           generation: 13,
           preview: { trackedCount: 0, untrackedCount: 0, ignoredCount: 0, trackedPaths: [], untrackedPaths: [], ignoredPaths: [], includeUntracked: true, canSave: false, summary: "" },
-          records: [{ oid: "b".repeat(40), message: "远端临时保存", committedAt: 1 }],
+          records: [{ oid, message: "远端临时保存", committedAt: 1 }],
           snapshot: {},
         },
-      });
+      },
+    }));
 
     const result = await api.saveStash(keyA, true, "远端临时保存", repository.generation, 35);
     expect(port.call.mock.calls[0][0]).toMatchObject({ op: "stashSave", fields: { includeUntracked: true, message: "远端临时保存" } });
-    expect(port.call.mock.calls[1][0]).toMatchObject({ op: "stashState", fields: { includeUntracked: true } });
-    expect(result.oid).toBe("b".repeat(40));
+    expect(port.call).toHaveBeenCalledTimes(1);
+    expect(result.oid).toBe(oid);
     expect(result.state.records).toHaveLength(1);
+    expect(result.state.snapshot.files).toEqual([]);
   });
 
-  it("合并：开始合并先写再读会话，完成时用新 HEAD 的提交组成 MergeComplete", async () => {
+  it("开始与完成合并使用远端回执携带的会话和提交结果", async () => {
     const repository = await openHost();
     const merged = snapshot({ generation: "g2", head: "c".repeat(40) });
-    port.call
-      .mockResolvedValueOnce(completed(merged))
-      .mockResolvedValueOnce({
-        repo: "repo-a",
-        merge: { generation: 13, operation: "merge", canContinue: true, canAbort: true, source: "feature", target: "main", headOid: "c".repeat(40), conflicts: [{ path: "a.txt", kind: "content", summary: "" }], unresolved: 1, note: "", snapshot: {} },
-      });
+    port.call.mockResolvedValueOnce(completed(merged, {
+      merge: {
+        generation: 13, operation: "rebase", canContinue: true, canAbort: true, source: "feature",
+        target: "main", headOid: "c".repeat(40), conflicts: [{ path: "a.txt", kind: "content", summary: "" }],
+        unresolved: 1, note: "", snapshot: {},
+      },
+    }));
 
-    const session = await api.startMerge(keyA, "feature", null, "ff-only", repository.generation, 36);
-    expect(port.call.mock.calls[0][0]).toMatchObject({ op: "mergeStart", fields: { source: "feature", target: null, mode: "merge" } });
-    expect(port.call.mock.calls[1][0]).toMatchObject({ op: "mergeSession" });
+    const session = await api.startMerge(keyA, "feature", null, "rebase", repository.generation, 36);
+    expect(port.call.mock.calls[0][0]).toMatchObject({ op: "mergeStart", fields: { source: "feature", target: null, mode: "rebase" } });
     expect(session.unresolved).toBe(1);
     expect(session.generation).toBe(repository.generation + 1);
 
-    port.call
-      .mockResolvedValueOnce({ repo: "repo-a", merge: { generation: 14, operation: "merge", canContinue: false, canAbort: false, source: "feature", target: "main", headOid: "d".repeat(40), conflicts: [], unresolved: 0, note: "", snapshot: {} } })
-      .mockResolvedValueOnce(completed(snapshot({ generation: "g3", head: "d".repeat(40) })))
-      .mockResolvedValueOnce({
-        repo: "repo-a",
-        commit: {
-          generation: 14,
-          commit: { oid: "d".repeat(40), parents: ["c".repeat(40)], summary: "合并分支 feature", authorName: "dev", authorEmail: "d@e", authoredAt: 1, labels: [] },
-          body: "",
-          root: false,
-          merge: true,
-          selectedParent: "c".repeat(40),
-          files: [{ path: "a.txt", originalPath: null, status: "M" }],
-        },
-      });
-
-    const done = await api.completeMerge(keyA, "合并分支 feature", session.generation, 37, "merge");
-    expect(port.call.mock.calls[3][0]).toMatchObject({ op: "mergeComplete", fields: { message: "合并分支 feature" } });
-    expect(done).toMatchObject({ operation: "merge", oid: "d".repeat(40), summary: "合并分支 feature", files: ["a.txt"] });
+    const oid = "d".repeat(40);
+    port.call.mockResolvedValueOnce(completed(snapshot({ generation: "g3", head: oid }), {
+      merge: { generation: 14, operation: "rebase", oid, summary: "变基完成", files: ["a.txt"], snapshot: {} },
+    }));
+    const done = await api.completeMerge(keyA, "变基完成", session.generation, 37, "rebase");
+    expect(port.call.mock.calls[1][0]).toMatchObject({ op: "mergeComplete", fields: { message: "变基完成" } });
+    expect(port.call).toHaveBeenCalledTimes(2);
+    expect(done).toMatchObject({ operation: "rebase", oid, summary: "变基完成", files: ["a.txt"] });
   });
 
-  it("撤销合并的预览不发送写入，取消后远端一次写都没有收到", async () => {
+  it("撤销合并的预览从远端读取影响，无确认时没有写入", async () => {
     const repository = await openHost();
     port.call.mockResolvedValueOnce({
       repo: "repo-a",
-      merge: { generation: 13, operation: "merge", canContinue: true, canAbort: true, source: "feature", target: "main", headOid: "c".repeat(40), conflicts: [{ path: "a.txt", kind: "content", summary: "" }], unresolved: 1, note: "", snapshot: {} },
+      merge: { generation: 13, wrote: false, paths: ["a.txt"], stashOids: [], note: "", snapshot: {} },
     });
 
     const preview = await api.abortMerge(keyA, false, repository.generation, 38);
     expect(preview.wrote).toBe(false);
     expect(preview.paths).toEqual(["a.txt"]);
-    expect(port.call.mock.calls.map((call) => call[0].op)).toEqual(["mergeSession"]);
+    expect(port.call).toHaveBeenCalledExactlyOnceWith({ sessionId: "session-a", op: "mergeAbortPreview", fields: {} });
   });
 
-  it("白名单外的方法与迟到的代次仍明确失败，且不发任何远端请求", async () => {
+  it("拒绝绕过远端工作区预览的删除与迟到代次的写入", async () => {
     const repository = await openHost();
-    // worktreeRemove 在 v2 只删当前打开的工作树、只收 force，不接受路径；本机删的是指定路径上的
-    // linked worktree。两处语义对不上，这里保持 unsupported 并把真实差异说出来。
     const removeFailure = await api.removeWorktree(keyA, false, 39).then(
       () => null,
       (thrown: { code?: string; message?: string }) => thrown,
     );
     expect(removeFailure?.code).toBe("remote_unsupported");
-    expect(removeFailure?.message).toContain("只接受 force");
-    expect(removeFailure?.message).toContain("linked worktree");
-    // 不要说「回执里没有 recent」：这条命令本来就不是 worktrees 列表那条 op。
-    expect(removeFailure?.message).not.toContain("最近列表");
+    expect(removeFailure?.message).toContain("所属 SSH 仓库核对这棵工作区的删除预览");
     await expect(api.renameBranch(keyA, "a", "b", repository.generation + 99, 40)).rejects.toMatchObject({ code: "stale" });
     expect(port.call).not.toHaveBeenCalled();
     expect(invoke).not.toHaveBeenCalled();
     expect(port.write).not.toHaveBeenCalled();
   });
 
-  it("放弃改动：取消不发送，确认只发送一次写入，并按回执里的新状态组成结果", async () => {
+  it("放弃改动：远端只读预览，确认后只发送一次写入并返回路径处理结果", async () => {
     const repository = await openHost();
-
+    const files = [{
+      path: "small.txt", originalPath: null, staged: "none", unstaged: "modified",
+      untracked: false, impact: "恢复到索引", recovery: "工作区改动将丢失",
+    }];
+    const result = { generation: 13, wrote: false, files, boundary: "仅影响所选文件", snapshot: repository.snapshot };
+    port.call.mockResolvedValueOnce({ repo: "repo-a", discard: result });
     const preview = await api.discardChanges(keyA, ["small.txt"], false, repository.generation, 39);
     expect(preview.wrote).toBe(false);
     expect(preview.files.map((file) => file.path)).toEqual(["small.txt"]);
     expect(preview.snapshot.files.map((file) => file.path)).toContain("small.txt");
-    // 预览只用会话里最近一次状态：远端一次写都没有收到。
-    expect(port.call).not.toHaveBeenCalled();
+    expect(port.call).toHaveBeenCalledExactlyOnceWith({ sessionId: "session-a", op: "discardPreview", fields: { paths: ["small.txt"] } });
 
     const after = snapshot({ generation: "g2", files: [{ path: "staged.txt", xy: "M " }] });
-    port.call.mockResolvedValueOnce(completed(after));
+    port.call.mockResolvedValueOnce(completed(after, { discard: { ...result, wrote: true } }));
     const done = await api.discardChanges(keyA, ["small.txt"], true, repository.generation, 40);
-    expect(port.call.mock.calls[0][0]).toMatchObject({ op: "discard", fields: { paths: ["small.txt"], confirm: true } });
-    expect(port.call).toHaveBeenCalledTimes(1);
+    expect(port.call.mock.calls[1][0]).toMatchObject({ op: "discard", fields: { paths: ["small.txt"], confirm: true } });
+    expect(port.call).toHaveBeenCalledTimes(2);
     expect(done.wrote).toBe(true);
     expect(done.files.map((file) => file.path)).toEqual(["small.txt"]);
     expect(done.snapshot.files.map((file) => file.path)).toEqual(["staged.txt"]);
     expect(invoke).not.toHaveBeenCalled();
   });
 
-  it("拣选提交：发送一次写入，创建数量读不到时不编造", async () => {
+  it("拣选提交从远端已核对回执取得新 HEAD 和实际创建数", async () => {
     const repository = await openHost();
-    port.call.mockResolvedValueOnce(completed(snapshot({ generation: "g2", head: "b".repeat(40), files: [] })));
+    const headOid = "b".repeat(40);
+    port.call.mockResolvedValueOnce(completed(snapshot({ generation: "g2", head: headOid, files: [] }), {
+      cherryPick: { generation: 13, created: 1, headOid, conflicted: false, skipped: [], note: "已拣选", snapshot: {} },
+    }));
 
     const result = await api.cherryPickCommits(keyA, ["a".repeat(40)], repository.generation, 41);
     expect(port.call.mock.calls[0][0]).toMatchObject({ op: "cherryPick", fields: { oids: ["a".repeat(40)] } });
-    expect(result.headOid).toBe("b".repeat(40));
-    expect(result.conflicted).toBe(false);
-    // 原生桥接的 finish_write 只回新状态，v2 的 cherryPick DTO 没传回来：字段留空，
-    // 不填 0 / [] 冒充「一个都没创建、一个都没跳过」。
-    expect(result.created).toBeUndefined();
-    expect(result.skipped).toBeUndefined();
-    expect(result.note).toContain("原生桥接暂未回传");
+    expect(port.call).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ headOid, conflicted: false, created: 1, skipped: [], note: "已拣选" });
     expect(invoke).not.toHaveBeenCalled();
   });
 
-  it("还原提交：预览只读目标提交，确认只发送一次写入", async () => {
+  it("还原提交：预览与确认使用不同的远端操作并返回目标与实际创建数", async () => {
     const repository = await openHost();
     const oid = "c".repeat(40);
-    port.call.mockResolvedValueOnce({
-      repo: "repo-a",
-      commit: {
-        generation: 13,
-        commit: { oid, parents: ["b".repeat(40)], summary: "远端提交", authorName: "dev", authorEmail: "d@e", authoredAt: 7, labels: [] },
-        body: "",
-        root: false,
-        merge: false,
-        selectedParent: null,
-        files: [],
-      },
+    const head = "a".repeat(40);
+    const targets = [{ oid, summary: "远端提交", authorName: "dev", authoredAt: 7 }];
+    const result = {
+      generation: 13, code: "ok", wrote: false, eligible: true, headOid: head, targets,
+      created: 0, conflicted: false, note: "", snapshot: repository.snapshot,
+    };
+    port.call.mockResolvedValueOnce({ repo: "repo-a", revert: result });
+    const preview = await api.revertCommits(keyA, [oid], head, false, repository.generation, 42);
+    expect(preview).toMatchObject({ wrote: false, eligible: true, targets });
+    expect(port.call).toHaveBeenCalledExactlyOnceWith({
+      sessionId: "session-a", op: "revertPreview", fields: { oids: [oid], expectedHead: head, confirm: false },
     });
 
-    const preview = await api.revertCommits(keyA, [oid], "a".repeat(40), false, repository.generation, 42);
-    expect(port.call.mock.calls[0][0]).toMatchObject({ op: "commitDetail", fields: { oid } });
-    expect(preview.wrote).toBe(false);
-    expect(preview.eligible).toBe(true);
-    expect(preview.targets).toEqual([{ oid, summary: "远端提交", authorName: "dev", authoredAt: 7 }]);
-    // 取消：一次写入都没有发出。
-    expect(port.call.mock.calls.map((call) => call[0].op)).toEqual(["commitDetail"]);
-
-    port.call
-      .mockResolvedValueOnce({
-        repo: "repo-a",
-        commit: {
-          generation: 14,
-          commit: { oid, parents: ["b".repeat(40)], summary: "远端提交", authorName: "dev", authorEmail: "d@e", authoredAt: 7, labels: [] },
-          body: "",
-          root: false,
-          merge: false,
-          selectedParent: null,
-          files: [],
-        },
-      })
-      .mockResolvedValueOnce(completed(snapshot({ generation: "g2", head: "d".repeat(40) })));
-
-    const done = await api.revertCommits(keyA, [oid], "a".repeat(40), true, repository.generation, 43);
-    expect(port.call.mock.calls.at(-1)?.[0]).toMatchObject({ op: "revert", fields: { oids: [oid], expectedHead: "a".repeat(40), confirm: true } });
-    expect(done.wrote).toBe(true);
-    expect(done.headOid).toBe("d".repeat(40));
-    // 实际创建了几个逆向提交由 v2 的 revert DTO 给，原生桥接暂未回传：留空，不填 0。
-    expect(done.created).toBeUndefined();
-    expect(done.note).toContain("原生桥接暂未回传");
+    const nextHead = "d".repeat(40);
+    port.call.mockResolvedValueOnce(completed(snapshot({ generation: "g2", head: nextHead }), {
+      revert: { ...result, wrote: true, headOid: nextHead, created: 1 },
+    }));
+    const done = await api.revertCommits(keyA, [oid], head, true, repository.generation, 43);
+    expect(port.call.mock.calls[1][0]).toMatchObject({ op: "revert", fields: { oids: [oid], expectedHead: head, confirm: true } });
+    expect(port.call).toHaveBeenCalledTimes(2);
+    expect(done).toMatchObject({ wrote: true, headOid: nextHead, created: 1, targets });
     expect(invoke).not.toHaveBeenCalled();
   });
 
-  it("撤销最近提交：预览读提交详情，确认后只发送一次写入", async () => {
-    const repository = await openHost();
-    const head = "e".repeat(40);
-    const detail = (parents: string[], summary: string) => ({
-      repo: "repo-a",
-      commit: {
-        generation: 13,
-        commit: { oid: head, parents, summary, authorName: "dev", authorEmail: "d@e", authoredAt: 3, labels: [] },
-        body: "",
-        root: parents.length === 0,
-        merge: false,
-        selectedParent: null,
-        files: [],
-      },
-    });
-
-    port.call.mockResolvedValueOnce(detail(["b".repeat(40)], "要撤销的提交"));
-    const preview = await api.undoCommit(keyA, head, false, repository.generation, 44);
-    expect(port.call.mock.calls[0][0]).toMatchObject({ op: "commitDetail", fields: { oid: head } });
-    expect(preview.wrote).toBe(false);
-    expect(preview.eligible).toBe(true);
-    expect(preview.summary).toBe("要撤销的提交");
-    expect(port.call).toHaveBeenCalledTimes(1);
-
-    port.call
-      .mockResolvedValueOnce(completed(snapshot({ generation: "g2", head: "b".repeat(40) })))
-      .mockResolvedValueOnce(detail(["b".repeat(40)], "要撤销的提交"));
-    const done = await api.undoCommit(keyA, head, true, repository.generation, 45);
-    expect(port.call.mock.calls[1][0]).toMatchObject({ op: "undoCommit", fields: { expectedHead: head, confirm: true } });
-    expect(done.wrote).toBe(true);
-    expect(done.headOid).toBe("b".repeat(40));
-    expect(done.parentOid).toBe("b".repeat(40));
-    expect(invoke).not.toHaveBeenCalled();
-  });
-
-  it("修订最近提交：预览读不到暂存区快照令牌，确认时明确拒绝而不发注定失败的写", async () => {
+  it("撤销最近提交：使用已核实的 HEAD 预览，经确认后发送一次写入", async () => {
     const repository = await openHost();
     const head = "a".repeat(40);
-    port.call.mockResolvedValueOnce({
-      repo: "repo-a",
-      commit: {
-        generation: 13,
-        commit: { oid: head, parents: ["b".repeat(40)], summary: "原说明", authorName: "dev", authorEmail: "d@e", authoredAt: 5, labels: [] },
-        body: "正文",
-        root: false,
-        merge: false,
-        selectedParent: null,
-        files: [{ path: "a.txt", originalPath: null, status: "M" }],
-      },
+    const parentOid = "b".repeat(40);
+    const result = {
+      generation: 13, code: "ok", wrote: false, eligible: true, headOid: head,
+      parentOid, summary: "要撤销的提交", reason: "", snapshot: repository.snapshot,
+    };
+    port.call.mockResolvedValueOnce({ repo: "repo-a", undo: result });
+    const preview = await api.undoCommit(keyA, head, false, repository.generation, 44);
+    expect(preview).toMatchObject({ wrote: false, eligible: true, summary: "要撤销的提交" });
+    expect(port.call).toHaveBeenCalledExactlyOnceWith({
+      sessionId: "session-a", op: "undoCommitPreview", fields: { expectedHead: head, confirm: false },
     });
 
-    const preview = await api.amendCommit(keyA, head, null, false, null, false, repository.generation, 46);
-    expect(port.call.mock.calls[0][0]).toMatchObject({ op: "commitDetail", fields: { oid: head } });
-    expect(preview.wrote).toBe(false);
-    expect(preview.stagedToken).toBeNull();
-    // 没有令牌就没有可确认的修订：预览直接给 eligible=false，并说清是原生桥接暂未回传、
-    // 该去远端终端执行，而不是让人反复重新预览去等一个永远拿不到的令牌。
-    expect(preview.eligible).toBe(false);
-    expect(preview.code).toBe("amend_token_unavailable");
-    expect(preview.note).toContain("远端暂存区快照不可用");
-    expect(preview.note).toContain("请在远端终端执行修订");
-    expect(preview.note).not.toContain("重新预览");
-    expect(preview.message).toBe("原说明\n\n正文");
-    expect(preview.files.map((file) => file.path)).toEqual(["a.txt"]);
-    // 预览为只读：一次写入都没有发出。
-    expect(port.call).toHaveBeenCalledTimes(1);
+    port.call.mockResolvedValueOnce(completed(snapshot({ generation: "g2", head: parentOid }), {
+      undo: { ...result, wrote: true, headOid: parentOid },
+    }));
+    const done = await api.undoCommit(keyA, head, true, repository.generation, 45);
+    expect(port.call.mock.calls[1][0]).toMatchObject({ op: "undoCommit", fields: { expectedHead: head, confirm: true } });
+    expect(done).toMatchObject({ wrote: true, headOid: parentOid, parentOid });
+    expect(invoke).not.toHaveBeenCalled();
+  });
 
-    port.call.mockResolvedValueOnce({
-      repo: "repo-a",
-      commit: {
-        generation: 13,
-        commit: { oid: head, parents: ["b".repeat(40)], summary: "原说明", authorName: "dev", authorEmail: "d@e", authoredAt: 5, labels: [] },
-        body: "正文",
-        root: false,
-        merge: false,
-        selectedParent: null,
-        files: [{ path: "a.txt", originalPath: null, status: "M" }],
-      },
+  it("修订最近提交：把远端预览的暂存令牌和原 HEAD 带回确认", async () => {
+    const repository = await openHost();
+    const head = "a".repeat(40);
+    const stagedToken = "7".repeat(64);
+    const result = {
+      generation: 13, code: "ok", wrote: false, eligible: true, headOid: head,
+      parentOid: "b".repeat(40), summary: "原说明", message: "原说明\n\n正文",
+      files: [{ path: "a.txt", originalPath: null, status: "M" }],
+      stagedPaths: ["staged.txt"], stagedToken, note: "", snapshot: repository.snapshot,
+    };
+    port.call.mockResolvedValueOnce({ repo: "repo-a", amend: result });
+    const preview = await api.amendCommit(keyA, head, null, true, null, false, repository.generation, 46);
+    expect(port.call).toHaveBeenCalledExactlyOnceWith({
+      sessionId: "session-a", op: "amendCommitPreview",
+      fields: { expectedHead: head, message: null, includeStaged: true, stagedToken: null, confirm: false },
     });
-    await expect(
-      api.amendCommit(keyA, head, "新说明", false, null, true, repository.generation, 47),
-    ).rejects.toMatchObject({ code: "amend_stale_index" });
-    // 没有令牌就不发写入：两次远端调用都是只读的 commitDetail。
-    expect(port.call.mock.calls.map((call) => call[0].op)).toEqual(["commitDetail", "commitDetail"]);
+    expect(preview).toMatchObject({ wrote: false, eligible: true, stagedToken, message: result.message });
+
+    const nextHead = "f".repeat(40);
+    port.call.mockResolvedValueOnce(completed(snapshot({ generation: "g2", head: nextHead }), {
+      amend: { ...result, wrote: true, headOid: nextHead, summary: "新说明", message: "新说明" },
+    }));
+    const done = await api.amendCommit(keyA, head, "新说明", true, preview.stagedToken, true, repository.generation, 47);
+    expect(port.call.mock.calls[1][0]).toMatchObject({
+      op: "amendCommit",
+      fields: { expectedHead: head, message: "新说明", includeStaged: true, stagedToken, confirm: true },
+    });
+    expect(done).toMatchObject({ wrote: true, headOid: nextHead, summary: "新说明" });
+    expect(port.call).toHaveBeenCalledTimes(2);
     expect(invoke).not.toHaveBeenCalled();
   });
 
@@ -493,43 +431,16 @@ describe("远端桥接：历史、分支、同步、stash、合并都走 op 白�
     expect(port.write).not.toHaveBeenCalled();
   });
 
-  it("命令面板的远端黑名单与桥接实际接通范围一致", async () => {
+  it("远端已接通的提交范围、发布、上游和提交并推送不再受旧命令拦截", async () => {
     const { readFileSync } = await import("node:fs");
     const source = readFileSync(new URL("../src/App.svelte", import.meta.url), "utf8");
-    const start = source.indexOf("const REMOTE_BLOCKED_COMMANDS = new Set([");
-    expect(start).toBeGreaterThanOrEqual(0);
-    const end = source.indexOf("]);", start);
-    const blocked = new Set([...source.slice(start, end).matchAll(/"([a-z]+\.?[a-zA-Z.]+)"/g)].map((match) => match[1]));
-
-    // 已接通：历史、分支标签、同步、stash、合并与提交范围内核对，不再被挡住。
-    for (const id of [
-      "view.history",
-      "view.files",
-      "files.quickOpen",
-      "files.search",
-      "file.reveal",
-      "terminal.new",
-      "terminal.toggle",
-      "task.stash",
-      "task.merge",
-      "task.abortMerge",
-      "task.branch",
-      "task.remote",
-      "sync.fetch",
-      "sync.pull",
-      "sync.push",
-      "branch.switch",
-      "branch.create",
-    ]) {
-      expect(blocked.has(id), id + " 已接通却被挡住").toBe(false);
-    }
-    // 仍然依赖本机能力或缺少桥接 op 的入口继续挡住。
-    for (const id of ["task.scope", "sync.upstream", "commit.push"]) {
-      expect(blocked.has(id), id + " 没有接通却放开了").toBe(true);
+    expect(source).not.toContain("REMOTE_BLOCKED_COMMANDS");
+    for (const id of ["task.scope", "task.publish", "sync.upstream", "commit.push"]) {
+      expect(source).toContain('case "' + id + '"');
     }
   });
 
-  it("远端差异一律不可按块暂存：桥接没有 patch 写入，界面拿到的是真实原因", async () => {
+  it("远端差异只有带真实快照和块证明才能进入局部暂存", async () => {
     const repository = await openHost();
     const patch = [
       "diff --git a/small.txt b/small.txt",
@@ -541,32 +452,34 @@ describe("远端桥接：历史、分支、同步、stash、合并都走 op 白�
       "",
     ].join("\n");
 
-    // 远端载荷即使标了 hunksStageable=true，也不被当成能力证据：块级写入根本发不出去。
     port.diff.mockResolvedValueOnce({ ...diffPage(patch), hunksStageable: true });
-    const capable = await api.loadDiff(keyA, "small.txt", false, repository.generation, 43);
-    expect(capable.hunks.map((hunk) => hunk.stageable)).toEqual([false]);
-    expect(capable.hunksStageableReason).toContain("远端暂不支持块级/逐行暂存");
+    const legacy = await api.loadDiff(keyA, "small.txt", false, repository.generation, 43);
+    expect(legacy.hunks.map((hunk) => hunk.stageable)).toEqual([false]);
+    expect(legacy.hunksStageableReason).toContain("没有为这份差异提供可核对的局部暂存快照");
 
-    // 远端自己给了原因就原样带上（例如只读的任务视图），不覆盖成更笼统的一句。
     port.diff.mockResolvedValueOnce({ ...diffPage(patch), hunksStageable: false, hunksStageableReason: "任务差异是只读视图，不能暂存。" });
     const plain = await api.loadDiff(keyA, "small.txt", true, repository.generation, 44);
     expect(plain.hunks[0].stageable).toBe(false);
     expect(plain.hunksStageableReason).toBe("任务差异是只读视图，不能暂存。");
 
-    // 真的去写也是 unsupported：界面显示的按钮状态与实际写入通道一致。
-    await expect(
-      api.stageHunks(keyA, "small.txt", false, [0], plain.snapshot, repository.generation, 45),
-    ).rejects.toMatchObject({ code: "remote_unsupported" });
-    await expect(
-      api.stageLines(keyA, "small.txt", false, [{ hunkIndex: 0, kind: "add", text: "one!" } as never], plain.snapshot, repository.generation, 46),
-    ).rejects.toMatchObject({ code: "remote_unsupported" });
-
-    // 这句话必须真的到达界面：App 把它交给 DiffView，DiffView 据此禁用「选行」/「暂存选中行」
-    // 并把同一句写进右键菜单（渲染层的断言见 tests/worktree.spec.ts）。
-    const { readFileSync } = await import("node:fs");
-    const app = readFileSync(new URL("../src/App.svelte", import.meta.url), "utf8");
-    expect(app).toContain("hunksStageableReason={diff?.hunksStageableReason ?? null}");
+    const token = "6".repeat(64);
+    port.diff.mockResolvedValueOnce({
+      ...diffPage(patch.replaceAll("small.txt", "current.txt")), hunksStageable: true,
+      snapshot: token, stageableHunks: [0],
+    });
+    const capable = await api.loadDiff(keyA, "current.txt", false, repository.generation, 45);
+    expect(capable.hunks.map((hunk) => hunk.stageable)).toEqual([true]);
+    expect(capable.snapshot).toBe(token);
+    port.call.mockResolvedValueOnce(completed(snapshot({ generation: "g2" })));
+    await api.stageHunks(keyA, "current.txt", false, [0], capable.snapshot, repository.generation, 46);
+    expect(port.call.mock.calls[0][0]).toMatchObject({
+      op: "patch", generation: "g1",
+      fields: { path: "current.txt", staged: false, snapshot: token, hunks: [0], original: null },
+    });
+    expect(port.call).toHaveBeenCalledTimes(1);
+    expect(invoke).not.toHaveBeenCalled();
   });
+
 });
 
 describe("远端审查：阶段声明与重复点击", () => {
@@ -617,40 +530,15 @@ describe("远端审查：阶段声明与重复点击", () => {
     expect(target.kind).toBe("opened");
     if (target.kind !== "opened") return;
 
-    const mergeSession = {
-      generation: 13,
-      operation: "merge",
-      canContinue: false,
-      canAbort: false,
-      source: "feature",
-      target: "main",
-      headOid: "f".repeat(40),
-      conflicts: [],
-      unresolved: 0,
-      note: "",
-      snapshot: {},
-    };
-    port.call
-      .mockResolvedValueOnce({ repo: "repo-a", merge: mergeSession })
-      .mockResolvedValueOnce(completed(snapshot({ generation: "g2", head: "f".repeat(40) })))
-      .mockResolvedValueOnce({
-        repo: "repo-a",
-        commit: {
-          generation: 13,
-          commit: { oid: "f".repeat(40), parents: ["a".repeat(40)], summary: "合并分支 feature", authorName: "dev", authorEmail: "d@e", authoredAt: 1, labels: [] },
-          body: "",
-          root: false,
-          merge: true,
-          selectedParent: "a".repeat(40),
-          files: [{ path: "a.txt", originalPath: null, status: "M" }],
-        },
-      });
+    const oid = "f".repeat(40);
+    port.call.mockResolvedValueOnce(completed(snapshot({ generation: "g2", head: oid }), {
+      merge: { generation: 13, operation: "merge", oid, summary: "合并分支 feature", files: ["a.txt"], snapshot: {} },
+    }));
 
     const done = await api.completeMerge(keyA, "合并分支 feature", target.repository.generation, 46, "merge");
     expect(done.operation).toBe("merge");
-    // 桥接的 mergeComplete 不会在原生审查账本里记合入提交，不能声明 merged。
-    expect(port.call.mock.calls[1][0]).toMatchObject({ op: "mergeComplete" });
-    expect(port.call.mock.calls.map((call) => call[0].op)).toEqual(["mergeSession", "mergeComplete", "commitDetail"]);
+    // 只有远端审查账本确认了阶段，界面才能声明已合入。
+    expect(port.call.mock.calls.map((call) => call[0].op)).toEqual(["mergeComplete"]);
 
     const sent = await api.remoteReturnReview(keyA);
     expect(review.returnReview).toHaveBeenLastCalledWith("review-3", "session-review");

@@ -80,7 +80,7 @@ describe("远端差异的按行暂存入口", () => {
 
     const pick = screen.getByRole("button", { name: "选择行" });
     expect(pick.hasAttribute("disabled"), "远端不支持块级写入时选行不能可用").toBe(true);
-    expect(pick.getAttribute("title")).toContain("远端暂不支持块级/逐行暂存");
+    expect(pick.getAttribute("title")).toContain("没有为这份差异提供可核对的局部暂存快照");
     // 禁用理由不能是「块被截断」：这份差异的块是完整的，只是远端写不进去。
     expect(pick.getAttribute("title")).not.toContain("截断");
 

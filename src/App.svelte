@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from "svelte";
-  import { api, listenEvent, pickDirectory, pickFile, type ClioraReviewRequest } from "./lib/api";
+  import { api, listenEvent, pickDirectory, pickFile, type ClioraReviewRequest, type LinkedWorktreeRemoval } from "./lib/api";
   import {
     commandAvailable,
     commandById,
@@ -156,6 +156,7 @@
   import ViewSwitcher from "./lib/components/ViewSwitcher.svelte";
   import {
     isRemoteRepositoryKey,
+    parseRemoteRepositoryKey,
     normalizeRemotePath,
     remoteReviewPort,
     repositoryBaseName,
@@ -597,7 +598,11 @@
    * 删除附属工作区的确认：第一次不带 force；Git 因未提交改动拒绝时升级成强制删除确认，
    * 用户再点一次才丢弃改动。当前打开的工作区不在这里删（入口直接禁用）。
    */
-  let worktreeRemoval = $state<{ repo: RecentRepo; head: RepoHead; force: boolean; busy: boolean; error: string | null } | null>(null);
+  let worktreeRemoval = $state<{
+    repo: RecentRepo; head: RepoHead; force: boolean; busy: boolean; error: string | null;
+    anchor?: string; checking?: boolean; preview?: LinkedWorktreeRemoval;
+  } | null>(null);
+  let worktreeRemovalRequest = 0;
   let recovery = $state<{ discard: (paths?: string[]) => Promise<void> } | null>(null);
   /**
    * 差异是否展开为完整文件（记在本机）：开启时按整份文件加上下文读取，暂存代码块暂不可用。
@@ -650,16 +655,6 @@
   /** 会访问远程、可以取消的同步动作。 */
   const REMOTE_PENDING = new Set(["fetch", "pull", "push", "publish", "associate"]);
 
-  /** 尚未桥接的仓库操作由命令分派统一拦截。 */
-  const REMOTE_BLOCKED_COMMANDS = new Set([
-    // 任务范围由本机 task_review 计划器给出；远端还没有同名桥接 op。
-    "task.scope",
-    "task.publish",
-    // v2 的 setUpstream / associateUpstream / deleteRemoteBranch 还没有列入桥接白名单。
-    "sync.upstream",
-    // 提交并推送要一次回两段结果，远端桥接按 op 分开执行，还没有对应 op。
-    "commit.push",
-  ]);
   /**
    * 切换仓库时可以让路的动作：只等网络的远程操作。
    * 断网或远程卡住时，切换会先停下当前仓库的远程命令（本地提交不受影响），而不是把用户锁在这个仓库里。
@@ -960,8 +955,6 @@
   });
   let paletteCommands = $derived(
     paletteItems(commandState)
-      // 远端仓库的可用范围见 REMOTE_BLOCKED_COMMANDS：仍依赖本机 Git、文件系统与终端的入口不出现在面板里。
-      .filter((item) => !(remoteKey !== null && REMOTE_BLOCKED_COMMANDS.has(item.id)))
       .map((item) => ({
       id: item.id,
       group: item.group,
@@ -1101,10 +1094,6 @@
     // 任务级 modal 层（任务弹窗或只读阅读窗口）占着单槽时，写入类命令不落到背景：
     // 键盘与 inert 已经挡住主要入口，这里兜住原生菜单与程序化调用（R3/R6）。
     if (taskLayerOpen && WRITE_COMMANDS.has(id)) return;
-    if (remoteKey !== null && REMOTE_BLOCKED_COMMANDS.has(id)) {
-      notice("远端仓库暂不支持这个操作（" + id + "）。");
-      return;
-    }
     switch (id) {
       case "view.changes":
         showChanges();
@@ -2137,10 +2126,10 @@
    * 分支弹层「打开此工作区」：弹层挡不住叠在上面的确认框（点确认框就算点在外面，弹层会收起），
    * 所以有草稿时先收起弹层，交给切换仓库同一条带关卡的打开路径；没有草稿照常由弹层自己打开。
    */
-  function switcherWorktreeGate(path: string): Promise<boolean> {
+  function switcherWorktreeGate(path: string, anchor?: string): Promise<boolean> {
     if (!hasLeaveDrafts() || (opened && samePath(opened.summary.path, path))) return Promise.resolve(true);
     closeSwitcher();
-    void tick().then(() => openRecent(path));
+    void tick().then(() => openRecent(path, undefined, anchor));
     return Promise.resolve(false);
   }
 
@@ -2812,6 +2801,10 @@
   async function runBatch(kind: "stage" | "unstage", paths: string[]) {
     const current = opened;
     if (!current || pending || reading || paths.length === 0) return;
+    if (isRemoteRepositoryKey(current.summary.path)) {
+      await (kind === "stage" ? stagePaths(paths) : unstagePaths(paths));
+      return;
+    }
     const verb = kind === "stage" ? "暂存" : "取消暂存";
     const failed: { path: string; message: string }[] = [];
     let latest: StatusSnapshot | null = null;
@@ -3049,6 +3042,8 @@
     if (taskLayerOpen) return;
     const current = opened;
     if (!current || pending || reading) return;
+    const remote = isRemoteRepositoryKey(current.summary.path);
+    const commitLabel = remote ? "远端提交" : "本地提交";
     const message = draft;
     if (!hasCommitSummary(message)) {
       banner = "请先填写提交摘要。";
@@ -3061,7 +3056,7 @@
       return;
     }
     pending = "commit-push";
-    phaseNote = "正在创建本地提交";
+    phaseNote = `正在创建${commitLabel}`;
     live = phaseNote;
     // 与「提交到本地」同源：新一次尝试开始就清掉上一次的行内原因。
     commitError = null;
@@ -3083,11 +3078,12 @@
         banner = null;
         live = result.summary;
       } else {
-        // 本地提交已经落地，失败只在推送：两个阶段分开说明，重试入口只推送（R6）。
         pushFailure = describeFailure(
           { code: "push_failed", message: result.pushError ?? "推送没有完成。" },
           "推送",
-          `本地提交 ${shortOid(result.oid)} 已完成，重试只推送，不会再次提交。`,
+          result.pushUnconfirmed
+            ? `${commitLabel} ${shortOid(result.oid)} 已完成。推送结果待确认，请重连核对。`
+            : `${commitLabel} ${shortOid(result.oid)} 已完成，重试只推送，不会再次提交。`,
         );
         phaseNote = null;
         banner = pushFailure;
@@ -3097,12 +3093,15 @@
       await loadSelectedDiff();
     } catch (error) {
       if (opened?.summary.path === current.summary.path) {
-        // 这里失败的是「先完成本地提交」那一段（推送失败走 pushError，不抛）。
-        // 两条提交路径因此给出同一份就地原因，而不是只有「提交到本地」这一条。
+        const code = normalizeError(error).code;
         commitError = handleMutationError(
           error,
-          "本地提交",
-          "推送还没有开始；草稿和已暂存内容都已保留，可以重试。",
+          commitLabel,
+          code === "write_pending"
+            ? "请重连核对当前提交回执。"
+            : code === "push_pending"
+              ? "请使用重试推送。"
+              : "推送还没有开始；草稿和已暂存内容都已保留，可以重试。",
         ).message;
       }
     } finally {
@@ -3113,11 +3112,15 @@
   async function retryPush() {
     const current = opened;
     if (!current || pending || reading) return;
+    const remote = isRemoteRepositoryKey(current.summary.path);
     pending = "push";
     phaseNote = "正在重试推送，不会再次提交";
     live = phaseNote;
     try {
-      const snapshot = current.snapshot.branch.upstream
+      if (remote && !api.remoteRepositoryState(current.summary.path)?.pushContinuation) {
+        throw { code: "stale", message: "当前分支或提交与待推送记录不同，请先切回相应提交。" };
+      }
+      const snapshot = remote || current.snapshot.branch.upstream
         ? await api.pushBranch(current.summary.path, current.generation, nextId())
         : await api.publishBranch(current.summary.path, "", current.generation, nextId());
       if (opened?.summary.path !== current.summary.path) return;
@@ -3133,7 +3136,9 @@
         pushFailure = handleMutationError(
           error,
           "推送",
-          "本地提交已保留；可以继续重试推送，不会再次提交。",
+          normalizeError(error).code === "write_pending"
+            ? "请重连核对当前推送回执。"
+            : `${remote ? "远端提交" : "本地提交"}已保留；可以继续重试推送，不会再次提交。`,
         ).message;
         banner = pushFailure;
       }
@@ -3992,7 +3997,7 @@
     return true;
   }
 
-  async function openRecent(path: string, onRequest?: (serial: number, request: Promise<OpenedRepository>) => void) {
+  async function openRecent(path: string, onRequest?: (serial: number, request: Promise<OpenedRepository>) => void, anchor?: string) {
     // 最近列表与快捷入口打开的都不是审查来源：旧来源不能跟到新仓库上。
     remoteReviewSource = null;
     // 任何确认层/任务弹窗打开时都不切换仓库：旧确认层不能留在新仓库上继续生效。
@@ -4020,7 +4025,8 @@
       if (serial !== readSerial) return;
       await api.cancelReads();
       if (serial !== readSerial) return;
-      const request = api.openRepository(path, nextId());
+      const target = anchor ? parseRemoteRepositoryKey(path) : null;
+      const request = anchor && target ? api.openLinkedWorktree(anchor, target.path) : api.openRepository(path, nextId());
       onRequest?.(serial, request);
       const openedRepo = await request;
       if (serial !== readSerial) return;
@@ -4374,16 +4380,42 @@
     if (repo.path === opened?.summary.path) return;
     closeSwitcher();
     worktreeRemoval = { repo, head, force: false, busy: false, error: null };
+    const target = parseRemoteRepositoryKey(repo.path);
+    if (!target) return;
+    const current = opened;
+    const anchor = current?.summary.path;
+    if (!current || !anchor || parseRemoteRepositoryKey(anchor)?.hostId !== target.hostId) {
+      worktreeRemoval = { ...worktreeRemoval, error: "请先打开这台 SSH 主机上的同一仓库。" };
+      return;
+    }
+    const request = ++worktreeRemovalRequest;
+    worktreeRemoval = { ...worktreeRemoval, anchor, checking: true };
+    void api.previewLinkedWorktreeRemoval(anchor, target.path, current.generation).then((preview) => {
+      if (request === worktreeRemovalRequest && worktreeRemoval?.repo.path === repo.path) {
+        worktreeRemoval = { ...worktreeRemoval, checking: false, preview };
+      }
+    }).catch((error) => {
+      if (request === worktreeRemovalRequest && worktreeRemoval?.repo.path === repo.path) {
+        worktreeRemoval = { ...worktreeRemoval, checking: false, error: normalizeError(error).message };
+      }
+    });
   }
 
   async function confirmRemoveWorktree() {
     const pending = worktreeRemoval;
     if (!pending || pending.busy) return;
+    if (isRemoteRepositoryKey(pending.repo.path) && (!pending.preview || !pending.anchor || opened?.summary.path !== pending.anchor)) return;
     worktreeRemoval = { ...pending, busy: true, error: null };
     try {
-      recent = await api.removeWorktree(pending.repo.path, pending.force, nextId());
+      if (pending.preview && pending.anchor && opened) {
+        applySnapshot(await api.removeLinkedWorktree(pending.anchor, pending.preview, pending.force, opened.generation));
+        recent = recent.filter((repo) => repo.path !== pending.repo.path);
+      } else {
+        recent = await api.removeWorktree(pending.repo.path, pending.force, nextId());
+      }
       worktreeRemoval = null;
-      notice(`已删除工作区 ${pending.repo.name}，分支${pending.head.branch ? ` ${pending.head.branch} ` : ""}和提交都保留在主仓库。`);
+      const branch = pending.preview ? pending.preview.branch : pending.head.branch;
+      notice(`已删除工作区 ${pending.repo.name}，分支${branch ? ` ${branch} ` : ""}和提交都保留在主仓库。`);
     } catch (error) {
       const failure = normalizeError(error);
       if (worktreeRemoval?.repo.path !== pending.repo.path) return;
@@ -5409,9 +5441,9 @@
       switchNote={pending !== null && SWITCH_INTERRUPTIBLE.has(pending) ? "正在进行远程操作；切到其他仓库会先停止它，本地提交不受影响。" : null}
       actionReason={writeLocked ? switchBlockedReason(commandState) : null}
       reviews={reviewSessionSummary()}
-      onSelect={(path) => {
+      onSelect={(path, anchor) => {
         closeSwitcher();
-        void openRecent(path);
+        void openRecent(path, undefined, anchor);
       }}
       onForget={forget}
       onCopyPath={copyPath}
@@ -5638,10 +5670,10 @@
                   scope={scope.label}
                   paths={scope.paths}
                   value={draft}
-                  disabled={writeLocked}
+                  disabled={writeLocked || remoteRepoState?.pending === true || remoteRepoState?.connected === false}
                   busy={pending}
                   error={commitError}
-                  pushError={pushFailure}
+                  pushError={pushFailure ?? (remoteRepoState?.pushContinuation ? "提交已完成，可以继续推送。" : null)}
                   onRetryPush={retryPush}
                   stageableCount={stageTargets.length}
                   onStageAll={() => runCommand("stage.all")}
@@ -6085,20 +6117,25 @@
     targets={[{
       icon: "folder",
       name: removal.repo.name,
-      detail: removal.repo.path,
-      tag: removal.head.branch ?? removal.head.detached ?? undefined,
+      detail: removal.preview?.target ?? removal.repo.remotePath ?? removal.repo.path,
+      tag: removal.preview
+        ? removal.preview.branch ?? (removal.preview.head ? shortOid(removal.preview.head) : undefined)
+        : removal.head.branch ?? removal.head.detached ?? undefined,
       tagTone: "info",
     }]}
     targetsLabel="要删除的工作区"
     notes={[
       ...(removal.force ? [{ tone: "warn" as const, text: "未提交的改动和未跟踪文件会被永久删除，本应用不能恢复。" }] : []),
-      { tone: "ok" as const, text: `分支${removal.head.branch ? ` ${removal.head.branch}` : ""}和已有提交都保留在主仓库里，可以随时重新检出。` },
+      { tone: "ok" as const, text: "分支和已有提交都保留在主仓库里，可以随时重新检出。" },
       ...(removal.head.mainPath ? [{ tone: "info" as const, text: `由主仓库执行 git worktree remove：${removal.head.mainPath}` }] : []),
     ]}
     confirmLabel={removal.force ? "强制删除" : "删除工作区"}
     confirmIcon="trash"
     busy={removal.busy}
     error={removal.error}
+    confirmBlocked={isRemoteRepositoryKey(removal.repo.path) && !removal.preview
+      ? (removal.checking ? "正在读取远端工作区预览。" : "请先核对远端工作区预览。")
+      : null}
     focusKey={removal.force}
     impact="worktree-remove"
     onConfirm={() => void confirmRemoveWorktree()}

@@ -112,7 +112,7 @@
     actionReason: string | null;
     /** 当前会话已有的跨 worktree 审阅进度；没有记录的工作区不虚构完成度。 */
     reviews?: WorktreeReviewSummary[];
-    onSelect: (path: string) => void;
+    onSelect: (path: string, anchor?: string) => void;
     onForget: (path: string) => void;
     onCopyPath: (path: string) => void;
     /** 删除附属工作区（确认后执行）；只对已识别为 worktree 的行出现。 */
@@ -199,6 +199,7 @@
   let headsLoading = $state(false);
   let statusError = $state<string | null>(null);
   let statusCheckedAt = $state<number | null>(null);
+  let remoteOverview = $state<{ anchor: string; paths: Set<string> } | null>(null);
 
   let recentKeys = $derived(new Set(repos.map((repo) => normalizeRepoPath(repo.path))));
   let visibleItems = $derived.by(() => {
@@ -316,9 +317,15 @@
     statusLoading = true;
     statusError = null;
     try {
-      const overview = await Promise.race([requestOverview(paths), closed]);
-      if (!overview || !alive()) return;
-      const items = overview.items ?? [];
+      const anchor = isRemoteRepositoryKey(currentPath) ? currentPath : null;
+      const overviews = await Promise.race([
+        Promise.all([requestOverview(paths), anchor ? api.linkedWorktreeOverview(anchor) : null]),
+        closed,
+      ]);
+      if (!overviews || !alive() || (anchor && currentPath !== anchor)) return;
+      const [local, remote] = overviews;
+      remoteOverview = anchor && remote ? { anchor, paths: new Set(remote.items.map((item) => item.path)) } : null;
+      const items = [...(local.items ?? []), ...(remote?.items ?? [])];
       const answered = new Set(items.map((item) => normalizeRepoPath(item.path)));
       // 本次没有结果的最近项不再沿用旧状态；枚举出来的工作区（不在请求里）保留自己的结果。
       for (const path of paths) {
@@ -339,7 +346,7 @@
       for (const key of answered) confirmedItems.add(key);
       itemsVersion += 1;
       pruneCache();
-      statusCheckedAt = overview.checkedAtMs ?? Date.now();
+      statusCheckedAt = Math.max(local.checkedAtMs ?? 0, remote?.checkedAtMs ?? 0) || Date.now();
     } catch (error) {
       if (!alive()) return;
       statusError = errorText(error);
@@ -466,6 +473,7 @@
   function choose(row: WorktreeRow | undefined) {
     if (!row || reasonFor(row)) return;
     if (row.current) onClose();
+    else if (remoteOverview?.paths.has(row.path)) onSelect(row.path, remoteOverview.anchor);
     else onSelect(row.path);
   }
 

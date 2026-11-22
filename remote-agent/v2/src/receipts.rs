@@ -40,6 +40,8 @@ pub struct Receipt {
     pub head: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_outcome: Option<String>,
     pub generation: u64,
     pub at_ms: u64,
 }
@@ -63,6 +65,7 @@ impl Receipt {
             before_head,
             head: None,
             branch: None,
+            review_outcome: None,
             generation,
             at_ms: now_ms(),
         }

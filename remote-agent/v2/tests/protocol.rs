@@ -1029,6 +1029,16 @@ fn a_bound_task_keeps_history_and_files_available_and_pages_the_net_diff() {
     assert_eq!(review["review"]["headOid"], json!(head));
     assert_eq!(review["review"]["commitCount"], json!(1));
     assert_eq!(review["review"]["untrackedFiles"], json!(1));
+    let first_token = agent.ok("task-token", "taskReviewToken", json!({
+        "repo": repo, "baseline": baseline, "head": head, "path": "note.txt",
+    }))["token"]["token"].clone();
+    assert!(first_token.is_string());
+    assert_eq!(
+        agent.error_code("task-wrong-head", "diff", json!({
+            "repo": repo, "view": "task", "baseline": baseline, "head": baseline, "path": "note.txt",
+        })),
+        "cursor_expired",
+    );
     let mut pages = Vec::new();
     let mut cursor = Value::Null;
     let mut offset = 0;
@@ -1089,6 +1099,11 @@ fn a_bound_task_keeps_history_and_files_available_and_pages_the_net_diff() {
     let refreshed = agent.ok("task-status", "status", json!({ "repo": repo }));
     assert_eq!(refreshed["baseline"], json!(baseline));
     assert_eq!(refreshed["reviewFiles"], opened["reviewFiles"]);
+    let changed = agent.ok("task-token-updated", "taskReviewToken", json!({
+        "repo": repo, "baseline": baseline, "head": head, "path": "note.txt",
+    }));
+    assert!(changed["token"]["token"].is_string());
+    assert_ne!(changed["token"]["token"], first_token);
 }
 
 #[test]
@@ -1837,6 +1852,7 @@ fn merge_conflict_blocks_completion_until_the_conflict_is_resolved() {
         }),
     );
     assert_eq!(started["merge"]["operation"], json!("merge"));
+    assert!(started["receipt"]["reviewOutcome"].is_null());
     assert_eq!(started["merge"]["unresolved"], json!(1));
     assert_eq!(started["merge"]["conflicts"][0]["path"], json!("a.txt"));
     assert_eq!(started["merge"]["canContinue"], json!(false));
@@ -1894,6 +1910,12 @@ fn merge_conflict_blocks_completion_until_the_conflict_is_resolved() {
         }),
     );
     assert_eq!(completed["merge"]["operation"], json!("merge"));
+    assert_eq!(completed["receipt"]["reviewOutcome"], json!("merged"));
+    let recovered = agent.ok("merge-receipt", "receipt", json!({
+        "repo":repo, "operationId":"op-merge-complete-1",
+    }));
+    assert_eq!(recovered["receipt"]["reviewOutcome"], json!("merged"));
+    assert_eq!(recovered["receipt"]["head"], completed["merge"]["oid"]);
     assert!(!completed["merge"]["oid"].as_str().unwrap().is_empty());
     assert!(completed["merge"]["snapshot"]["files"]
         .as_array()

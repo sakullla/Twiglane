@@ -1029,7 +1029,6 @@ pub(crate) struct AgentArtifact {
     #[allow(dead_code)]
     pub(crate) signature: String,
     /// 对 `twiglane-agent-v2 sha256:<digest>\n` 的发布签名，供连接器复核。
-    #[allow(dead_code)] // 仓库会话接入 Cliora v2 连接器时消费。
     pub(crate) digest_signature: String,
     pub(crate) version: String,
 }
@@ -1054,11 +1053,8 @@ pub(crate) struct AgentProbe {
     /// 远端组件自述（`--probe` 的 JSON）：协议、os/arch 与版本。
     pub(crate) agent: Option<Value>,
     /// 原探测使用的 SSH 配置和实际对端主机密钥。
-    #[allow(dead_code)] // 仓库会话接入验证后的连接时消费。
     pub(crate) peer_revision: String,
-    #[allow(dead_code)] // 仓库会话的持久工作树身份与它绑定。
     pub(crate) peer_identity: String,
-    #[allow(dead_code)] // 仓库会话接入验证后的连接时消费。
     shell: transport::Shell,
 }
 
@@ -1066,9 +1062,10 @@ pub(crate) struct AgentProbe {
 ///
 /// 目录里是冻结配置、known_hosts 副本与一次性 askpass 脚本，必须活到会话结束，
 /// 因此与传输一起持有，不能在使用后提前释放。
+#[cfg(test)]
 pub(crate) struct AgentSession {
     pub(crate) transport: crate::remote_worktree_transport::AgentTransport,
-    pub(crate) folder: tempfile::TempDir,
+    _folder: tempfile::TempDir,
 }
 
 /// 只在测试里指定 ssh 可执行文件与环境；生产一律走 PATH 上的 ssh。
@@ -1093,19 +1090,6 @@ impl RemoteSsh {
     pub(crate) fn artifacts(&self) -> PathBuf {
         self.artifacts.clone()
     }
-}
-
-/// 按 Cliora 的共享主机标识找到本机主机簿里对应的目标。
-///
-/// 只有「同一台远端账号」才共用连接身份；总开关关闭或逐台停用时没有可用目标，
-/// 调用方据此回退内嵌 v1，而不是绕过开关自己连。
-pub(crate) fn shared_target(store: &AppStore, shared_host_id: &str) -> Option<SshTarget> {
-    if !store.remote_ssh_enabled() {
-        return None;
-    }
-    store.remote_ssh_targets().into_iter().find(|target| {
-        target.enabled && target.shared_host_id.as_deref() == Some(shared_host_id)
-    })
 }
 
 /// 目标平台规范化：远端探测的 system/architecture 与产物命名对齐。
@@ -1150,6 +1134,7 @@ pub(crate) async fn probe_agent(
 }
 
 /// 拉起 v2 会话：命令串先核对远端已安装组件的摘要，标准输入输出此后专属于 agent 协议。
+#[cfg(test)]
 pub(crate) async fn open_session(
     store: &AppStore,
     ssh: &RemoteSsh,
@@ -1171,12 +1156,11 @@ pub(crate) async fn open_session(
         .map_err(|_| ssh_unavailable())?;
     Ok(AgentSession {
         transport,
-        folder,
+        _folder: folder,
     })
 }
 
 /// 预备通过原探测验证的同一 SSH 连接，供仓库协议接管三条标准管道。
-#[allow(dead_code)] // 仓库会话接入时消费。
 pub(crate) async fn prepare_session(
     store: &AppStore,
     ssh: &RemoteSsh,
@@ -1190,7 +1174,6 @@ pub(crate) async fn prepare_session(
 }
 
 /// 保留用户确认时的探测，传输产物前验证同一个 SSH 连接。
-#[allow(dead_code)] // 仓库会话接入时消费。
 pub(crate) async fn install_verified_artifact(
     store: &AppStore,
     ssh: &RemoteSsh,
@@ -1206,6 +1189,7 @@ pub(crate) async fn install_verified_artifact(
 }
 
 /// 安装 v2 产物：上传后由远端脚本核对摘要并原子替换，进度按已写入字节回传。
+#[cfg(test)]
 pub(crate) async fn install_artifact(
     store: &AppStore,
     ssh: &RemoteSsh,

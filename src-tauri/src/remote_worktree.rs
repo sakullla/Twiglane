@@ -13,20 +13,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::{ipc::Channel, State};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use uuid::Uuid;
 
 use crate::error::AppError;
-use crate::remote_ssh::{self, AgentArtifact, RemoteSsh};
+use crate::remote_ssh::{self, AgentArtifact, AgentProbe, RemoteSsh};
 use crate::remote_worktree_transport::{AgentTransport, ScopedChild};
-use crate::state::AppStore;
+use crate::state::{AppStore, SshTarget};
 
 const FLAG: &str = "--twiglane-remote-v1";
-static AGENT: &[u8] = include_bytes!("../../remote-agent/agent");
-const SIGNATURE: Option<&str> = option_env!("TWIGLANE_REMOTE_AGENT_SIGNATURE");
-/// 内嵌 v1 组件在界面上的版本标签；v2 一律用清单里的真实版本。
-const V1_VERSION: &str = "v1";
 /// v2 差异一页的解析行数：分页只切远端行窗口，前端看到的仍是拼接后的完整 unified 文本。
 const V2_DIFF_PAGE_LINES: u64 = 2000;
 
@@ -92,23 +88,15 @@ pub struct OpenRequest {
     review_id: Option<String>,
 }
 
-/// 这一次打开用的是哪个远端组件。审查基线只有 v1 支持，因此它同时决定回退条件。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum AgentKind {
-    V1,
-    V2,
-}
-
-
 #[derive(Clone, PartialEq, Eq)]
 struct InstallTarget {
-    provider: AgentKind,
     review_id: Option<String>,
     target_id: String,
     revision: String,
     peer: String,
     path: String,
-    /// 待安装组件的版本与字节数：界面上的「安装 vX」与进度总量都取这里，不再写死 v1。
+    baseline: Option<String>,
+    digest: String,
     version: String,
     size: u64,
 }
@@ -118,29 +106,27 @@ enum Opened {
     NeedsInstall(InstallTarget),
 }
 
-/// 远端组件来源：优先本机已发行的 v2 产物，否则回退内嵌的 v1。
-enum Provider {
-    V2 { dir: PathBuf },
-    /// 回退原因只用于测试断言与排查：它说明为什么这台机器用不上 v2 产物。
-    V1Embedded {
-        #[allow(dead_code)]
-        reason: String,
-    },
-}
+/// 本机保存的目标与 Cliora 主机簿各自有独立的身份空间。
+const NATIVE_TARGET_PREFIX: &str = "native:";
 
-/// 选出本机可用的 v2 产物目录：显式目录（`TWIGLANE_AGENT_V2_DIR`）→ 资源目录/agent-v2。
-///
-/// 只判断「本机有没有一份可读的清单」；远端架构是否在清单里要等探测之后才知道，
-/// 由 [`select_v2_artifact`] 决定，缺失时同样回退内嵌 v1 并给出原因。
-fn select_provider(v2_dir: Option<PathBuf>, resources: Option<PathBuf>) -> Provider {
-    let mut reason = String::from("本机没有远端组件 v2 产物（发行包不含 agent-v2 清单）");
-    for dir in [v2_dir, resources].into_iter().flatten() {
-        match remote_ssh::manifest_ready(&dir) {
-            Ok(()) => return Provider::V2 { dir },
-            Err(error) => reason = error.message,
+impl Target {
+    fn native(target: &crate::state::SshTarget) -> Self {
+        Self {
+            target_id: format!(
+                "{NATIVE_TARGET_PREFIX}{}",
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&target.id)
+            ),
+            target_revision: target.revision.to_string(),
+            name: target.display_name.clone(),
+            host: target.host.clone(),
+            user: target.user.clone(),
+            port: target.port,
+            auth_method: target.auth_method.clone(),
+            default_path: target.default_path.clone(),
+            effective_host: None,
+            unavailable_reason: (!target.enabled).then(|| "这台 Twiglane SSH 主机已停用。".into()),
         }
     }
-    Provider::V1Embedded { reason }
 }
 
 
@@ -208,6 +194,7 @@ struct Session {
     repo: String,
     target: Target,
     root: String,
+    worktree_identity: Option<String>,
     peer_identity: String,
     baseline: Option<String>,
     /// 远端组件是否声明了按块/按行写入（agent v2 的 `patch`）。只由 `open` 返回的
@@ -216,26 +203,32 @@ struct Session {
     /// 实际使用的组件版本（v1 为 `v1`，v2 为清单/握手给出的版本）。
     agent_version: String,
     /// v2 写入令牌：open/status/diff 都会刷新，写入必须带最新值。v1 会话始终为空。
-    state_token: Mutex<Option<String>>,
+    state_token: Mutex<SessionState>,
     /// v2 会话的私有目录（冻结配置、known_hosts 副本与一次性 askpass）必须活到会话结束。
     /// 只作为生命周期守卫持有，代码不读取它。
     _session_dir: Option<tempfile::TempDir>,
 }
 
+#[derive(Default)]
+struct SessionState {
+    status_request: u64,
+    last_state: Option<(u64, String)>,
+}
+
 impl Session {
     /// 记录远端刷新出来的写入令牌。v1 的响应里没有这个字段，因此保持为空。
-    fn remember_state(&self, value: &Value) {
-        if let Some(token) = value.get("stateToken").and_then(Value::as_str) {
-            let mut slot = self.state_token.lock().unwrap_or_else(|e| e.into_inner());
-            *slot = Some(token.to_string());
+    fn remember_state(&self, value: &Value, status_request: Option<u64>) -> Result<()> {
+        let mut state = self.state_token.lock().unwrap_or_else(|e| e.into_inner());
+        if status_request.is_some_and(|request| request != state.status_request) {
+            return Err(AppError::new("stale_state", "较旧的远端状态响应已丢弃。"));
         }
-    }
-
-    fn state_token(&self) -> Option<String> {
-        self.state_token
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        if let (Some(generation), Some(token)) = (value["generation"].as_u64(), value["stateToken"].as_str()) {
+            if state.last_state.as_ref().is_some_and(|(seen, _)| *seen > generation) {
+                return Err(AppError::new("stale_state", "较旧的远端状态响应已丢弃。"));
+            }
+            state.last_state = Some((generation, token.to_string()));
+        }
+        Ok(())
     }
 
     fn protocol(&self) -> u32 {
@@ -246,13 +239,17 @@ impl Session {
     /// 与最新的 `stateToken`，绝不把字符串 generation 发过去。
     fn with_generation(&self, fields: &mut Value, generation: Option<&str>) -> bool {
         if self.protocol() == 2 {
-            let Some(token) = self.state_token() else {
+            let state = self.state_token.lock().unwrap_or_else(|e| e.into_inner());
+            let Some((current, token)) = state.last_state.as_ref() else {
                 return false;
             };
-            fields["stateToken"] = json!(token);
-            if let Some(generation) = generation.and_then(|value| value.parse::<u64>().ok()) {
-                fields["generation"] = json!(generation);
+            if let Some(expected) = generation {
+                if expected.parse::<u64>().ok() != Some(*current) {
+                    return false;
+                }
+                fields["generation"] = json!(current);
             }
+            fields["stateToken"] = json!(token);
         } else if let Some(generation) = generation {
             fields["generation"] = json!(generation);
         }
@@ -276,22 +273,32 @@ impl Session {
     }
 
     async fn status_for(&self, baseline: Option<&str>) -> Result<Value> {
+        let status_request = {
+            let mut state = self.state_token.lock().unwrap_or_else(|e| e.into_inner());
+            state.status_request = state.status_request.wrapping_add(1);
+            state.status_request
+        };
         let mut fields = json!({"repo":self.repo});
         if let Some(baseline) = baseline {
             fields["baseline"] = json!(baseline);
         }
         let result = self.agent.rpc("status", fields).await?;
-        self.remember_state(&result);
+        if result["repo"].as_str() != Some(&self.repo)
+            || self.worktree_identity.as_ref().is_some_and(|identity| {
+                result["worktreeIdentity"].as_str() != Some(identity)
+                    || result["worktreePath"].as_str() != Some(&self.root)
+            })
+        {
+            return Err(AppError::new("target_changed", "远端工作树身份已变化。"));
+        }
+        self.remember_state(&result, Some(status_request))?;
         // v2 把状态放在 `snapshot` 里；拍平成 v1 视图后，前端与写入核对都用同一份形状。
         let result = if self.protocol() == 2 {
             flatten_v2(&result)?
         } else {
             result
         };
-        if result.get("repo").and_then(Value::as_str) == Some(&self.repo) {
-            return Ok(result);
-        }
-        Err(AppError::new("target_changed", "远端工作树身份已变化。"))
+        Ok(result)
     }
 }
 
@@ -326,10 +333,13 @@ fn flatten_v2(result: &Value) -> Result<Value> {
         "branch": branch["name"],
         "files": files,
     });
-    for key in ["root", "name"] {
+    for key in ["root", "name", "baseline", "worktreeIdentity", "reviewFiles", "reviewFilesTruncated", "reviewError", "watchDegraded"] {
         if let Some(value) = result.get(key) {
             view[key] = value.clone();
         }
+    }
+    if let Some(path) = result.get("worktreePath") {
+        view["root"] = path.clone();
     }
     Ok(view)
 }
@@ -462,6 +472,9 @@ fn remote_error(code: &str) -> AppError {
         "remote_disabled" => "请先在 Cliora 中启用 SSH 主机。",
         "database_unavailable" => "无法读取 Cliora 的主机配置。",
         "target_unavailable" | "target_changed" => "SSH 主机配置已变化，请重新选择主机。",
+        "worktree_changed" => "远端工作树身份已变化，请重新打开。",
+        "unsupported_action" | "remote_bootstrap_failed" => "当前 Cliora 连接器无法启动此远端组件，请检查远端环境与版本。",
+        "probe_required" | "ssh_peer_unverified" => "远端主机身份未确认，请重新连接后重试。",
         "password_required" => "请先在 Cliora 中为该主机保存 SSH 密码。",
         "invalid_artifact" | "development_artifact_unavailable" => {
             "远端组件的版本或验证信息不匹配。"
@@ -611,7 +624,10 @@ async fn bounded_output<A: tokio::io::AsyncRead + Unpin>(pipe: A, limit: u64) ->
 }
 
 async fn query(path: &Path, action: &str, target: Option<&Target>) -> Result<Value> {
-    let mut cmd = command(path, action, target);
+    query_command(command(path, action, target)).await
+}
+
+async fn query_command(mut cmd: Command) -> Result<Value> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -637,6 +653,19 @@ async fn query(path: &Path, action: &str, target: Option<&Target>) -> Result<Val
             "需要安装支持 Twiglane 远端连接的 Cliora 版本。",
         )
     })
+}
+
+async fn connector_capability(helper: &Path, capability: &str) -> Result<()> {
+    let version = query(helper, "version", None).await?;
+    if version["protocol"].as_u64() != Some(1)
+        || !version["capabilities"].as_array().is_some_and(|caps| caps.iter().any(|cap| cap.as_str() == Some(capability)))
+    {
+        return Err(AppError::new(
+            "cliora_incompatible",
+            "请更新 Cliora，以连接支持完整仓库操作和审查回执的远端组件。",
+        ));
+    }
+    Ok(())
 }
 
 async fn list(path: &Path) -> Result<Vec<Target>> {
@@ -686,69 +715,53 @@ fn publish(
     });
 }
 
-fn source_signature() -> Option<&'static str> {
-    SIGNATURE
-        .filter(|value| !value.is_empty())
-        .or(if cfg!(debug_assertions) {
-            Some("development")
-        } else {
-            None
-        })
+fn component_command(
+    path: &Path,
+    action: &str,
+    target_id: &str,
+    peer_revision: &str,
+    artifact: &AgentArtifact,
+) -> Result<Command> {
+    if artifact.digest_signature.is_empty() {
+        return Err(AppError::new(
+            "agent_signature_missing",
+            "当前 Twiglane 构建缺少 Cliora 所需的远端组件发布证明，请更新 Twiglane。",
+        ));
+    }
+    let mut cmd = command(path, action, None);
+    cmd.args([
+        target_id,
+        peer_revision,
+        &artifact.sha256,
+        &artifact.digest_signature,
+    ]);
+    Ok(cmd)
 }
 
 async fn upload(
-    path: &Path,
-    target: &Target,
-    digest: &str,
-    signature: &str,
+    mut command: Command,
+    artifact: &AgentArtifact,
     progress: &Channel<Progress>,
 ) -> Result<()> {
-    publish(progress, "installing", Some(0), Some(AGENT.len() as u64));
-    let mut cmd = command(path, "install", Some(target));
-    cmd.args([digest, signature])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = ScopedChild::spawn(&mut cmd).map_err(|_| remote_error("ssh_failed"))?;
-    let mut stdin = child.take_stdin().unwrap();
-    let stdout = child.take_stdout().unwrap();
-    let stderr = child.take_stderr().unwrap();
-    // Own the pipe so completing the write delivers EOF to the installer.
+    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = ScopedChild::spawn(&mut command).map_err(|_| remote_error("ssh_failed"))?;
+    let mut stdin = child.take_stdin().ok_or_else(|| remote_error("ssh_failed"))?;
+    let stdout = child.take_stdout().ok_or_else(|| remote_error("ssh_failed"))?;
+    let stderr = child.take_stderr().ok_or_else(|| remote_error("ssh_failed"))?;
+    let total = artifact.bytes.len() as u64;
+    publish(progress, "installing", Some(0), Some(total));
     let write = async move {
-        stdin
-            .write_all(AGENT)
-            .await
-            .map_err(|_| remote_error("ssh_failed"))
-    };
-    let progress_output = async {
-        let stdout = stdout.take(128 * 1024);
-        let mut lines = BufReader::new(stdout).lines();
-        let mut installed = false;
-        while let Some(line) = lines
-            .next_line()
-            .await
-            .map_err(|_| remote_error("ssh_failed"))?
-        {
-            let value: Value = serde_json::from_str(&line)
-                .map_err(|_| AppError::new("remote_protocol", "远端安装回执格式无效。"))?;
-            if let Some(received) = value["receivedBytes"].as_u64() {
-                if received <= AGENT.len() as u64 {
-                    publish(
-                        progress,
-                        "installing",
-                        Some(received),
-                        Some(AGENT.len() as u64),
-                    );
-                }
-            } else if value["installed"].as_bool() == Some(true) {
-                installed = value["agentSha256"].as_str() == Some(digest);
-            }
+        let mut sent = 0;
+        for chunk in artifact.bytes.chunks(64 * 1024) {
+            stdin.write_all(chunk).await.map_err(|_| remote_error("ssh_failed"))?;
+            sent += chunk.len() as u64;
+            publish(progress, "installing", Some(sent), Some(total));
         }
-        Ok(installed)
+        Ok::<_, AppError>(())
     };
-    let (write_result, installed, stderr, status) = tokio::join!(
+    let (written, stdout, stderr, status) = tokio::join!(
         write,
-        progress_output,
+        bounded_output(stdout, 128 * 1024),
         bounded_output(stderr, 64 * 1024),
         child.wait()
     );
@@ -756,338 +769,284 @@ async fn upload(
     if !status.success() {
         return Err(output_error(&stderr?));
     }
-    write_result?;
-    if installed? {
+    written?;
+    let receipt: Value = serde_json::from_slice(&stdout?)
+        .map_err(|_| AppError::new("remote_protocol", "远端安装回执格式无效。"))?;
+    if receipt["installed"].as_bool() == Some(true)
+        && receipt["agentSha256"].as_str() == Some(&artifact.sha256)
+    {
         return Ok(());
     }
-    Err(AppError::new(
-        "remote_protocol",
-        "远端安装尚未产生可核实的回执。",
-    ))
-}
-
-fn start(path: &Path, target: &Target, digest: &str, signature: &str) -> Result<AgentTransport> {
-    let mut cmd = command(path, "connect", Some(target));
-    cmd.args([digest, signature]);
-    AgentTransport::spawn(&mut cmd)
+    Err(AppError::new("remote_protocol", "远端安装尚未产生可核实的回执。"))
 }
 
 fn uuid(value: &str) -> bool {
     Uuid::parse_str(value).is_ok_and(|parsed| parsed.to_string() == value)
 }
 
+/// 接收 POSIX 根路径或平台中立的 Windows 盘符路径。Git 相对路径不允许伪装成绝对路径。
 fn valid_path(value: &str, absolute: bool) -> bool {
-    (value.starts_with('/') == absolute)
-        && !value.is_empty()
-        && !value.contains('\0')
-        && value.len() <= 4096
+    if value.is_empty() || value.len() > 4096 || value.chars().any(char::is_control) {
+        return false;
+    }
+    let drive = value.as_bytes().get(..3).is_some_and(|bytes| {
+        bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'/' | b'\\')
+    });
+    if !absolute {
+        return !drive && !value.starts_with('/');
+    }
+    let tail = if let Some(tail) = value.strip_prefix('/') {
+        tail
+    } else if drive && value.as_bytes()[2] == b'/' && !value.contains('\\') {
+        &value[3..]
+    } else {
+        return false;
+    };
+    tail.is_empty() || tail.split('/').all(|part| !matches!(part, "" | "." | ".."))
 }
 
 fn probe_identity(value: &Value) -> Result<&str> {
-    value
-        .as_str()
+    value.as_str()
         .filter(|value| {
             value.len() == 64
-                && value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                && value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         })
-        .ok_or_else(|| {
-            AppError::new(
-                "cliora_incompatible",
-                "请更新 Cliora，以核对实际 SSH 主机身份。",
-            )
-        })
+        .ok_or_else(|| AppError::new("cliora_incompatible", "请更新 Cliora，以核对实际 SSH 主机身份。"))
 }
 
-/// 本机有 v2 产物却握不上手：这是明确的协议不匹配，既不回退 v1，也不伪造安装提示。
 fn protocol_mismatch() -> AppError {
     AppError::new(
         "remote_protocol_mismatch",
-        "远端组件与本次会话的协议版本不一致，已停止打开；请更新或重新安装远端组件。",
+        "远端组件与本次会话所需的能力不一致，请更新或重新安装远端组件。",
     )
 }
 
-/// 一次 v2 打开计划：本机主机簿里的目标、远端已安装摘要与选中的产物。
+enum V2Route {
+    Native(Box<(SshTarget, AgentProbe)>),
+    Cliora(PathBuf),
+}
+
 struct V2Plan {
-    host: crate::state::SshTarget,
+    route: V2Route,
+    target: Target,
+    peer_revision: String,
+    peer_identity: String,
     installed: Option<String>,
+    system: String,
+    architecture: String,
     artifact: AgentArtifact,
 }
 
-/// 决定这次打开能不能走 v2。返回 `Ok(None)` 表示「本机不具备 v2 条件」，由内嵌 v1 接手：
-/// 主机不在自有主机簿（或总开关关闭）、自有 SSH 连不上、本机没有该远端架构的产物。
-/// 一旦确认要用本机 v2 组件，后面的失败都是明确错误，不再回退、也不伪造安装提示。
-async fn plan_v2(access: &V2Access<'_>, dir: &Path, target_id: &str) -> Result<Option<V2Plan>> {
-    let Some(host) = remote_ssh::shared_target(access.store, target_id) else {
-        return Ok(None);
-    };
-    // 自有 SSH 连不上不等于 v2 组件有问题：这条主机可能还能经 Cliora 走 v1。
-    let Ok(probe) = remote_ssh::probe_agent(access.store, access.ssh, &host).await else {
-        return Ok(None);
-    };
-    // 远端自述的平台必须与探测到的 uname 一致，否则装的是另一台机器的组件。
-    if let Some(agent) = &probe.agent {
-        let declared = remote_ssh::platform(
-            agent["os"].as_str().unwrap_or_default(),
-            agent["arch"].as_str().unwrap_or_default(),
-        );
-        let probed = remote_ssh::platform(&probe.system, &probe.architecture);
-        if declared.is_none() || declared != probed {
-            return Err(AppError::new(
-                "remote_protocol_mismatch",
-                "远端已安装的组件不是这台主机的平台，请先重新安装远端组件。",
-            ));
+fn select_artifact(access: &V2Access<'_>, system: &str, architecture: &str) -> Result<AgentArtifact> {
+    let bundled = access.ssh.artifacts();
+    let mut last_error = None;
+    for dir in access.v2_dir.as_ref().into_iter().chain(std::iter::once(&bundled)) {
+        match remote_ssh::manifest_ready(dir) {
+            Ok(()) => return remote_ssh::select_agent(dir, system, architecture),
+            Err(error) => last_error = Some(error),
         }
     }
-    // 本机没有这个远端架构的产物：回退内嵌 v1，并且一个字节都没有上传。
-    let Ok(artifact) = remote_ssh::select_agent(dir, &probe.system, &probe.architecture) else {
-        return Ok(None);
+    Err(last_error.expect("one bundled artifact path"))
+}
+
+fn check_target(target: &Target, revision: &str) -> Result<()> {
+    if let Some(reason) = &target.unavailable_reason {
+        return Err(AppError::new("target_unavailable", reason));
+    }
+    if target.target_revision != revision {
+        return Err(remote_error("target_changed"));
+    }
+    Ok(())
+}
+
+async fn plan_v2(
+    explicit_helper: Option<&Path>,
+    access: &V2Access<'_>,
+    request: &OpenRequest,
+    source: Option<&review::Source>,
+) -> Result<V2Plan> {
+    if let Some(encoded) = request.target_id.strip_prefix(NATIVE_TARGET_PREFIX).filter(|_| source.is_none()) {
+        let id = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(encoded)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .ok_or_else(|| remote_error("target_unavailable"))?;
+        let host = access.store.remote_ssh_enabled()
+            .then(|| access.store.remote_ssh_target(&id))
+            .flatten()
+            .ok_or_else(|| remote_error("target_unavailable"))?;
+        let target = Target::native(&host);
+        check_target(&target, &request.target_revision)?;
+        let probe = remote_ssh::probe_agent(access.store, access.ssh, &host).await?;
+        let artifact = select_artifact(access, &probe.system, &probe.architecture)?;
+        let installed = probe.digest.clone().filter(|_| {
+            probe.agent.as_ref().is_some_and(|agent| agent["protocol"].as_u64() == Some(2))
+        });
+        return Ok(V2Plan {
+            target,
+            peer_revision: probe.peer_revision.clone(),
+            peer_identity: probe.peer_identity.clone(),
+            installed,
+            system: probe.system.clone(),
+            architecture: probe.architecture.clone(),
+            route: V2Route::Native(Box::new((host, probe))),
+            artifact,
+        });
+    }
+
+    let helper = match explicit_helper {
+        Some(path) => path.to_path_buf(),
+        None => connector().await?,
     };
-    Ok(Some(V2Plan {
-        host,
-        installed: probe.digest,
+    connector_capability(&helper, "agentV2").await?;
+    let target = list(&helper).await?.into_iter()
+        .find(|target| target.target_id == request.target_id)
+        .ok_or_else(|| remote_error("target_unavailable"))?;
+    check_target(&target, &request.target_revision)?;
+    let probe = query(&helper, "probe-v2", Some(&target)).await?;
+    let peer_revision = probe_identity(&probe["peerRevision"])?.to_owned();
+    let peer_identity = probe_identity(&probe["peerIdentity"])?.to_owned();
+    if let Some(source) = source {
+        source.check_peer(&peer_revision, &peer_identity)?;
+    }
+    let system = probe["system"].as_str().ok_or_else(protocol_mismatch)?.to_owned();
+    let architecture = probe["architecture"].as_str().ok_or_else(protocol_mismatch)?.to_owned();
+    let artifact = select_artifact(access, &system, &architecture)?;
+    if artifact.digest_signature.is_empty() {
+        return Err(AppError::new(
+            "agent_signature_missing",
+            "当前 Twiglane 构建缺少 Cliora 所需的远端组件发布证明，请更新 Twiglane。",
+        ));
+    }
+    Ok(V2Plan {
+        route: V2Route::Cliora(helper),
+        target,
+        peer_revision,
+        peer_identity,
+        installed: probe["agentSha256"].as_str().map(str::to_owned),
+        system,
+        architecture,
         artifact,
-    }))
+    })
 }
 
 async fn connect(
-    path: &Path,
+    explicit_helper: Option<&Path>,
     request: &OpenRequest,
     confirm: Option<InstallTarget>,
     source: Option<&review::Source>,
     progress: &Channel<Progress>,
-    v2: Option<&V2Access<'_>>,
+    access: &V2Access<'_>,
 ) -> Result<Opened> {
     publish(progress, "connecting", None, None);
-    let target = list(path)
-        .await?
-        .into_iter()
-        .find(|target| target.target_id == request.target_id)
-        .ok_or_else(|| remote_error("target_unavailable"))?;
-    if let Some(reason) = &target.unavailable_reason {
-        return Err(AppError::new("target_unavailable", reason));
-    }
-    if target.target_revision != request.target_revision {
-        return Err(remote_error("target_changed"));
-    }
-    let probe = query(path, "probe", Some(&target)).await?;
-    if !matches!(probe["system"].as_str(), Some("Linux" | "Darwin")) {
-        return Err(AppError::new(
-            "remote_unsupported",
-            "远端需要 Linux 或 macOS 与系统 Git。",
-        ));
-    }
-    // Python 只是 v1 组件（Python 脚本）的要求：v2 是原生组件，不该被它拦住。
-    let python_ready = probe["pythonVersion"]
-        .as_str()
-        .and_then(|version| {
-            let mut parts = version.split('.');
-            Some((
-                parts.next()?.parse::<u32>().ok()?,
-                parts.next()?.parse::<u32>().ok()?,
-            ))
-        })
-        .is_some_and(|version| version >= (3, 8));
-    let peer = probe_identity(&probe["peerRevision"])?;
-    let peer_identity = probe_identity(&probe["peerIdentity"])?.to_owned();
-    if let Some(source) = source {
-        source.check_peer(peer, &peer_identity)?;
-    }
-    // 组件来源：本机有 v2 产物且会话不需要基线时优先 v2；审查与任务基线只有 v1 支持。
-    let forced_v1 = request.review_id.is_some() || request.baseline.is_some();
-    let mut plan = None;
-    if let Some(access) = v2 {
-        if !forced_v1 {
-            if let Provider::V2 { dir } =
-                select_provider(access.v2_dir.clone(), Some(access.ssh.artifacts()))
-            {
-                plan = plan_v2(access, &dir, &target.target_id).await?;
-            }
-        }
-    }
-    let kind = if plan.is_some() {
-        AgentKind::V2
-    } else {
-        AgentKind::V1
-    };
-    // 安装提示里的版本与字节数按实际 provider 取，不再写死 v1。
-    let (version, size) = match &plan {
-        Some(plan) => (plan.artifact.version.clone(), plan.artifact.bytes.len() as u64),
-        None => (V1_VERSION.to_string(), AGENT.len() as u64),
-    };
+    let plan = plan_v2(explicit_helper, access, request, source).await?;
     let selected = InstallTarget {
-        provider: kind,
         review_id: request.review_id.clone(),
-        target_id: target.target_id.clone(),
-        revision: target.target_revision.clone(),
-        peer: peer.to_owned(),
+        target_id: plan.target.target_id.clone(),
+        revision: plan.target.target_revision.clone(),
+        peer: plan.peer_revision.clone(),
         path: request.path.clone(),
-        version: version.clone(),
-        size,
+        baseline: request.baseline.clone(),
+        digest: plan.artifact.sha256.clone(),
+        version: plan.artifact.version.clone(),
+        size: plan.artifact.bytes.len() as u64,
     };
     if request.allow_install && confirm.as_ref() != Some(&selected) {
-        return Err(AppError::new(
-            "target_changed",
-            "安装目标已变化，请重新打开并确认。",
-        ));
+        return Err(AppError::new("target_changed", "安装目标已变化，请重新打开并确认。"));
     }
-    let mut bound_target = target.clone();
-    bound_target.target_revision = selected.peer.clone();
-    let mut agent: Option<AgentTransport> = None;
-    let mut session_dir: Option<tempfile::TempDir> = None;
-    // 实际组件版本：v2 取握手自述，v1 固定为内嵌组件标签。
-    let agent_version: String;
-    if let Some(plan) = &plan {
-        let access = v2.expect("v2 计划只能来自 v2 会话入口");
-        if plan.installed.as_deref() != Some(plan.artifact.sha256.as_str()) {
-            if !request.allow_install {
-                return Ok(Opened::NeedsInstall(selected));
-            }
-            // 用户已确认这一次安装：按摘要上传，远端核对后才原子替换。
-            tokio::time::timeout(
-                Duration::from_secs(600),
-                remote_ssh::install_artifact(
-                    access.store,
-                    access.ssh,
-                    &plan.host,
-                    &plan.artifact,
-                    &|sent, total| {
-                        let _ = progress.send(Progress {
-                            phase: "installing",
-                            sent_bytes: Some(sent),
-                            total_bytes: Some(total),
-                        });
-                    },
-                ),
-            )
-            .await
-            .map_err(|_| AppError::new("remote_timeout", "远端组件传输超时，可以重试。"))??;
-        }
-        let session =
-            remote_ssh::open_session(access.store, access.ssh, &plan.host, &plan.artifact.sha256)
-                .await?;
-        let hello = tokio::time::timeout(
-            Duration::from_secs(120),
-            session.transport.rpc("hello", json!({})),
-        )
-        .await
-        .map_err(|_| AppError::new("remote_timeout", "等待远端组件握手超时。"))?;
-        // 本机有 v2 产物却握不上手：明确报协议不匹配，不改走 v1、也不伪造安装提示。
-        let hello = hello.map_err(|_| protocol_mismatch())?;
-        if hello["protocol"].as_u64() != Some(2) {
-            session.transport.close().await;
-            return Err(protocol_mismatch());
-        }
-        agent_version = hello["version"]
-            .as_str()
-            .filter(|version| !version.is_empty())
-            .unwrap_or(&plan.artifact.version)
-            .to_string();
-        agent = Some(session.transport);
-        session_dir = Some(session.folder);
-    } else {
-        if !python_ready {
-            return Err(AppError::new(
-                "remote_unsupported",
-                "这个远端需要用 Python 3.8 及以上运行内嵌组件，请升级远端 Python 或更新远端组件。",
-            ));
-        }
-        let expected = format!("{:x}", Sha256::digest(AGENT));
-        let installed = probe["agentSha256"]
-            .as_str()
-            .zip(probe["agentSignature"].as_str());
-        if let Some((digest, signature)) = installed {
-            let compatible =
-                signature != "development" || (cfg!(debug_assertions) && digest == expected);
-            if compatible {
-                let existing = start(path, &bound_target, digest, signature)?;
-                let hello = tokio::time::timeout(
-                    Duration::from_secs(120),
-                    existing.rpc("hello", json!({})),
-                )
-                .await
-                .map_err(|_| AppError::new("remote_timeout", "等待远端组件握手超时。"))?;
-                if hello
-                    .as_ref()
-                    .is_ok_and(|value| value["protocol"].as_u64() == Some(1))
-                {
-                    agent = Some(existing);
+    let needs_install = plan.installed.as_deref() != Some(&plan.artifact.sha256);
+    if needs_install && !request.allow_install {
+        return Ok(Opened::NeedsInstall(selected));
+    }
+    if needs_install {
+        let install = async {
+            match &plan.route {
+                V2Route::Native(native) => {
+                    let (host, probe) = native.as_ref();
+                    remote_ssh::install_verified_artifact(
+                        access.store, access.ssh, host, &plan.artifact, probe,
+                        &|sent, total| publish(progress, "installing", Some(sent), Some(total)),
+                    ).await
+                }
+                V2Route::Cliora(path) => {
+                    let command = component_command(path, "install-v2", &plan.target.target_id, &plan.peer_revision, &plan.artifact)?;
+                    upload(command, &plan.artifact, progress).await
                 }
             }
-        }
-        if agent.is_none() {
-            let signature = source_signature().ok_or_else(|| {
-                AppError::new(
-                    "agent_signature_missing",
-                    "当前 Twiglane 构建缺少远端组件的发布证明。",
-                )
-            })?;
-            if !request.allow_install {
-                return Ok(Opened::NeedsInstall(selected));
-            }
-            tokio::time::timeout(
-                Duration::from_secs(600),
-                upload(path, &bound_target, &expected, signature, progress),
-            )
+        };
+        tokio::time::timeout(Duration::from_secs(600), install)
             .await
             .map_err(|_| AppError::new("remote_timeout", "远端组件传输超时，可以重试。"))??;
-            agent = Some(start(path, &bound_target, &expected, signature)?);
-        }
-        agent_version = V1_VERSION.to_string();
     }
-    let agent = agent.unwrap();
-    let protocol = agent.protocol();
+    let (agent, session_dir) = match &plan.route {
+        V2Route::Native(native) => {
+            let (host, probe) = native.as_ref();
+            let connection = remote_ssh::prepare_session(access.store, access.ssh, host, &plan.artifact.sha256, probe).await?;
+            let (transport, folder) = AgentTransport::checked_v2(connection);
+            (transport, Some(folder))
+        }
+        V2Route::Cliora(path) => {
+            let mut command = component_command(path, "connect-v2", &plan.target.target_id, &plan.peer_revision, &plan.artifact)?;
+            (AgentTransport::spawn_v2(&mut command)?, None)
+        }
+    };
+    let hello = tokio::time::timeout(Duration::from_secs(120), agent.rpc("hello", json!({})))
+        .await
+        .map_err(|_| AppError::new("remote_timeout", "等待远端组件握手超时。"))?
+        .map_err(|_| protocol_mismatch())?;
+    let capabilities = hello["capabilities"].as_array().ok_or_else(protocol_mismatch)?;
+    if hello["protocol"].as_u64() != Some(2)
+        || hello["version"].as_str() != Some(&plan.artifact.version)
+        || remote_ssh::platform(
+            hello["os"].as_str().unwrap_or_default(),
+            hello["arch"].as_str().unwrap_or_default(),
+        ) != remote_ssh::platform(&plan.system, &plan.architecture)
+        || ["open", "status", "history", "commitDetail", "commitDiff", "diff", "reviewIdentity", "taskReview", "receipt"]
+            .iter()
+            .any(|required| !capabilities.iter().any(|value| value.as_str() == Some(*required)))
+    {
+        return Err(protocol_mismatch());
+    }
+
     publish(progress, "opening", None, None);
     let mut fields = json!({"path":request.path});
     if let Some(baseline) = &request.baseline {
         fields["baseline"] = json!(baseline);
     }
+    if let Some(source) = source {
+        fields["worktreeIdentity"] = json!(source.worktree_identity());
+    }
     let snapshot = tokio::time::timeout(Duration::from_secs(120), agent.rpc("open", fields))
         .await
         .map_err(|_| AppError::new("remote_timeout", "等待远端仓库状态超时。"))??;
-    let repo = snapshot["repo"]
-        .as_str()
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    let root = snapshot["root"]
-        .as_str()
-        .filter(|value| valid_path(value, true))
-        .map(str::to_string);
-    // 块级暂存必须由远端自己声明：v1 组件没有 `patch`，`capabilities` 缺省即不支持。
-    let hunk_stageable = snapshot["capabilities"]
-        .as_array()
-        .is_some_and(|caps| caps.iter().any(|cap| cap.as_str() == Some("patch")));
-    if let Some(source) = source {
-        source.check_tree(root.as_deref().unwrap_or_default(), repo.as_deref().unwrap_or_default())?;
+    let repo = snapshot["repo"].as_str().filter(|value| !value.is_empty() && !value.chars().any(char::is_control))
+        .ok_or_else(protocol_mismatch)?.to_owned();
+    let root = snapshot["worktreePath"].as_str().filter(|value| valid_path(value, true))
+        .ok_or_else(protocol_mismatch)?.to_owned();
+    let worktree_identity = probe_identity(&snapshot["worktreeIdentity"]).map_err(|_| protocol_mismatch())?.to_owned();
+    if snapshot["baseline"].as_str() != request.baseline.as_deref() {
+        return Err(AppError::new("invalid_baseline", "远端组件返回的任务起点不一致。"));
     }
-    let (Some(repo), Some(root)) = (repo, root) else {
-        return Err(AppError::new(
-            "remote_protocol",
-            "远端返回的工作树标识无效。",
-        ));
-    };
+    if let Some(source) = source {
+        source.check_tree(&root, &worktree_identity)?;
+    }
+    let hunk_stageable = capabilities.iter().any(|cap| cap.as_str() == Some("patch"));
     let session = Session {
         review_id: request.review_id.clone(),
-        peer_revision: peer.to_owned(),
+        peer_revision: plan.peer_revision,
+        peer_identity: plan.peer_identity,
         agent,
         repo,
         root,
-        target,
-        peer_identity,
+        worktree_identity: Some(worktree_identity),
+        target: plan.target,
         baseline: request.baseline.clone(),
         hunk_stageable,
-        agent_version,
-        state_token: Mutex::new(None),
+        agent_version: plan.artifact.version,
+        state_token: Mutex::default(),
         _session_dir: session_dir,
     };
-    // 写入令牌随每次 open/status/diff 刷新；v1 的响应里没有这个字段。
-    session.remember_state(&snapshot);
-    let view = if protocol == 2 {
-        flatten_v2(&snapshot)?
-    } else {
-        snapshot
-    };
+    session.remember_state(&snapshot, None)?;
+    let view = flatten_v2(&snapshot)?;
     Ok(Opened::Worktree(Box::new(session), view))
 }
 
@@ -1119,9 +1078,26 @@ fn save_pending(path: &Path, pending: &Pending) -> Result<()> {
         .map_err(|_| AppError::new("remote_journal", "无法持久保存操作记录。"))
 }
 
+fn native_targets(store: &AppStore) -> Vec<Target> {
+    if !store.remote_ssh_enabled() {
+        return Vec::new();
+    }
+    store.remote_ssh_targets().iter().map(Target::native).collect()
+}
+
 #[tauri::command]
-pub async fn remote_worktree_targets() -> Result<Vec<Target>> {
-    list(&connector().await?).await
+pub async fn remote_worktree_targets(backend: State<'_, Arc<crate::git::ops::Backend>>) -> Result<Vec<Target>> {
+    let mut native = native_targets(&backend.store);
+    let cli_targets = match connector().await {
+        Ok(helper) => list(&helper).await,
+        Err(error) => Err(error),
+    };
+    match cli_targets {
+        Ok(targets) => native.extend(targets),
+        Err(error) if native.is_empty() && !backend.store.remote_ssh_enabled() => return Err(error),
+        Err(_) => {}
+    }
+    Ok(native)
 }
 
 #[tauri::command]
@@ -1164,15 +1140,14 @@ pub async fn remote_worktree_open(
         let backend = Arc::clone(backend.inner());
         let ssh = Arc::clone(ssh.inner());
         let join = tokio::spawn(async move {
-            let path = connector().await?;
             let access = V2Access::new(&backend.store, &ssh);
             connect(
-                &path,
+                None,
                 &request,
                 confirm,
                 source.as_ref(),
                 &on_progress,
-                Some(&access),
+                &access,
             )
             .await
         });
@@ -1200,7 +1175,6 @@ pub async fn remote_worktree_open(
                 installs.clear();
             }
             let id = Uuid::new_v4().to_string();
-            // 版本与字节数按实际 provider 取：本机有 v2 产物时不再谎称要装 v1。
             let version = offer.version.clone();
             let size = offer.size;
             installs.insert(id.clone(), offer);
@@ -1216,9 +1190,11 @@ pub async fn remote_worktree_open(
         let _guard = state.mutations.lock().unwrap();
         read_pending(&session.journal(&state.data), &session.repo)?
     };
-    // 打开的仓库带着实际组件身份：界面与排查都不用猜是 v1 还是 v2。
     let protocol = session.protocol();
     let agent_version = session.agent_version.clone();
+    let review_outcome = session.review_id.as_deref()
+        .and_then(|id| state.reviews.lock().unwrap().latest(id))
+        .map(review::Outcome::name);
     let session_id = Uuid::new_v4().to_string();
     state
         .sessions
@@ -1232,6 +1208,7 @@ pub async fn remote_worktree_open(
         "pendingWrite":pending,
         "protocol":protocol,
         "agentVersion":agent_version,
+        "reviewOutcome":review_outcome,
     }))
 }
 
@@ -1264,6 +1241,10 @@ pub struct DiffRequest {
     path: String,
     view: String,
     cursor: Option<String>,
+    original: Option<String>,
+    head: Option<String>,
+    context: Option<u32>,
+    as_text: Option<bool>,
 }
 
 /// 差异载荷里的块级可暂存标记：只由远端声明的能力和视图决定，界面不自行推断。
@@ -1316,7 +1297,7 @@ async fn diff_call(state: &RemoteWorktrees, request: DiffRequest) -> Result<Valu
 }
 
 /// v2 的差异：远端给的是结构化 `DiffResponse`，这里渲染回前端已经在解析的 unified 文本，
-/// 分页、块索引与块标记都沿用同一条路径。任务视图（基线）只有 v1 支持，不会走到这里。
+/// 普通差异与任务净差异共用同一套分页。
 async fn diff_v2(session: &Session, request: &DiffRequest) -> Result<Value> {
     let cursor = request.cursor.as_deref();
     let offset = cursor.map(v2_cursor_offset).transpose()?.unwrap_or(0);
@@ -1327,13 +1308,30 @@ async fn diff_v2(session: &Session, request: &DiffRequest) -> Result<Value> {
         "offset": offset,
         "limit": V2_DIFF_PAGE_LINES,
     });
+    if request.view == "task" {
+        let baseline = session.baseline.as_deref().ok_or_else(|| {
+            AppError::new("invalid_baseline", "这次审查没有可用的任务起点。")
+        })?;
+        fields["baseline"] = json!(baseline);
+        if let Some(head) = &request.head {
+            fields["head"] = json!(head);
+        }
+    }
+    if let Some(original) = &request.original {
+        fields["original"] = json!(original);
+    }
+    if let Some(context) = request.context {
+        fields["context"] = json!(context);
+    }
+    if let Some(as_text) = request.as_text {
+        fields["asText"] = json!(as_text);
+    }
     // 对端游标绑定了仓库状态令牌与选择：原样回传让它重新校验，状态已变就明确报错，
     // 而不是拿一个偏移静默读出另一段内容。本地偏移游标没有可校验的令牌，只发偏移。
     if let Some(cursor) = cursor.filter(|cursor| !cursor.starts_with(V2_CURSOR_PREFIX)) {
         fields["cursor"] = json!(cursor);
     }
     let result = session.agent.rpc("diff", fields).await?;
-    session.remember_state(&result);
     let diff = result.get("diff").cloned().unwrap_or_else(|| json!({}));
     let (text, next) = v2_diff_page(
         &diff,
@@ -1365,6 +1363,8 @@ pub async fn remote_worktree_diff(state: Managed<'_>, request: DiffRequest) -> R
 
 /// 只读 op：与 agent v2 的只读入口同名，直接转发 `fields`。
 const BRIDGE_READ_OPS: &[&str] = &[
+    "taskReview",
+    "taskReviewToken",
     "history",
     "fileHistory",
     "commitDetail",
@@ -1422,7 +1422,7 @@ const BRIDGE_WRITE_OPS: &[&str] = &[
 
 /// 桥接参数里永远不允许出现的字段：普通 Git RPC 也照样拒绝这些名字。
 const BRIDGE_FORBIDDEN_FIELDS: &[&str] = &[
-    "program", "command", "shell", "cwd", "env", "args", "id", "v", "op",
+    "program", "command", "shell", "cwd", "env", "args", "id", "v", "op", "generation", "operationId", "stateToken",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1508,7 +1508,7 @@ async fn bridge_call(state: &RemoteWorktrees, request: CallRequest) -> Result<Va
     let mut fields = fields;
     fields["operationId"] = json!(operation_id);
     // v2 写入要带最新的状态令牌；没有令牌就不发，免得远端把它当成过期请求。
-    if !session.with_generation(&mut fields, None) {
+    if !session.with_generation(&mut fields, request.generation.as_deref()) {
         return Err(AppError::new(
             "stale_state",
             "远端状态令牌缺失，请刷新后重试。",
@@ -1591,6 +1591,9 @@ struct WriteProof<'a> {
     head: Option<&'a str>,
     branch: Option<&'a str>,
     reason: Option<&'a str>,
+    op: Option<&'a str>,
+    repo: Option<&'a str>,
+    review_outcome: Option<&'a str>,
 }
 
 fn write_proof(response: &Value) -> Option<WriteProof<'_>> {
@@ -1604,6 +1607,9 @@ fn write_proof(response: &Value) -> Option<WriteProof<'_>> {
             head: response["head"].as_str(),
             branch: response["branch"].as_str(),
             reason: response["reason"].as_str(),
+            op: response["op"].as_str(),
+            repo: response["repo"].as_str(),
+            review_outcome: None,
         });
     }
     let receipt = response.get("receipt")?;
@@ -1613,6 +1619,9 @@ fn write_proof(response: &Value) -> Option<WriteProof<'_>> {
         head: receipt["head"].as_str(),
         branch: receipt["branch"].as_str(),
         reason: receipt["reason"].as_str(),
+        op: receipt["op"].as_str(),
+        repo: receipt["repo"].as_str(),
+        review_outcome: receipt["reviewOutcome"].as_str(),
     })
 }
 
@@ -1623,15 +1632,18 @@ async fn finish_write(
     pending: &Pending,
     response: Result<Value>,
 ) -> Result<Value> {
-    let proven_commit = pending.op == "commit"
-        && response
-            .as_ref()
-            .is_ok_and(|r| r["op"] == "commit" || r["receipt"]["op"] == "commit");
-    let completed = match response {
+    let mut outcome = None;
+    let mut completed = match response {
         Ok(response) => {
             let Some(proof) = write_proof(&response).filter(|proof| {
                 proof.operation_id == pending.operation_id
                     && response["repo"].as_str().is_none_or(|repo| repo == session.repo)
+                    && if session.protocol() == 2 && session.worktree_identity.is_some() {
+                        proof.repo == Some(&session.repo) && proof.op == Some(&pending.op)
+                    } else {
+                        proof.repo.is_none_or(|repo| repo == session.repo)
+                            && proof.op.is_none_or(|op| op == pending.op)
+                    }
             }) else {
                 return Ok(unknown(&pending.operation_id));
             };
@@ -1645,6 +1657,12 @@ async fn finish_write(
                     {
                         return Ok(unknown(&pending.operation_id));
                     }
+                    outcome = match (pending.op.as_str(), proof.op, proof.review_outcome) {
+                        ("commit", Some("commit"), Some("committed") | None) => Some(review::Outcome::Committed),
+                        ("mergeStart" | "mergeComplete", Some("mergeStart" | "mergeComplete"), Some("merged")) => Some(review::Outcome::Merged),
+                        ("mergeComplete", Some("mergeComplete"), Some("committed")) => Some(review::Outcome::Committed),
+                        _ => None,
+                    };
                     json!({"state":"completed","operationId":pending.operation_id,"snapshot":snapshot,"head":snapshot["head"]})
                 }
                 "failed" => {
@@ -1666,13 +1684,14 @@ async fn finish_write(
     {
         return Ok(unknown(&pending.operation_id));
     }
-    if proven_commit && completed["state"] == "completed" {
-        if let (Some(id), Some(head)) = (&pending.review_id, completed["head"].as_str()) {
-            state
+    if completed["state"] == "completed" {
+        if let (Some(outcome), Some(id), Some(head)) = (outcome, &pending.review_id, completed["head"].as_str()) {
+            let recorded = state
                 .reviews
                 .lock()
                 .unwrap()
-                .record_commit(id, session, head);
+                .record_result(id, session, outcome, head);
+            completed["reviewOutcome"] = json!(recorded.map(review::Outcome::name));
         }
     }
     Ok(completed)
@@ -1788,103 +1807,25 @@ mod tests {
     #[tokio::test]
     async fn upload_delivers_eof_before_waiting_for_install_receipt() {
         use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
         let helper = dir.path().join("cliora");
-        std::fs::write(
-            &helper,
-            r#"#!/bin/sh
+        std::fs::write(&helper, r#"#!/bin/sh
 cat > "$(dirname "$0")/received" || exit 1
 printf '{"installed":true,"agentSha256":"%s"}\n' "$5"
-"#,
-        )
-        .unwrap();
+"#).unwrap();
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let target = serde_json::from_value(json!({
-            "targetId": "host-a", "targetRevision": "peer", "name": "A",
-            "host": "test.invalid", "port": 22, "user": "test", "authMethod": "key",
-        }))
-        .unwrap();
-        let digest = format!("{:x}", Sha256::digest(AGENT));
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            upload(
-                &helper,
-                &target,
-                &digest,
-                "development",
-                &Channel::new(|_| Ok(())),
-            ),
-        )
-        .await
-        .expect("installer did not receive EOF")
-        .unwrap();
-        assert_eq!(std::fs::read(dir.path().join("received")).unwrap(), AGENT);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test(flavor = "current_thread")]
-    async fn stale_install_confirmation_stops_before_any_upload() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let helper = dir.path().join("cliora");
-        let current_peer = "b".repeat(64);
-        let target = json!({
-            "targetId": "host-a", "targetRevision": "catalog-a", "name": "A",
-            "host": "test.invalid", "port": 22, "user": "test", "authMethod": "key",
-        });
-        let catalog = json!({"protocol": 1, "targets": [target]});
-        let probe = json!({"system": "Linux", "pythonVersion": "3.13.5", "peerRevision": current_peer, "peerIdentity": "c".repeat(64)});
-        std::fs::write(
-            &helper,
-            format!(
-                r#"#!/bin/sh
-case "$2" in
-list) printf '%s\n' '{catalog}' ;;
-probe) printf '%s\n' '{probe}' ;;
-*) touch -- "$(dirname "$0")/upload-dispatched"; exit 1 ;;
-esac
-"#
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
-
-        let request = OpenRequest {
-            request_id: Uuid::new_v4().to_string(),
-            target_id: "host-a".into(),
-            target_revision: "catalog-a".into(),
-            path: "/repo".into(),
-            baseline: None,
-            allow_install: true,
-            install_confirmation: Some(Uuid::new_v4().to_string()),
-            review_id: None,
+        let bytes = b"fixture\x00binary".to_vec();
+        let artifact = AgentArtifact {
+            sha256: format!("{:x}", Sha256::digest(&bytes)),
+            bytes,
+            version: "1.0.0".into(),
+            signature: "c2ln".into(),
+            digest_signature: "YXR0".into(),
         };
-        let confirmed = InstallTarget {
-            provider: AgentKind::V1,
-            review_id: None,
-            target_id: request.target_id.clone(),
-            revision: request.target_revision.clone(),
-            peer: "a".repeat(64),
-            path: request.path.clone(),
-            version: V1_VERSION.into(),
-            size: AGENT.len() as u64,
-        };
-        let result = connect(
-            &helper,
-            &request,
-            Some(confirmed),
-            None,
-            &Channel::new(|_| Ok(())),
-            None,
-        )
-        .await;
-        assert_eq!(
-            result.err().expect("stale peer must fail").code,
-            "target_changed"
-        );
-        assert!(!dir.path().join("upload-dispatched").exists());
+        let command = component_command(&helper, "install-v2", "host-a", &"a".repeat(64), &artifact).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), upload(command, &artifact, &Channel::new(|_| Ok(()))))
+            .await.expect("installer did not receive EOF").unwrap();
+        assert_eq!(std::fs::read(dir.path().join("received")).unwrap(), artifact.bytes);
     }
 
     #[cfg(unix)]
@@ -1906,11 +1847,12 @@ esac
             repo: "repo-a".into(),
             target,
             root: "/repo".into(),
+            worktree_identity: None,
             peer_identity: "same-host".into(),
             baseline: None,
             hunk_stageable: false,
-            agent_version: V1_VERSION.into(),
-            state_token: Mutex::new(None),
+            agent_version: "v1".into(),
+            state_token: Mutex::default(),
             _session_dir: None,
         };
         let journal = session.journal(dir.path());
@@ -1997,11 +1939,12 @@ input.on("line", line => {
             repo: "repo-a".into(),
             target,
             root: "/repo".into(),
+            worktree_identity: None,
             peer_identity: "a".repeat(64),
             baseline: None,
             hunk_stageable: false,
-            agent_version: V1_VERSION.into(),
-            state_token: Mutex::new(None),
+            agent_version: "test".into(),
+            state_token: Mutex::default(),
             _session_dir: None,
         }
     }
@@ -2253,6 +2196,10 @@ input.on("line", line => {
             path: "a.txt".into(),
             view: "unstaged".into(),
             cursor: cursor.map(str::to_string),
+            original: None,
+            head: None,
+            context: None,
+            as_text: None,
         }
     }
 
@@ -2365,507 +2312,68 @@ input.on("line", line => {
         session.agent.close().await;
     }
 
-    /* ---------------- 远端会话优先 v2 组件，不可用才回退内嵌 v1 ---------------- */
-
-    /// 本机有没有 v2 产物：有清单才算，没有就回退内嵌 v1 并说明原因。
     #[cfg(unix)]
-    #[test]
-    fn provider_prefers_local_v2_artifacts_and_explains_the_fallback() {
-        assert!(
-            matches!(select_provider(None, None), Provider::V1Embedded { reason } if !reason.is_empty())
-        );
-        let dir = tempfile::tempdir().unwrap();
-        assert!(matches!(
-            select_provider(Some(dir.path().join("missing")), None),
-            Provider::V1Embedded { .. }
-        ));
-
-        // 有清单与产物：V2，且按远端平台选出的摘要/版本与清单一致。
-        let artifacts = dir.path().join("agent-v2");
-        let digest = fixture::write_artifacts(&artifacts, fixture::agent_bytes(&dir.path().join("fixture")), "9.9.9");
-        match select_provider(Some(artifacts.clone()), None) {
-            Provider::V2 { dir } => {
-                assert_eq!(dir, artifacts);
-                let picked = remote_ssh::select_agent(
-                    &dir,
-                    std::env::consts::OS,
-                    std::env::consts::ARCH,
-                )
-                .unwrap();
-                assert_eq!(picked.sha256, digest);
-                assert_eq!(picked.version, "9.9.9");
-                assert!(!picked.signature.is_empty(), "清单里的发布签名要跟着产物走");
-            }
-            Provider::V1Embedded { .. } => panic!("有 v2 产物时必须选 v2"),
-        }
-
-        // 清单在，但没有目标平台的产物：选不出产物，调用方据此回退内嵌 v1（不上传任何字节）。
-        let other = if std::env::consts::ARCH == "aarch64" {
-            "x86_64"
-        } else {
-            "aarch64"
-        };
-        assert_eq!(
-            remote_ssh::select_agent(&artifacts, std::env::consts::OS, other)
-            .unwrap_err()
-            .code,
-            "agent_artifact_unavailable"
-        );
-    }
-
-    /// 测试夹具：假 ssh、假 v2 组件、假 Cliora 连接工具与本机 v2 产物。
-    #[cfg(unix)]
-    mod fixture {
-        use super::super::*;
+    #[tokio::test]
+    async fn cliora_v2_checks_capability_and_install_offer_before_writing() {
         use std::os::unix::fs::PermissionsExt;
-
-        pub(super) fn write_executable(path: &Path, body: impl AsRef<[u8]>) {
-            std::fs::write(path, body).unwrap();
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
-        }
-
-        /// v2 组件替身：`--probe` 只回自述，其余交给 node 实现（行为由 `behaviour` 决定）。
-        pub(super) fn agent_bytes(root: &Path) -> Vec<u8> {
-            agent_with(root, "ok")
-        }
-
-        pub(super) fn agent_with(root: &Path, behaviour: &str) -> Vec<u8> {
-            std::fs::create_dir_all(root).unwrap();
-            let js = root.join("v2-agent.js");
-            std::fs::write(&js, AGENT_JS.replace("__BEHAVIOUR__", behaviour)).unwrap();
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = \"--probe\" ]; then printf '{{\"protocol\":2,\"os\":\"{os}\",\"arch\":\"{arch}\",\"version\":\"9.9.9\"}}\n'; exit 0; fi\nexec node \"{js}\"\n",
-                os = std::env::consts::OS,
-                arch = std::env::consts::ARCH,
-                js = js.display(),
-            )
-            .into_bytes()
-        }
-
-        /// 按当前平台写一份清单与同名产物，返回产物摘要。
-        pub(super) fn write_artifacts(artifacts: &Path, agent: Vec<u8>, version: &str) -> String {
-            std::fs::create_dir_all(artifacts.join("host")).unwrap();
-            write_executable(&artifacts.join("host/twiglane-agent-v2"), &agent);
-            let digest = format!("{:x}", Sha256::digest(&agent));
-            std::fs::write(
-                artifacts.join("manifest.json"),
-                json!({
-                    "format": 1,
-                    "artifacts": [{
-                        "system": std::env::consts::OS,
-                        "architecture": std::env::consts::ARCH,
-                        "version": version,
-                        "file": "host/twiglane-agent-v2",
-                        "sha256": digest,
-                        "signature": "c2lnbmF0dXJl",
-                    }],
-                })
-                .to_string(),
-            )
-            .unwrap();
-            digest
-        }
-
-        /// 假 ssh：`-G` 打印固定 profile，其余把最后一段参数在本机执行。
-        pub(super) const SSH_STUB: &str = r#"#!/bin/sh
-has_g=0
-for arg in "$@"; do [ "$arg" = "-G" ] && has_g=1; done
-if [ "$has_g" = 1 ]; then cat "$STUB_PROFILE"; exit 0; fi
-for last; do :; done
-printf 'debug1: Server host key: ssh-ed25519 %s\n' "$STUB_HOST_KEY" >&2
-exec sh -c "$last"
-"#;
-
-        pub(super) const AGENT_JS: &str = r#"
-const fs = require("node:fs");
-const input = require("node:readline").createInterface({input:process.stdin});
-const behaviour = "__BEHAVIOUR__";
-const send = frame => process.stdout.write(JSON.stringify(frame) + "\n");
-const ok = (req, result) => send({v:2, id:req.id, ok:true, result});
-const snapshot = {
-    generation: 3,
-    branch: {name:"main", detached:false, unborn:false, headOid:"a".repeat(40)},
-    files: [{path:"a.txt", originalPath:null, staged:"modified", unstaged:"none", untracked:false, unmerged:false}],
-};
-input.on("line", line => {
-    const req = JSON.parse(line);
-    fs.appendFileSync(process.env.TWIGLANE_TEST_V2_LOG, req.op + "\n");
-    if (behaviour === "v1") return send({v:1, id:req.id, ok:true, result:{protocol:1}});
-    if (behaviour === "unsupported") return send({v:2, id:req.id, ok:false, error:{code:"unsupported_protocol", message:"only v2"}});
-    if (req.op === "hello") return ok(req, {protocol:2, version:"9.9.9", capabilities:["patch"]});
-    if (req.op === "open") return ok(req, {protocol:2, agent:"twiglane-agent-v2", repo:"/repo", root:"/repo", name:"repo", host:"build", generation:3, stateToken:"tok-1", snapshot, draft:"", abbrevLength:7, watchDegraded:false, events:"notification", capabilities:["patch"]});
-    if (req.op === "status") return ok(req, {repo:"/repo", generation:3, stateToken:"tok-2", snapshot});
-    ok(req, {});
-});
-"#;
-
-        /// 一台可用的自有 SSH 主机：替身 ssh 在本机执行远端命令，HOME 下放已安装的 v2 组件。
-        pub(super) struct SshSide {
-            pub(super) dir: tempfile::TempDir,
-            pub(super) artifacts: PathBuf,
-            pub(super) store: AppStore,
-            pub(super) ssh: RemoteSsh,
-            pub(super) log: PathBuf,
-        }
-
-        /// `install` 决定远端是否已装好与产物字节完全一致的组件。
-        pub(super) fn ssh_side(behaviour: &str, install: bool) -> SshSide {
-            let dir = tempfile::tempdir().unwrap();
-            let root = dir.path();
-            let home = root.join("remote-home");
-            std::fs::create_dir_all(&home).unwrap();
-            let log = root.join("v2-requests.log");
-            std::fs::write(&log, b"").unwrap();
-            let agent = agent_with(&root.join("fixture"), behaviour);
-            let artifacts = root.join("agent-v2");
-            write_artifacts(&artifacts, agent.clone(), "9.9.9");
-            if install {
-                let installed = home.join(".local/share/twiglane/agent/v2");
-                std::fs::create_dir_all(&installed).unwrap();
-                write_executable(&installed.join("twiglane-agent-v2"), &agent);
-            }
-            let known_hosts = root.join("known_hosts");
-            std::fs::write(&known_hosts, "build.example.com ssh-ed25519 AAAATRUSTED\n").unwrap();
-            let profile = root.join("profile");
-            std::fs::write(
-                &profile,
-                format!(
-                    "host build.example.com\nhostname 10.9.0.4\nuser deploy\nport 2222\nidentityfile /home/deploy/.ssh/id_ed25519\nuserknownhostsfile {}\nglobalknownhostsfile none\nrevokedhostkeys none\nproxyjump none\nstricthostkeychecking ask\n",
-                    known_hosts.display()
-                ),
-            )
-            .unwrap();
-            let program = root.join("ssh");
-            write_executable(&program, SSH_STUB);
-            let store = AppStore::open(root.join("state.json"));
-            store.set_remote_ssh_enabled(true).unwrap();
-            store
-                .save_remote_ssh_target(crate::state::SshTarget {
-                    id: "host-a".into(),
-                    display_name: "构建机".into(),
-                    host: "build.example.com".into(),
-                    port: 2222,
-                    user: "deploy".into(),
-                    auth_method: "key".into(),
-                    identity_file: Some("/home/deploy/.ssh/id_ed25519".into()),
-                    ssh_config: None,
-                    default_path: Some("/repo".into()),
-                    enabled: true,
-                    shared_host_id: Some("host-a".into()),
-                    revision: 1,
-                })
-                .unwrap();
-            let ssh = RemoteSsh::with_exec(
-                artifacts.clone(),
-                program,
-                vec![
-                    ("STUB_PROFILE".into(), profile.display().to_string()),
-                    ("STUB_HOST_KEY".into(), "SHA256:stubhostkeyidentity".into()),
-                    ("HOME".into(), home.display().to_string()),
-                    ("TWIGLANE_TEST_V2_LOG".into(), log.display().to_string()),
-                ],
-            );
-            SshSide {
-                dir,
-                artifacts,
-                store,
-                ssh,
-                log,
-            }
-        }
-
-        /// Cliora 连接工具替身。`v1_agent` 给出时，connect 会跑真正的 v1 组件；
-        /// 否则任何 install/connect 都留痕并失败。
-        pub(super) fn connector(
-            root: &Path,
-            probe: Value,
-            v1_agent: Option<&Path>,
-            repo: &Path,
-        ) -> PathBuf {
-            let catalog = json!({"protocol":1,"targets":[{
-                "targetId":"host-a","name":"构建机","host":"build.example.com","user":"deploy",
-                "port":2222,"authMethod":"key","targetRevision":"catalog-a","defaultPath":"/repo"
-            }]});
-            std::fs::write(root.join("list.json"), catalog.to_string()).unwrap();
-            std::fs::write(root.join("probe.json"), probe.to_string()).unwrap();
-            let script = match v1_agent {
-                Some(agent) => format!(
-                    "#!/bin/sh\ncd -- \"$(dirname \"$0\")\" || exit 1\ncase \"$2\" in\nlist|probe) cat \"$2.json\" ;;\nconnect) touch v1-connect; exec \"{}\" --stdio ;;\n*) touch v1-upload; exit 1 ;;\nesac\n",
-                    agent.display()
-                ),
-                None => "#!/bin/sh\ncd -- \"$(dirname \"$0\")\" || exit 1\ncase \"$2\" in\nlist|probe) cat \"$2.json\" ;;\n*) touch v1-upload; exit 1 ;;\nesac\n".to_string(),
-            };
-            let _ = repo;
-            let path = root.join("cliora");
-            write_executable(&path, script);
-            path
-        }
-
-        /// 真正的内嵌 v1 组件：回退路径必须能真的打开仓库。
-        pub(super) fn v1_agent(root: &Path) -> PathBuf {
-            let path = root.join("v1-agent");
-            write_executable(&path, AGENT);
-            path
-        }
-
-        /// 一个真实的空 Git 仓库：v1 组件的 open 需要真仓库。
-        pub(super) fn repository(root: &Path) -> PathBuf {
-            let path = root.join("repo");
-            std::fs::create_dir_all(&path).unwrap();
-            assert!(std::process::Command::new("git")
-                .args(["init", "-q"])
-                .arg(&path)
-                .status()
-                .unwrap()
-                .success());
-            path
-        }
-
-        /// 探测结果：v1 侧已装好与本机内嵌字节一致的组件。
-        pub(super) fn probe_with_v1_agent(peer: &str) -> Value {
-            json!({
-                "system":"Linux","pythonVersion":"3.13.5",
-                "peerRevision": peer,
-                "peerIdentity": "c".repeat(64),
-                "agentSha256": format!("{:x}", Sha256::digest(AGENT)),
-                "agentSignature": "fixture",
-            })
-        }
-
-        /// 探测结果：只有远端系统信息，没有任何已装组件。
-        pub(super) fn probe_without_agent(peer: &str) -> Value {
-            json!({
-                "system":"Linux","pythonVersion":"3.13.5",
-                "peerRevision": peer,
-                "peerIdentity": "c".repeat(64),
-            })
-        }
-
-        pub(super) fn request(path: &Path, review: bool) -> OpenRequest {
-            OpenRequest {
-                request_id: Uuid::new_v4().to_string(),
-                target_id: "host-a".into(),
-                target_revision: "catalog-a".into(),
-                path: path.to_string_lossy().into_owned(),
-                baseline: None,
-                allow_install: false,
-                install_confirmation: None,
-                review_id: review.then(|| Uuid::new_v4().to_string()),
-            }
-        }
-
-        pub(super) fn progress() -> Channel<Progress> {
-            Channel::new(|_| Ok(()))
-        }
-
-        pub(super) fn opened(result: Opened) -> (Box<Session>, Value) {
-            match result {
-                Opened::Worktree(session, snapshot) => (session, snapshot),
-                Opened::NeedsInstall(_) => panic!("这次打开不该要求安装"),
-            }
-        }
-
-        pub(super) fn log(path: &Path) -> Vec<String> {
-            std::fs::read_to_string(path)
-                .unwrap_or_default()
-                .lines()
-                .map(str::to_string)
-                .collect()
-        }
-    }
-
-    /// 本机没有 v2 产物：照旧走内嵌 v1，且不发生任何 v2 会话。
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn without_local_v2_artifacts_the_session_falls_back_to_embedded_v1() {
-        use fixture::*;
-        let side = ssh_side("ok", false);
-        let root = side.dir.path();
-        let repo = repository(root);
-        let empty = root.join("no-v2-here");
-        std::fs::create_dir_all(&empty).unwrap();
-        // 本机没有 v2 产物：资源目录里也没有清单，产物目录也不存在。
-        std::fs::remove_dir_all(&side.artifacts).unwrap();
-        let catalog = connector(root, probe_with_v1_agent(&"b".repeat(64)), Some(&v1_agent(root)), &repo);
-        let access = V2Access {
-            store: &side.store,
-            ssh: &side.ssh,
-            v2_dir: Some(empty.clone()),
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let helper = root.join("cliora");
+        std::fs::write(&helper, r#"#!/bin/sh
+cd -- "$(dirname "$0")" || exit 1
+case "$2" in
+  version|list|probe-v2) cat "$2.json" ;;
+  *) touch wrote; exit 1 ;;
+esac
+"#).unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let target = json!({
+            "targetId": "host-a", "targetRevision": "catalog-a", "name": "A",
+            "host": "test.invalid", "port": 22, "user": "test", "authMethod": "key",
+        });
+        let write = |name: &str, value: Value| std::fs::write(root.join(name), value.to_string()).unwrap();
+        write("version.json", json!({"protocol":1,"capabilities":[]}));
+        write("list.json", json!({"protocol":1,"targets":[target]}));
+        let mut probe = json!({
+            "system":"Linux","architecture":"x86_64","peerRevision":"b".repeat(64),
+            "peerIdentity":"c".repeat(64),
+        });
+        write("probe-v2.json", probe.clone());
+        let store = AppStore::open(root.join("state.json"));
+        let ssh = RemoteSsh::with_exec(root.join("artifacts"), root.join("unused"), Vec::new());
+        let access = V2Access { store: &store, ssh: &ssh, v2_dir: None };
+        let mut request = OpenRequest {
+            request_id: Uuid::new_v4().to_string(),
+            target_id: "host-a".into(),
+            target_revision: "catalog-a".into(),
+            path: "/repo".into(),
+            baseline: None,
+            allow_install: false,
+            install_confirmation: None,
+            review_id: None,
         };
-        // 产物目录里没有清单：select_provider 回退内嵌 v1。
-        assert!(matches!(
-            select_provider(Some(empty), Some(side.artifacts.clone())),
-            Provider::V1Embedded { .. }
-        ));
-        let (session, snapshot) = opened(
-            connect(
-                &catalog,
-                &request(&repo, false),
-                None,
-                None,
-                &progress(),
-                Some(&access),
-            )
-            .await
-            .unwrap(),
-        );
-        assert_eq!(session.protocol(), 1);
-        assert_eq!(session.agent_version, V1_VERSION);
-        // 远端返回的是规范化后的真实路径（macOS 上 /var 会被解析成 /private/var）。
-        let canonical = std::fs::canonicalize(&repo).unwrap();
-        assert_eq!(snapshot["root"].as_str(), Some(canonical.to_string_lossy().as_ref()));
-        assert!(
-            !root.join("v1-upload").exists(),
-            "复用已安装的 v1 组件时不该再上传"
-        );
-        assert!(log(&side.log).is_empty(), "v2 会话不该被拉起");
-        session.agent.close().await;
-    }
-
-    /// 有 v2 产物且远端已装好：用 v2 打开，内嵌 v1 一次都没有上传或连接。
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_ready_v2_component_opens_the_session_without_the_embedded_agent() {
-        use fixture::*;
-        let side = ssh_side("ok", true);
-        let root = side.dir.path();
-        let catalog = connector(root, probe_without_agent(&"b".repeat(64)), None, root);
-        let access = V2Access {
-            store: &side.store,
-            ssh: &side.ssh,
-            v2_dir: Some(side.artifacts.clone()),
+        let progress = Channel::new(|_| Ok(()));
+        let absent = connect(Some(&helper), &request, None, None, &progress, &access).await.err().unwrap();
+        assert_eq!(absent.code, "cliora_incompatible");
+        write("version.json", json!({"protocol":1,"capabilities":["agentV2"]}));
+        let absent = connect(Some(&helper), &request, None, None, &progress, &access).await.err().unwrap();
+        assert_eq!(absent.code, "agent_artifact_manifest");
+        let artifacts = root.join("artifacts");
+        std::fs::create_dir(&artifacts).unwrap();
+        std::fs::write(artifacts.join("agent"), b"artifact").unwrap();
+        std::fs::write(artifacts.join("manifest.json"), json!({
+            "format":1,"artifacts":[{"system":"Linux","architecture":"x86_64","file":"agent",
+                "version":"1.0.0","sha256":format!("{:x}",Sha256::digest(b"artifact")),"signature":"c2ln",
+                "digestSignature":"YXR0"}],
+        }).to_string()).unwrap();
+        let Opened::NeedsInstall(offer) = connect(Some(&helper), &request, None, None, &progress, &access).await.unwrap() else {
+            panic!("missing remote component requires confirmation");
         };
-        let (session, snapshot) = opened(
-            connect(
-                &catalog,
-                &request(Path::new("/repo"), false),
-                None,
-                None,
-                &progress(),
-                Some(&access),
-            )
-            .await
-            .unwrap(),
-        );
-        assert_eq!(session.protocol(), 2);
-        assert_eq!(session.agent_version, "9.9.9");
-        // 快照被拍平成前端已经在用的形状：repo/root/generation/head/branch/files。
-        assert_eq!(snapshot["repo"], json!("/repo"));
-        assert_eq!(snapshot["branch"], json!("main"));
-        assert_eq!(snapshot["generation"], json!("3"));
-        assert_eq!(snapshot["files"], json!([{"path":"a.txt","xy":"M "}]));
-        assert_eq!(session.repo, "/repo");
-        assert_eq!(session.state_token().as_deref(), Some("tok-1"));
-        assert_eq!(log(&side.log), vec!["hello".to_string(), "open".to_string()]);
-        assert!(!root.join("v1-upload").exists(), "内嵌 v1 不该被上传");
-        assert!(!root.join("v1-connect").exists(), "内嵌 v1 不该被拉起");
-        session.agent.close().await;
-    }
-
-    /// 本机有 v2 产物却握不上手：明确报协议不匹配，不静默改走 v1。
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_v2_handshake_mismatch_is_reported_instead_of_falling_back() {
-        use fixture::*;
-        for behaviour in ["v1", "unsupported"] {
-            let side = ssh_side(behaviour, true);
-            let root = side.dir.path();
-            let catalog = connector(root, probe_without_agent(&"b".repeat(64)), Some(&v1_agent(root)), root);
-            let access = V2Access {
-                store: &side.store,
-                ssh: &side.ssh,
-                v2_dir: Some(side.artifacts.clone()),
-            };
-            let error = connect(
-                &catalog,
-                &request(Path::new("/repo"), false),
-                None,
-                None,
-                &progress(),
-                Some(&access),
-            )
-            .await
-            .err()
-            .expect("协议不一致必须报错");
-            assert_eq!(error.code, "remote_protocol_mismatch", "{behaviour}");
-            assert!(log(&side.log).contains(&"hello".to_string()), "{behaviour}");
-            assert!(!root.join("v1-connect").exists(), "握手失败不能改走 v1：{behaviour}");
-            assert!(!root.join("v1-upload").exists(), "握手失败不能上传 v1：{behaviour}");
-        }
-    }
-
-    /// 清单在但本机没有这台远端架构的产物：回退内嵌 v1，且一个字节都没有上传。
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_missing_target_architecture_falls_back_before_any_upload() {
-        use fixture::*;
-        let side = ssh_side("ok", false);
-        let root = side.dir.path();
-        let repo = repository(root);
-        // 故意只登记另一个架构：探测到的平台在清单里找不到。
-        let other = if std::env::consts::ARCH == "aarch64" { "x86_64" } else { "aarch64" };
-        std::fs::write(
-            side.artifacts.join("manifest.json"),
-            json!({"format":1,"artifacts":[{
-                "system": std::env::consts::OS, "architecture": other, "version":"9.9.9",
-                "file":"host/twiglane-agent-v2", "sha256":"a".repeat(64), "signature":"c2ln",
-            }]})
-            .to_string(),
-        )
-        .unwrap();
-        let catalog = connector(root, probe_with_v1_agent(&"b".repeat(64)), Some(&v1_agent(root)), &repo);
-        let access = V2Access {
-            store: &side.store,
-            ssh: &side.ssh,
-            v2_dir: Some(side.artifacts.clone()),
-        };
-        let (session, _) = opened(
-            connect(
-                &catalog,
-                &request(&repo, false),
-                None,
-                None,
-                &progress(),
-                Some(&access),
-            )
-            .await
-            .unwrap(),
-        );
-        assert_eq!(session.protocol(), 1);
-        assert!(!root.join("v1-upload").exists(), "没有匹配产物时不得开始上传");
-        assert!(log(&side.log).is_empty(), "v2 会话不该被拉起");
-        session.agent.close().await;
-    }
-
-    /// 审查会话（reviewId/基线）只有 v1 支持：即使 v2 可用也必须走 v1。
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn a_review_session_stays_on_v1_even_when_v2_is_available() {
-        use fixture::*;
-        let side = ssh_side("ok", true);
-        let root = side.dir.path();
-        let repo = repository(root);
-        let catalog = connector(root, probe_with_v1_agent(&"b".repeat(64)), Some(&v1_agent(root)), &repo);
-        let access = V2Access {
-            store: &side.store,
-            ssh: &side.ssh,
-            v2_dir: Some(side.artifacts.clone()),
-        };
-        let (session, _) = opened(
-            connect(
-                &catalog,
-                &request(&repo, true),
-                None,
-                None,
-                &progress(),
-                Some(&access),
-            )
-            .await
-            .unwrap(),
-        );
-        assert_eq!(session.protocol(), 1);
-        assert!(session.review_id.is_some());
-        assert!(log(&side.log).is_empty(), "审查会话不该碰 v2 组件");
-        session.agent.close().await;
+        request.allow_install = true;
+        probe["peerRevision"] = json!("d".repeat(64));
+        write("probe-v2.json", probe);
+        let stale = connect(Some(&helper), &request, Some(offer), None, &progress, &access).await.err().unwrap();
+        assert_eq!(stale.code, "target_changed");
+        assert!(!root.join("wrote").exists(), "mismatched configuration must not install or connect");
     }
 }

@@ -93,6 +93,7 @@ impl AgentTransport {
     /// Spawn the preconfigured helper in its own process scope. The transport
     /// creates all three pipes and drains stderr without exposing its contents.
     /// 默认按 v1 会话：它对应的内嵌组件只说 v1。
+    #[cfg(test)]
     pub fn spawn(command: &mut Command) -> Result<Self, AppError> {
         Self::spawn_with(command, 1)
     }
@@ -130,6 +131,22 @@ impl AgentTransport {
                 "连接工具缺少标准输入或输出管道。",
             ));
         };
+        let stderr = child.take_stderr();
+        Ok(Self::with_pipes(child, stdin, stdout, stderr, protocol))
+    }
+
+    pub(crate) fn checked_v2(connection: crate::remote_ssh::AgentConnection) -> (Self, tempfile::TempDir) {
+        let crate::remote_ssh::AgentConnection { child, stdin, stdout, stderr, folder } = connection;
+        (Self::with_pipes(child, stdin, stdout, Some(stderr), 2), folder)
+    }
+
+    fn with_pipes(
+        mut child: ScopedChild,
+        stdin: ChildStdin,
+        stdout: ChildStdout,
+        stderr: Option<ChildStderr>,
+        protocol: u32,
+    ) -> Self {
         let (outgoing, requests) = mpsc::channel(MAX_IN_FLIGHT);
         let (stop, mut stopping) = watch::channel(false);
         let (finished, stopped) = watch::channel(false);
@@ -137,7 +154,6 @@ impl AgentTransport {
         let waiting = Arc::clone(&pending);
         let events = Arc::new(Mutex::new(Vec::new()));
         let pushed = Arc::clone(&events);
-        let stderr = child.take_stderr();
         tokio::spawn(async move {
             let reading = read_responses(stdout, &waiting, protocol, &pushed);
             tokio::pin!(reading);
@@ -170,14 +186,14 @@ impl AgentTransport {
             let _ = child.wait().await;
             finished.send_replace(true);
         });
-        Ok(Self {
+        Self {
             pending,
             outgoing,
             stop,
             stopped,
             protocol,
             events,
-        })
+        }
     }
 
     /// Fields are an object containing only operation arguments. The transport

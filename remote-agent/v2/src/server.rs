@@ -529,6 +529,7 @@ impl Context {
             "status" => self.status(&request.fields, cancel).await,
             "diff" => self.diff(&request.fields, cancel).await,
             "taskReview" => self.task_review(&request.fields, cancel).await,
+            "taskReviewToken" => self.task_review_token(&request.fields, cancel).await,
             "reviewIdentity" => self.review_identity(&request.fields, cancel).await,
             // 历史、比较与文件历史：只按页读取当前选择。
             "history" => self.history(&request.fields, cancel).await,
@@ -781,6 +782,21 @@ impl Context {
         Ok(json!({ "repo": session.key, "generation": review.generation, "review": review }))
     }
 
+    async fn task_review_token(&self, fields: &Map<String, Value>, cancel: &AtomicBool) -> Result<Value, AppError> {
+        let session = self.repo_session(fields).await?;
+        check_bound_baseline(&session, fields)?;
+        let baseline = session.baseline.as_deref().ok_or_else(invalid_baseline)?;
+        let head = string_field(fields, "head")?;
+        let path = string_field(fields, "path")?;
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let token = task::task_review_token(
+            &self.backend, &session.key, baseline, &head, &path, generation, internal_request_id(),
+        ).await?;
+        check_cancel(cancel)?;
+        Ok(json!({ "repo": session.key, "token": token }))
+    }
+
     async fn diff(
         &self,
         fields: &Map<String, Value>,
@@ -808,6 +824,7 @@ impl Context {
         let context = optional_u64_field(fields, "context")?
             .map(|context| context.min(u64::from(MAX_CONTEXT)) as u32)
             .unwrap_or(3);
+        let as_text = bool_field(fields, "asText");
         let selection = Selection {
             path: path.clone(),
             original: original.clone(),
@@ -822,6 +839,12 @@ impl Context {
             let baseline = session.baseline.as_deref().ok_or_else(invalid_baseline)?;
             let state =
                 ops::state_token(&self.backend, &session.root, internal_request_id()).await?;
+            if optional_string_field(fields, "head")?
+                .as_deref()
+                .is_some_and(|expected| Some(expected) != state.head.as_deref())
+            {
+                return Err(cursor_expired());
+            }
             Some((baseline, state))
         } else {
             None
@@ -847,6 +870,7 @@ impl Context {
             limit,
             offset,
             context,
+            as_text,
         };
         if let Some(cursor) = cursor {
             Cursor::decode(&cursor)?.check(&query)?;
@@ -866,7 +890,7 @@ impl Context {
                 offset,
                 limit,
                 context,
-                false,
+                as_text,
             )
             .await?;
             let after =
@@ -1905,7 +1929,7 @@ impl Context {
             ));
         }
 
-        let receipt = Receipt::registered(
+        let mut receipt = Receipt::registered(
             &operation_id,
             &session.key,
             op.name(),
@@ -1940,6 +1964,21 @@ impl Context {
         }
         let generation = self.backend.scheduler.current_generation(&session.key);
         let branch = written_branch(&value);
+        receipt.review_outcome = state.as_ref().and_then(|state| {
+            let head = state.head.as_deref()?;
+            match op {
+                WriteOp::Commit if value["oid"].as_str() == Some(head) => Some("committed"),
+                WriteOp::MergeStart
+                    if (value["fastForwarded"].as_bool() == Some(true) || value["rebased"].as_bool() == Some(true))
+                        && receipt.before_head.as_deref() != Some(head) => Some("merged"),
+                WriteOp::MergeComplete if value["oid"].as_str() == Some(head) => match value["operation"].as_str() {
+                    Some("merge" | "rebase") => Some("merged"),
+                    Some("cherry-pick" | "revert") => Some("committed"),
+                    _ => None,
+                },
+                _ => None,
+            }.map(str::to_string)
+        });
         let receipt = store.complete(
             receipt,
             state.as_ref().and_then(|state| state.head.clone()),
@@ -2643,6 +2682,7 @@ struct DiffQuery {
     limit: u32,
     offset: u32,
     context: u32,
+    as_text: bool,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]

@@ -21,6 +21,7 @@ const port = vi.hoisted(() => ({
   diff: vi.fn(),
   write: vi.fn(),
   recover: vi.fn(),
+  call: vi.fn(),
 }));
 
 const review = vi.hoisted(() => ({
@@ -107,6 +108,65 @@ async function openHost(target = hostA, key = keyA, sessionId = "session-a", sna
   port.open.mockResolvedValueOnce(opened(sessionId, snap));
   return api.openRepository(key, 1);
 }
+
+it("closes a late native open result without replacing the newer SSH worktree", async () => {
+  const late = deferred<ReturnType<typeof opened>>();
+  port.open.mockImplementationOnce(() => late.promise)
+    .mockResolvedValueOnce(opened("session-b", snapshot({ repo: "repo-b" })));
+  const first = openRemoteRepository({
+    kind: "ssh", hostId: hostA.targetId, hostRevision: hostA.targetRevision, path: "/srv/repo",
+  });
+  const second = await openRemoteRepository({
+    kind: "ssh", hostId: hostB.targetId, hostRevision: hostB.targetRevision, path: "/srv/repo",
+  });
+  expect(second).toMatchObject({ kind: "opened", key: keyB });
+  late.resolve(opened("late-a"));
+  await expect(first).rejects.toMatchObject({ code: "cancelled" });
+  expect(port.close).toHaveBeenCalledWith("late-a");
+  expect(remoteRepositoryState(keyA)).toBeNull();
+  expect(remoteRepositoryState(keyB)).toMatchObject({ connected: true });
+});
+
+it("keeps the current SSH worktree if a new review cannot be accepted", async () => {
+  await openHost();
+  port.open.mockResolvedValueOnce(opened("session-b", snapshot({ repo: "repo-b" })));
+  review.accept.mockRejectedValueOnce({ code: "target_changed", message: "invalid review" });
+  await expect(openRemoteRepository({
+    kind: "ssh", hostId: hostB.targetId, hostRevision: hostB.targetRevision, path: "/srv/repo",
+  }, { reviewId: "review-b" })).rejects.toMatchObject({ code: "target_changed" });
+  expect(port.close).toHaveBeenCalledWith("session-b");
+  expect(port.close).not.toHaveBeenCalledWith("session-a");
+  expect(remoteRepositoryState(keyA)).toMatchObject({ connected: true });
+});
+
+it("loads a Cliora task range, exact-HEAD diff and review token over its SSH session", async () => {
+  const baseline = "b".repeat(40);
+  const head = "a".repeat(40);
+  const session = await openRemoteRepository({
+    kind: "ssh", hostId: hostA.targetId, hostRevision: hostA.targetRevision, path: "/srv/repo",
+  }, { reviewId: "review-a", baseline });
+  if (session.kind !== "opened") throw new Error("fixture did not open");
+  const generation = session.repository.generation;
+  port.call.mockResolvedValueOnce({ review: { baselineOid: baseline } });
+  await expect(api.taskReview(keyA, baseline, generation, 1)).rejects.toMatchObject({ code: "remote_protocol" });
+  port.call.mockImplementation(async (request) => request.op === "taskReview"
+    ? { review: {
+      worktree: "/srv/repo", baselineOid: baseline, headOid: head, rangeVersion: "range",
+      files: [], commits: [], branch: { name: "feature" },
+    } }
+    : { token: { baselineOid: baseline, path: "small.txt", token: "proof" } });
+  port.diff.mockResolvedValue(page("diff --git a/small.txt b/small.txt\n--- a/small.txt\n+++ b/small.txt\n@@ -1 +1 @@\n-old\n+new\n"));
+  await expect(api.taskReview(keyA, baseline, generation, 1)).resolves.toMatchObject({
+    worktree: keyA, generation, baselineOid: baseline, headOid: head,
+  });
+  await api.loadTaskDiff(keyA, baseline, head, "small.txt", generation, 2);
+  expect(port.diff).toHaveBeenCalledWith(expect.objectContaining({
+    sessionId: "session-a", head, view: "task", path: "small.txt",
+  }));
+  await expect(api.taskReviewToken(keyA, baseline, head, "small.txt", generation, 3))
+    .resolves.toMatchObject({ token: "proof", generation });
+  expect(invoke).not.toHaveBeenCalledWith("task_review", expect.anything());
+});
 
 beforeEach(() => {
   invoke.mockClear();

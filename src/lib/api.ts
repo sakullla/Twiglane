@@ -255,6 +255,8 @@ interface RemoteRepositorySession {
   generation: number;
   latest: RemoteWorktreeSnapshot;
   reviewId: string | null;
+  baseline: string | null;
+  statusRequest: number;
   pending: RemotePendingWrite | null;
   /**
    * 这次远端会话里实际做成的 Git 结果阶段：只由已经核对完成的 commit 推进，
@@ -277,11 +279,21 @@ interface RemoteRepositorySession {
 }
 
 /** 传输层错误：连接已不可用，界面转入只读。 */
-const DISCONNECT_CODES = new Set(["remote_disconnected", "ssh_failed", "remote_timeout", "ssh_auth_failed"]);
+const DISCONNECT_CODES = new Set(["remote_disconnected", "ssh_failed", "remote_timeout", "ssh_auth_failed", "target_changed", "worktree_changed"]);
 
 const remoteSessions = new Map<string, RemoteRepositorySession>();
 const remoteHostLabels = new Map<string, string>();
 let remoteGeneration = 1000;
+let remoteOpenEpoch = 0;
+
+function checkRemoteResponse(session: RemoteRepositorySession, generation = session.generation): void {
+  if (remoteSessions.get(session.key) !== session) {
+    throw remoteError("remote_disconnected", "远端仓库已切换，这次读取已丢弃。");
+  }
+  if (generation !== session.generation) {
+    throw remoteError("stale", "远端仓库已有变化，请重新读取。", session.generation);
+  }
+}
 
 /**
  * 远端仓库的提交说明草稿：只留在本次会话内存里，按仓库键分开。
@@ -377,8 +389,7 @@ function openedRemote(session: RemoteRepositorySession): OpenedRepository {
     // 远端仓库的提交说明草稿只在本会话内保留：本机 state.json 只服务本机仓库，
     // 但切走再回来要回到用户写下的那份，所以从会话内存里回读。
     draft: remoteDrafts.get(session.key) ?? "",
-    // 远端没有本机文件监听，变化由显式刷新与聚焦刷新发现。
-    watchDegraded: false,
+    watchDegraded: session.latest.watchDegraded ?? false,
   };
 }
 
@@ -386,10 +397,13 @@ async function remoteStatusOf(session: RemoteRepositorySession): Promise<RemoteW
   if (session.disconnected) {
     throw remoteError("remote_disconnected", "远端连接已断开，请重新打开这个远端仓库；当前内容只读。");
   }
+  const request = ++session.statusRequest;
+  const generation = session.generation;
   let snapshot: RemoteWorktreeSnapshot;
   try {
     snapshot = await remoteWorktreePort.status(session.sessionId);
   } catch (error) {
+    checkRemoteResponse(session, generation);
     const failure = normalizeError(error);
     if (DISCONNECT_CODES.has(failure.code) && !session.disconnected) {
       session.disconnected = true;
@@ -397,6 +411,10 @@ async function remoteStatusOf(session: RemoteRepositorySession): Promise<RemoteW
     }
     session.diffs.clear();
     throw failure;
+  }
+  checkRemoteResponse(session, generation);
+  if (request !== session.statusRequest) {
+    throw remoteError("cancelled", "已收到较新的远端状态请求，这次结果已丢弃。");
   }
   if (session.disconnected) {
     session.disconnected = false;
@@ -413,6 +431,7 @@ async function loadRemotePatch(
   session: RemoteRepositorySession,
   path: string,
   view: RemoteDiffView,
+  options: Pick<import("./remote-worktree").RemoteDiffRequest, "head" | "original" | "context" | "asText"> = {},
 ): Promise<RemotePatch & RemotePatchStageability> {
   const chunks: Uint8Array[] = [];
   let cursor: string | null = null;
@@ -430,10 +449,16 @@ async function loadRemotePatch(
         generation: session.token,
         path,
         view,
+        ...options,
         ...(cursor ? { cursor } : {}),
       });
     } catch (error) {
-      throw normalizeError(error);
+      const failure = normalizeError(error);
+      if (remoteSessions.get(session.key) === session && DISCONNECT_CODES.has(failure.code) && !session.disconnected) {
+        session.disconnected = true;
+        noteRemoteState();
+      }
+      throw failure;
     }
     if (pages === 0) reason = page.hunksStageableReason ?? null;
     const bytes = decodeBase64(page.data);
@@ -482,9 +507,10 @@ const UNRECORDED_HEAD_OPS = new Set(["mergeComplete", "amendCommit", "cherryPick
 const REVIEW_OUTCOME_ORDER: RemoteReviewOutcome[] = ["reviewed", "committed", "merged"];
 
 /** 记录这次会话真正做成的阶段；阶段只前进，回退的写入不会把声明降下来。 */
-function noteRemoteOutcome(session: RemoteRepositorySession, op: string): void {
-  if (UNRECORDED_HEAD_OPS.has(op) && session.unrecordedHeadOp === null) session.unrecordedHeadOp = op;
-  const reached = REVIEW_OUTCOME_BY_OP[op];
+function noteRemoteOutcome(session: RemoteRepositorySession, op: string, recorded?: RemoteReviewOutcome | null): void {
+  if (recorded) session.unrecordedHeadOp = null;
+  else if (UNRECORDED_HEAD_OPS.has(op) && session.unrecordedHeadOp === null) session.unrecordedHeadOp = op;
+  const reached = recorded ?? REVIEW_OUTCOME_BY_OP[op];
   if (!reached) return;
   if (REVIEW_OUTCOME_ORDER.indexOf(reached) > REVIEW_OUTCOME_ORDER.indexOf(session.outcome)) {
     session.outcome = reached;
@@ -496,13 +522,14 @@ async function settleRemoteWrite(
   result: RemoteWriteResult,
   op: RemotePendingWrite["op"],
 ): Promise<RemoteWorktreeSnapshot> {
+  checkRemoteResponse(session);
   if (result.state === "completed") {
-    session.pending = null;
-    noteRemoteState();
-    noteRemoteOutcome(session, op);
     if (result.snapshot.repo !== session.repo) {
       throw remoteError("target_changed", "远端工作树身份已变化，请重新打开这个远端仓库。", session.generation);
     }
+    session.pending = null;
+    noteRemoteState();
+    noteRemoteOutcome(session, op, result.reviewOutcome);
     session.diffs.clear();
     advanceRemoteGeneration(session, result.snapshot);
     return result.snapshot;
@@ -576,15 +603,18 @@ async function remoteWrite(
 async function closeRemoteSession(
   session: RemoteRepositorySession,
   reason: string,
+  preserveReview = false,
 ): Promise<void> {
-  remoteSessions.delete(session.key);
-  noteRemoteState();
+  if (remoteSessions.get(session.key) === session) {
+    remoteSessions.delete(session.key);
+    noteRemoteState();
+  }
   try {
     await remoteWorktreePort.close(session.sessionId);
   } catch {
     // 关闭失败不改变本机会话已结束的事实；下次打开会重新建立连接。
   }
-  if (session.reviewId) {
+  if (session.reviewId && !preserveReview) {
     try {
       await remoteReviewPort.end(session.reviewId, reason);
     } catch {
@@ -629,6 +659,7 @@ async function openRemote(
   location: Extract<RepositoryLocation, { kind: "ssh" }>,
   options: RemoteOpenOptions = {},
 ): Promise<RemoteOpenOutcome> {
+  const epoch = ++remoteOpenEpoch;
   let opened: RemoteOpenResult;
   try {
     opened = await remoteWorktreePort.open(
@@ -649,6 +680,7 @@ async function openRemote(
     throw normalizeError(error);
   }
   if (opened.kind === "install_required") {
+    if (epoch !== remoteOpenEpoch) throw remoteError("cancelled", "已取消这次远端连接。");
     return {
       kind: "install_required",
       version: opened.version,
@@ -658,11 +690,13 @@ async function openRemote(
   }
   const root = opened.snapshot.root;
   const host = await hostLabel(location.hostId, opened.snapshot.host || location.hostId);
+  const keepCurrent = () => {
+    if (epoch === remoteOpenEpoch) return;
+    void remoteWorktreePort.close(opened.sessionId).catch(() => undefined);
+    throw remoteError("cancelled", "已取消这次远端连接。");
+  };
+  keepCurrent();
   const key = remoteRepositoryKey(location.hostId, root);
-  // 主窗口同时只有一个当前仓库：先前打开的远端连接（含同名路径的另一台主机）先结束。
-  for (const previous of [...remoteSessions.values()]) {
-    await closeRemoteSession(previous, "cancelled");
-  }
   const session: RemoteRepositorySession = {
     key,
     hostId: location.hostId,
@@ -675,27 +709,36 @@ async function openRemote(
     generation: (remoteGeneration += 1),
     latest: opened.snapshot,
     reviewId: options.reviewId ?? null,
+    baseline: options.baseline ?? null,
+    statusRequest: 0,
     pending: opened.pendingWrite ?? null,
-    outcome: "reviewed",
+    outcome: opened.reviewOutcome ?? "reviewed",
     unrecordedHeadOp: null,
     returnedOutcome: null,
     disconnected: false,
     diffs: new Map(),
   };
-  remoteSessions.set(key, session);
-  noteRemoteState();
   if (session.reviewId) {
     try {
       await remoteReviewPort.accept(session.reviewId, session.sessionId);
     } catch (error) {
-      await closeRemoteSession(session, "open_failed");
+      const bound = [...remoteSessions.values()].some((previous) => previous.reviewId === session.reviewId);
+      await closeRemoteSession(session, "open_failed", bound || epoch !== remoteOpenEpoch);
       throw normalizeError(error);
     }
   }
+  keepCurrent();
+  for (const previous of [...remoteSessions.values()]) {
+    await closeRemoteSession(previous, "cancelled", previous.reviewId === options.reviewId);
+    keepCurrent();
+  }
+  remoteSessions.set(key, session);
+  noteRemoteState();
   if (session.pending) {
     // 打开时后端已经带回持久记录：只核对回执，不重发写入。
     await recoverRemoteWrite(session).catch(() => undefined);
   }
+  keepCurrent();
   return {
     kind: "opened",
     repository: openedRemote(session),
@@ -752,6 +795,9 @@ export type RemoteReturnOutcome =
  * 上停留；这里把真实原因说出来，不把「送不上去」写成「已经合入」。
  */
 function remoteReturnMessage(session: RemoteRepositorySession): string {
+  if (session.outcome === "merged") {
+    return "已向原 Cliora 会话返回远端审查结果（merged）。";
+  }
   const merged = session.unrecordedHeadOp === "mergeComplete";
   if (session.outcome === "reviewed") {
     if (merged) {
@@ -775,13 +821,14 @@ export async function remoteReturnReview(key: string): Promise<RemoteReturnOutco
     throw remoteError("write_pending", "请先核对远端操作结果，再返回 Cliora。", session.generation);
   }
   const declared = session.outcome;
+  let confirmed: RemoteReviewOutcome | void;
   try {
     // 阶段由这次会话里真正被审查账本登记的提交决定。什么都没有就是 reviewed，而这个
     // 阶段沿旧调用方的语义省略 outcome：端口与后端都把它当缺省值处理，协议保持向后兼容。
     if (declared === "reviewed") {
-      await remoteReviewPort.returnReview(session.reviewId, session.sessionId);
+      confirmed = await remoteReviewPort.returnReview(session.reviewId, session.sessionId);
     } else {
-      await remoteReviewPort.returnReview(session.reviewId, session.sessionId, declared);
+      confirmed = await remoteReviewPort.returnReview(session.reviewId, session.sessionId, declared);
     }
   } catch (error) {
     const failure = normalizeError(error);
@@ -798,8 +845,10 @@ export async function remoteReturnReview(key: string): Promise<RemoteReturnOutco
     }
     throw failure;
   }
-  session.returnedOutcome = declared;
-  return { state: "sent", outcome: declared, message: remoteReturnMessage(session) };
+  checkRemoteResponse(session);
+  const outcome = confirmed ?? declared;
+  session.returnedOutcome = outcome;
+  return { state: "sent", outcome, message: remoteReturnMessage({ ...session, outcome }) };
 }
 
 
@@ -1738,6 +1787,7 @@ async function remoteBridgeRead(
   op: RemoteCallOp,
   fields: BridgePayload = {},
 ): Promise<BridgePayload> {
+  const generation = session.generation;
   let result: unknown;
   try {
     result = await remoteWorktreePort.call({
@@ -1746,6 +1796,7 @@ async function remoteBridgeRead(
       fields,
     });
   } catch (error) {
+    checkRemoteResponse(session, generation);
     const failure = normalizeError(error);
     if (DISCONNECT_CODES.has(failure.code) && !session.disconnected) {
       session.disconnected = true;
@@ -1753,6 +1804,7 @@ async function remoteBridgeRead(
     }
     throw failure;
   }
+  checkRemoteResponse(session, generation);
   return bridgePayload(result, op);
 }
 
@@ -1972,6 +2024,7 @@ async function remoteStageMany(
 }
 
 async function closeAllRemoteSessions(): Promise<void> {
+  remoteOpenEpoch += 1;
   for (const session of [...remoteSessions.values()]) {
     await closeRemoteSession(session, "cancelled");
   }
@@ -2007,12 +2060,13 @@ const remoteOverrides: Record<string, unknown> = {
     const target = targets.find((item) => item.targetId === parsed.hostId);
     if (!target) throw remoteError("target_changed", "这台 SSH 主机已不在主机簿里，请重新选择主机。");
     if (target.unavailableReason) throw remoteError("target_unavailable", target.unavailableReason);
+    const previous = remoteSessions.get(path);
     const outcome = await openRemote({
       kind: "ssh",
       hostId: target.targetId,
       hostRevision: target.targetRevision,
       path: parsed.path,
-    });
+    }, previous?.reviewId ? { reviewId: previous.reviewId, baseline: previous.baseline } : {});
     if (outcome.kind === "install_required") {
       throw remoteError(
         "remote_install_required",
@@ -2034,6 +2088,71 @@ const remoteOverrides: Record<string, unknown> = {
     const session = remoteSession(path);
     const snapshot = await remoteStatusOf(session);
     return remoteStatus(snapshot, session.generation);
+  },
+
+  async taskReview(path: string, baseline: string, generation: number, requestId: number): Promise<TaskReview> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.taskReview(path, baseline, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    const result = await remoteBridgeRead(session, "taskReview", { baseline });
+    const review = bridgeField<TaskReview>(result, "review");
+    if (typeof review !== "object" || typeof review.baselineOid !== "string" ||
+        typeof review.headOid !== "string" || typeof review.rangeVersion !== "string" ||
+        !review.branch || !Array.isArray(review.commits) || !Array.isArray(review.files)) {
+      throw remoteError("remote_protocol", "远端任务范围响应格式无效，请重新读取。");
+    }
+    if (review.baselineOid !== session.baseline || review.baselineOid !== baseline) {
+      throw remoteError("invalid_baseline", "这次审查的任务起点已变化。");
+    }
+    return { ...review, worktree: session.key, generation: session.generation };
+  },
+
+  async loadTaskDiff(
+    path: string,
+    baseline: string,
+    head: string,
+    relative: string,
+    generation: number,
+    requestId: number,
+    original: string | null = null,
+    offset = 0,
+    limit = 0,
+    context?: number,
+    asText?: boolean,
+  ): Promise<DiffResponse> {
+    if (!isRemoteRepositoryKey(path)) {
+      return apiBase.loadTaskDiff(path, baseline, head, relative, generation, requestId, original, offset, limit, context, asText);
+    }
+    const session = remoteBridgeSession(path, generation);
+    if (baseline !== session.baseline) throw remoteError("invalid_baseline", "这次审查的任务起点已变化。");
+    const cacheKey = JSON.stringify(["task", relative, original, head, session.token, context, asText]);
+    let entry = session.diffs.get(cacheKey);
+    if (!entry) {
+      const patch = await loadRemotePatch(session, relative, "task", {
+        head,
+        ...(original ? { original } : {}),
+        ...(context === undefined ? {} : { context }),
+        ...(asText === undefined ? {} : { asText }),
+      });
+      checkRemoteResponse(session, generation);
+      entry = {
+        document: remoteDiffDocument(patch, generation, relative, false, session.token),
+        hunksStageableReason: patch.hunksStageableReason ?? REMOTE_HUNKS_UNSTAGEABLE_REASON,
+      };
+      if (session.diffs.size >= REMOTE_DIFF_CACHE_LIMIT) session.diffs.clear();
+      session.diffs.set(cacheKey, entry);
+    }
+    return { ...remoteDiffPage(entry.document, offset, limit), hunksStageableReason: entry.hunksStageableReason };
+  },
+
+  async taskReviewToken(
+    path: string, baseline: string, head: string, relative: string, generation: number, requestId: number,
+  ): Promise<TaskReviewToken> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.taskReviewToken(path, baseline, head, relative, generation, requestId);
+    const session = remoteBridgeSession(path, generation);
+    if (baseline !== session.baseline) throw remoteError("invalid_baseline", "这次审查的任务起点已变化。");
+    const result = await remoteBridgeRead(session, "taskReviewToken", { baseline, head, path: relative });
+    const token = bridgeField<TaskReviewToken>(result, "token");
+    return { ...token, generation: session.generation };
   },
 
   async loadDiff(

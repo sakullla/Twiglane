@@ -2,7 +2,7 @@
   import { onMount, untrack } from "svelte";
   import { BUSY_REASON } from "../ui";
   import { dependencyNote } from "../labels";
-  import { api, appVersion, pickDirectory, pickFile } from "../api";
+  import { api, appVersion, pickFile } from "../api";
   import type {
     GitInfo,
     PullIntegration,
@@ -472,12 +472,6 @@
     } catch (error) {
       sshMessage = { tone: "error", text: sshErrorText(error) };
     }
-  }
-
-  async function pickDefaultPath() {
-    if (!sshDraft) return;
-    const picked = await pickDirectory("选择远端默认目录");
-    if (picked) editDraft({ defaultPath: picked });
   }
 
   async function pickIdentityFile() {
@@ -1133,19 +1127,15 @@
             <p class="settings-note" data-ssh-config>{sshDraft.sshConfig}</p>
           {/if}
           <div class="settings-row">
-            <span class="settings-label">默认目录<small>远端仓库的默认绝对路径</small></span>
-            <div class="settings-actions">
-              <button type="button" class="btn btn-secondary btn-sm" onclick={() => void pickDefaultPath()}>
-                选择目录
-              </button>
-              <button type="button" class="btn btn-ghost btn-sm" onclick={() => editDraft({ defaultPath: null })}>
-                清除
-              </button>
-            </div>
+            <label class="settings-label" for="ssh-default-path">默认目录<small>远端仓库的默认绝对路径</small></label>
+            <input
+              id="ssh-default-path"
+              class="input"
+              value={sshDraft.defaultPath ?? ""}
+              placeholder="/srv/repo 或 C:/repo"
+              oninput={(event) => editDraft({ defaultPath: event.currentTarget.value || null })}
+            />
           </div>
-          {#if sshDraft.defaultPath}
-            <p class="settings-note" data-ssh-default-path>{sshDraft.defaultPath}</p>
-          {/if}
           <div class="settings-actions">
             <button
               type="button"

@@ -29,6 +29,7 @@ pub const CAPABILITIES: &[&str] = &[
     "status",
     "diff",
     "taskReview",
+    "taskReviewToken",
     "reviewIdentity",
     "stage",
     "unstage",

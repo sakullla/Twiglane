@@ -1039,6 +1039,8 @@ describe("Cliora 远端审查入口", () => {
       connected: true,
     });
     mocks.api.remoteReturnReview.mockResolvedValue({ state: "sent", outcome: "reviewed" });
+    mocks.api.taskReview.mockResolvedValue({ ...taskFor(BASELINE), worktree: "ssh://remote-a/srv/worktree" });
+    mocks.api.loadTaskDiff.mockImplementation(async (_worktree, _base, _head, path) => diffFor(path));
 
     const handle = await mountShell();
     const install = await screen.findByRole("button", { name: "确认安装" });
@@ -1135,6 +1137,8 @@ describe("远端仓库在主窗口：最近记录与草稿", () => {
     vi.spyOn(reviews, "begin").mockResolvedValue(source);
     vi.spyOn(reviews, "end").mockResolvedValue();
     mocks.api.remoteTargets.mockResolvedValue([host]);
+    mocks.api.taskReview.mockResolvedValue({ ...taskFor(BASELINE), worktree: REMOTE_KEY });
+    mocks.api.loadTaskDiff.mockImplementation(async (_worktree, _base, _head, path) => diffFor(path));
     mocks.api.openRemoteRepository.mockResolvedValue({
       kind: "opened",
       repository: opened(),
@@ -1184,6 +1188,7 @@ describe("远端仓库在主窗口：最近记录与草稿", () => {
     });
     await openReview(() => remoteOpened(saved.get(REMOTE_KEY) ?? ""));
 
+    await fireEvent.click(await screen.findByRole("button", { name: /^改动(?: \d+)?$/ }));
     const message = (await screen.findByRole("textbox", { name: "提交说明草稿" })) as HTMLTextAreaElement;
     await fireEvent.input(message, { target: { value: "远端草稿正文" } });
     await fireEvent.blur(message);

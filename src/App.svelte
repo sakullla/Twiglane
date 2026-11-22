@@ -3582,6 +3582,7 @@
       remoteReviewSource = spec.source;
       banner = null;
       rememberOpened(outcome.repository);
+      if (spec.source) openTaskReview(spec.source.baseline);
       // 远端仓库在本次会话的最近列表里：键是 hostId + 远端路径，别的仓库不会串到它上面。
       recent = [
         {
@@ -3680,15 +3681,14 @@
   /** 把当前远端审查结果返回原 Cliora 会话：只发送真实结果，不改本机仓库。 */
   async function returnRemoteReview() {
     const key = remoteKey;
+    const epoch = repositoryEpoch;
     if (!key || remoteReturning) return;
     remoteReturning = true;
     try {
-      // 两种结果都按返回的那句话显示：声明了哪个阶段、以及为什么没能声明更高的阶段
-      // （远端合入没有记录提交）只有 API 层知道，界面不自己编一句话盖掉它。
       const returned = await api.remoteReturnReview(key);
-      phaseNote = returned.message;
+      if (epoch === repositoryEpoch && remoteKey === key) phaseNote = returned.message;
     } catch (error) {
-      showError(error);
+      if (epoch === repositoryEpoch && remoteKey === key) showError(error);
     } finally {
       remoteReturning = false;
     }

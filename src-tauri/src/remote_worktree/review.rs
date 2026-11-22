@@ -1,6 +1,7 @@
 //! The remote review protocol has its own authority and never enters a local Git path.
 use super::{
-    connector, list, probe_identity, query, AppError, Managed, OpenRequest, Result, Session,
+    command, connector, connector_capability, list, probe_identity, query, query_command,
+    AppError, Managed, OpenRequest, Result, Session,
 };
 use reqwest::Url;
 use serde::Serialize;
@@ -38,7 +39,7 @@ fn conflict() -> AppError {
 
 /// 返回给 Cliora 的结果阶段。顺序本身就是约束：`Ord` 用来判定「必须严格递增」。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Outcome {
+pub(super) enum Outcome {
     Reviewed,
     Committed,
     Merged,
@@ -57,7 +58,7 @@ impl Outcome {
         }
     }
 
-    fn name(self) -> &'static str {
+    pub(super) fn name(self) -> &'static str {
         match self {
             Self::Reviewed => "reviewed",
             Self::Committed => "committed",
@@ -113,9 +114,9 @@ impl PartialEq for Source {
 impl Eq for Source {}
 
 impl Source {
-    fn parse(raw: &str) -> Result<Self> {
+    pub(super) fn parse(raw: &str) -> Result<Self> {
         if raw.len() > MAX_URL
-            || !raw.starts_with("twiglane://remote-review?")
+            || !(raw.starts_with("twiglane://remote-review?") || raw.starts_with("twiglane://remote-review/?"))
             || raw.contains('#')
             || raw.bytes().any(|c| c.is_ascii_whitespace())
             || raw
@@ -187,10 +188,6 @@ impl Source {
             || !hex(&result.peer_identity, 64)
             || !hex(&result.worktree_identity, 64)
             || !super::valid_path(&result.worktree_path, true)
-            || (result.worktree_path != "/"
-                && result.worktree_path[1..]
-                    .split('/')
-                    .any(|p| matches!(p, "" | "." | "..")))
             || result.baseline.as_deref().is_some_and(|v| !oid(v))
             || result.host_sync.as_deref().is_some_and(|v| !hex(v, 64))
         {
@@ -225,8 +222,12 @@ impl Source {
             Err(mismatch())
         }
     }
+    pub(super) fn worktree_identity(&self) -> &str {
+        &self.worktree_identity
+    }
+
     fn check_session(&self, session: &Session) -> Result<()> {
-        self.check_tree(&session.root, &session.repo)?;
+        self.check_tree(&session.root, session.worktree_identity.as_deref().unwrap_or(&session.repo))?;
         self.check_peer(&session.peer_revision, &session.peer_identity)?;
         if self.target_id == session.target.target_id
             && self.target_revision == session.target.target_revision
@@ -260,12 +261,41 @@ struct Entry {
     binding: Option<(String, String)>,
     ended: bool,
     committed: Option<String>,
+    merged: Option<String>,
     /// 最近一次返回给 Cliora 的阶段；下一次必须更靠后，不能回退也不能重复。
     outcome: Option<Outcome>,
     revision: u64,
     /// 已经有一次返回正在复核/送达：期间不放行第二条，避免同一阶段送达两次。
     /// 阶段本身只有在送达成功之后才推进，见 return_review。
     delivering: bool,
+    pending_delivery: Option<Delivery>,
+}
+
+#[derive(Clone)]
+struct Delivery {
+    stage: Outcome,
+    revision: u64,
+    url: Url,
+}
+
+impl Entry {
+    fn head_for(&self, stage: Outcome) -> Option<&str> {
+        match stage {
+            Outcome::Reviewed => None,
+            Outcome::Committed => self.committed.as_deref(),
+            Outcome::Merged => self.merged.as_deref(),
+        }
+    }
+
+    fn latest(&self) -> Outcome {
+        if self.merged.is_some() {
+            Outcome::Merged
+        } else if self.committed.is_some() {
+            Outcome::Committed
+        } else {
+            Outcome::Reviewed
+        }
+    }
 }
 
 impl Book {
@@ -290,9 +320,11 @@ impl Book {
                 binding: None,
                 ended: false,
                 committed: None,
+                merged: None,
                 outcome: None,
                 revision: 0,
                 delivering: false,
+                pending_delivery: None,
             },
         );
         Ok(true)
@@ -336,7 +368,11 @@ impl Book {
     pub(super) fn check_bound(&mut self, id: &str, sid: &str, session: &Session) -> Result<()> {
         self.bound(id, sid, session).map(|_| ())
     }
-    pub(super) fn record_commit(&mut self, id: &str, session: &Session, head: &str) {
+    pub(super) fn latest(&mut self, id: &str) -> Option<Outcome> {
+        self.entry(id).ok().map(|entry| entry.latest())
+    }
+
+    pub(super) fn record_result(&mut self, id: &str, session: &Session, outcome: Outcome, head: &str) -> Option<Outcome> {
         if let Ok(entry) = self.entry(id) {
             if oid(head)
                 && entry.source.check_session(session).is_ok()
@@ -345,9 +381,15 @@ impl Book {
                     .as_ref()
                     .is_some_and(|(_, repo)| repo == &session.repo)
             {
-                entry.committed = Some(head.to_owned());
+                match outcome {
+                    Outcome::Committed => entry.committed = Some(head.to_owned()),
+                    Outcome::Merged => entry.merged = Some(head.to_owned()),
+                    Outcome::Reviewed => return None,
+                }
+                return Some(entry.latest());
             }
         }
+        None
     }
     fn end(&mut self, id: &str, reason: &str) -> Result<Option<Url>> {
         let Some(entry) = self.entries.get_mut(id) else {
@@ -438,7 +480,7 @@ fn returned(
 ) -> Result<Url> {
     source.check_tree(
         snapshot["root"].as_str().unwrap_or_default(),
-        snapshot["repo"].as_str().unwrap_or_default(),
+        snapshot["worktreeIdentity"].as_str().or_else(|| snapshot["repo"].as_str()).unwrap_or_default(),
     )?;
     let files = snapshot["files"].as_array().ok_or_else(mismatch)?;
     let observed = match snapshot.get("head") {
@@ -476,28 +518,35 @@ fn next_outcome(previous: Option<Outcome>, requested: Outcome) -> Result<Outcome
     Ok(requested)
 }
 
-/// 清掉送达占位，保留原来的阶段：所有失败路径的唯一出口。
-///
-/// 这里刻意不碰 outcome/revision —— 失败意味着 Cliora 没收到结果，账本也必须原地不动，
-/// 否则同一阶段的合法重试会被 next_outcome 判成 conflict，动作再也发不出去。
-fn release_delivery(state: &super::RemoteWorktrees, review_id: &str) {
-    let mut book = state.reviews.lock().unwrap();
-    if let Some(entry) = book.entries.get_mut(review_id) {
-        entry.delivering = false;
+struct DeliveryGuard<'a> {
+    state: &'a super::RemoteWorktrees,
+    review_id: &'a str,
+}
+
+impl Drop for DeliveryGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(entry) = self.state.reviews.lock().unwrap().entries.get_mut(self.review_id) {
+            entry.delivering = false;
+        }
     }
 }
 
-/// 一次「返回 Cliora」：先复核对端与工作树，只有 deliver 成功之后才推进阶段。
-///
-/// 顺序就是这条链的约束：connector/list/probe/check_peer/status/returned 任一步失败，
-/// outcome 与 revision 都必须保持原样（Cliora 什么都没收到）；deliver 失败同样不推进。
+async fn receipt(helper: &std::path::Path, source: &Source, revision: u64) -> Result<bool> {
+    let mut cmd = command(helper, "review-receipt", None);
+    cmd.args([&source.review_id, &source.session_id, &revision.to_string()]);
+    query_command(cmd).await?["stored"].as_bool().ok_or_else(|| {
+        AppError::new("remote_protocol", "Cliora 返回的审查确认格式无效。")
+    })
+}
+
+/// 同一 revision 在结果待确认时只重送原载荷，只有 Cliora 落库才推进阶段。
 async fn return_review<F>(
     state: &super::RemoteWorktrees,
     review_id: &str,
     session_id: &str,
     requested: Outcome,
     deliver: F,
-) -> Result<()>
+) -> Result<Outcome>
 where
     F: FnOnce(&Url) -> Result<()>,
 {
@@ -505,103 +554,90 @@ where
     let check_pending = || {
         let _guard = state.mutations.lock().unwrap();
         if super::read_pending(&session.journal(&state.data), &session.repo)?.is_some() {
-            return Err(AppError::new(
-                "write_pending",
-                "请先核对远端操作结果，再返回 Cliora。",
-            ));
+            return Err(AppError::new("write_pending", "请先核对远端操作结果，再返回 Cliora。"));
         }
         Ok(())
     };
     check_pending()?;
-    // 只读地算出这次要送达的阶段，并占住这条来源：阶段一步都还没有写进账本。
-    let (source, previous_revision, previous_outcome, stage, committed) = {
+    let (source, stage, revision, head, previous) = {
         let mut book = state.reviews.lock().unwrap();
         let entry = book.bound(review_id, session_id, &session)?;
         if entry.delivering {
-            return Err(AppError::new(
-                "remote_busy",
-                "这个审查结果正在返回 Cliora，请稍后重试。",
-            ));
+            return Err(AppError::new("remote_busy", "这个审查结果正在返回 Cliora，请稍后重试。"));
         }
-        let stage = next_outcome(entry.outcome, requested)?;
-        // committed / merged 都必须报得出这次审查的提交，否则只是声称进展。
-        if stage != Outcome::Reviewed && entry.committed.is_none() {
+        let previous = entry.pending_delivery.clone();
+        let (stage, revision) = if let Some(pending) = &previous {
+            (pending.stage, pending.revision)
+        } else {
+            (next_outcome(entry.outcome, requested)?, entry.revision.checked_add(1).ok_or_else(expired)?)
+        };
+        let head = entry.head_for(stage).map(str::to_owned);
+        if previous.is_none() && stage != Outcome::Reviewed && head.is_none() {
             return Err(conflict());
         }
         entry.delivering = true;
-        (
-            entry.source.clone(),
-            entry.revision,
-            entry.outcome,
-            stage,
-            entry.committed.clone(),
-        )
+        (entry.source.clone(), stage, revision, head, previous)
     };
-    let revision = match previous_revision.checked_add(1) {
-        Some(revision) => revision,
-        None => {
-            release_delivery(state, review_id);
-            return Err(expired());
-        }
-    };
-    // 复核：这些 await 期间账本一行都不写。
-    let prepared: Result<Url> = async {
-        let helper = connector().await?;
-        let target = list(&helper)
-            .await?
-            .into_iter()
-            .find(|t| {
-                t.target_id == source.target_id
-                    && t.target_revision == source.target_revision
-                    && t.unavailable_reason.is_none()
+    let _delivery = DeliveryGuard { state, review_id };
+    let helper = connector().await?;
+    connector_capability(&helper, "reviewReceipt").await?;
+    let already_stored = receipt(&helper, &source, revision).await?;
+    if already_stored && previous.is_none() {
+        // A restarted Twiglane process must not mistake the receipt for an
+        // earlier use of this source and revision for a new delivery.
+        return Err(expired());
+    }
+    if !already_stored {
+        let target = list(&helper).await?.into_iter()
+            .find(|target| {
+                target.target_id == source.target_id && target.target_revision == source.target_revision
+                    && target.unavailable_reason.is_none()
             })
             .ok_or_else(mismatch)?;
-        let observed = query(&helper, "probe", Some(&target)).await?;
+        let observed = query(&helper, "probe-v2", Some(&target)).await?;
         source.check_peer(
             probe_identity(&observed["peerRevision"])?,
             probe_identity(&observed["peerIdentity"])?,
         )?;
-        let snapshot = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            session.status_for(None),
-        )
-        .await
-        .map_err(|_| AppError::new("remote_timeout", "等待远端工作树复核超时，请重试。"))??;
-        let url = returned(&source, revision, stage, committed.as_deref(), &snapshot)?;
+        let url = if let Some(pending) = previous {
+            pending.url
+        } else {
+            let snapshot = tokio::time::timeout(std::time::Duration::from_secs(120), session.status_for(None))
+                .await
+                .map_err(|_| AppError::new("remote_timeout", "等待远端工作树复核超时，请重试。"))??;
+            returned(&source, revision, stage, head.as_deref(), &snapshot)?
+        };
         state.session(session_id)?;
         check_pending()?;
-        // 最后一道状态核对：复核期间账本被别的路径改过（记录新提交或已结束）就不再送达。
-        let book = state.reviews.lock().unwrap();
-        match book.entries.get(review_id) {
-            Some(entry)
-                if !entry.ended
-                    && entry.revision == previous_revision
-                    && entry.outcome == previous_outcome
-                    && entry.committed == committed => {}
-            _ => return Err(expired()),
+        {
+            let mut book = state.reviews.lock().unwrap();
+            let entry = book.bound(review_id, session_id, &session)?;
+            if entry.pending_delivery.is_none() && entry.head_for(stage) != head.as_deref() {
+                return Err(expired());
+            }
+            entry.pending_delivery = Some(Delivery { stage, revision, url: url.clone() });
         }
-        Ok(url)
+        deliver(&url)?;
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                if receipt(&helper, &source, revision).await? {
+                    return Ok::<(), AppError>(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+            }
+        }).await.map_err(|_| AppError::new(
+            "review_delivery_unconfirmed",
+            "Cliora 尚未确认收到这条审查结果。可以重试，重试会核对并沿用本次结果。",
+        ))??;
     }
-    .await;
-    let url = match prepared {
-        Ok(url) => url,
-        Err(error) => {
-            release_delivery(state, review_id);
-            return Err(error);
-        }
-    };
-    // Cliora 收下之后才允许推进阶段：送达失败同样保持原样，同一阶段可以原样重试。
-    if let Err(error) = deliver(&url) {
-        release_delivery(state, review_id);
-        return Err(error);
-    }
+
     let mut book = state.reviews.lock().unwrap();
     if let Some(entry) = book.entries.get_mut(review_id) {
-        entry.delivering = false;
+        entry.pending_delivery = None;
         entry.revision = revision;
         entry.outcome = Some(stage);
     }
-    Ok(())
+    Ok(stage)
 }
 
 #[tauri::command]
@@ -611,16 +647,13 @@ pub async fn remote_review_return<R: Runtime>(
     review_id: String,
     session_id: String,
     outcome: Option<String>,
-) -> Result<()> {
-    let requested = match outcome.as_deref() {
-        Some(value) => Outcome::parse(value)?,
-        // 旧调用方不带 outcome：语义仍是「只做了审查」。
-        None => Outcome::Reviewed,
-    };
+) -> Result<&'static str> {
+    let requested = outcome.as_deref().map(Outcome::parse).transpose()?.unwrap_or(Outcome::Reviewed);
     return_review(state.inner(), &review_id, &session_id, requested, |url| {
         crate::cliora::open_checked_cliora(&app, url.as_str())
     })
     .await
+    .map(Outcome::name)
 }
 
 #[cfg(test)]
@@ -780,145 +813,24 @@ mod tests {
             .is_err());
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn native_open_checks_peer_before_agent_start_and_canonical_root_afterwards() {
-        use super::super::{connect, AGENT};
-        use sha2::{Digest, Sha256};
-        use std::os::unix::fs::{symlink, PermissionsExt};
-        use tauri::ipc::Channel;
-
-        let folder = tempfile::tempdir().unwrap();
-        let repo = folder.path().join("real");
-        assert!(std::process::Command::new("git")
-            .args(["init", "-q"])
-            .arg(&repo)
-            .status()
-            .unwrap()
-            .success());
-        let alias = folder.path().join("alias");
-        symlink(&repo, &alias).unwrap();
-        let mut source = Source::parse(&source_link()).unwrap();
-        source.worktree_path = alias.to_str().unwrap().into();
-        let git = |args: &[&str]| {
-            std::process::Command::new("git")
-                .arg("-C")
-                .arg(&repo)
-                .args(args)
-                .output()
-                .unwrap()
-        };
-        assert!(git(&[
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "base"
-        ])
-        .status
-        .success());
-        source.baseline = Some(
-            String::from_utf8(git(&["rev-parse", "HEAD"]).stdout)
-                .unwrap()
-                .trim()
-                .into(),
-        );
-        let executable =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../remote-agent/agent");
-        let agent = crate::remote_worktree_transport::AgentTransport::spawn(
-            &mut tokio::process::Command::new(executable),
-        )
-        .unwrap();
-        let original = agent.rpc("open", json!({"path":repo})).await.unwrap();
-        source.worktree_identity = original["repo"].as_str().unwrap().into();
-        agent.close().await;
-        let mut request = OpenRequest {
-            request_id: Uuid::new_v4().to_string(),
-            target_id: source.target_id.clone(),
-            target_revision: source.target_revision.clone(),
-            path: source.worktree_path.clone(),
-            baseline: source.baseline.clone(),
-            allow_install: false,
-            install_confirmation: None,
-            review_id: Some(source.review_id.clone()),
-        };
-        source.check_request(&request).unwrap();
-        let mut other = request.clone();
-        other.target_id = "host-b".into();
-        assert!(source.check_request(&other).is_err());
-        let catalog = json!({"protocol":1, "targets":[{"targetId":"host-a","name":"A","host":"host-a","user":"test","port":22,
-                            "authMethod":"key","targetRevision":source.target_revision}]});
-        std::fs::write(folder.path().join("list.json"), catalog.to_string()).unwrap();
-        let helper = folder.path().join("helper");
-        std::fs::write(
-            &helper,
-            r#"#!/bin/sh
-cd -- "$(dirname "$0")" || exit 1
-case "$2" in
-list|probe) cat "$2.json" ;;
-connect) touch started; exec ./agent --stdio ;;
-*) exit 1 ;;
-esac
-"#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::write(folder.path().join("agent"), AGENT).unwrap();
-        std::fs::set_permissions(
-            folder.path().join("agent"),
-            std::fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
-        let mut probe = json!({"system":"Linux","pythonVersion":"3.11","peerRevision":source.peer_revision,
-            "peerIdentity":"e".repeat(64),"agentSha256":format!("{:x}",Sha256::digest(AGENT)),"agentSignature":"fixture"});
-        for (expected_peer, agent_started) in [
-            ("e".repeat(64), false),
-            (source.peer_identity.clone(), true),
-        ] {
-            probe["peerIdentity"] = json!(expected_peer);
-            std::fs::write(folder.path().join("probe.json"), probe.to_string()).unwrap();
-            let result = connect(
-                &helper,
-                &request,
-                None,
-                Some(&source),
-                &Channel::new(|_| Ok(())),
-                None,
-            )
-            .await;
-            assert_eq!(result.err().unwrap().code, "target_changed");
-            assert_eq!(folder.path().join("started").exists(), agent_started);
+    #[test]
+    fn a_normalized_windows_review_link_keeps_the_original_source_binding() {
+        let raw = source_link().replace("remote-review?", "remote-review/?");
+        let mut url = Url::parse(&raw).unwrap();
+        let pairs = url.query_pairs().into_owned().collect::<Vec<_>>();
+        url.query_pairs_mut().clear().extend_pairs(pairs.into_iter().map(|(name, value)| {
+            let path = if name == "worktreePath" { "C:/项目 with spaces/repo".into() } else { value };
+            (name, path)
+        }));
+        let source = Source::parse(url.as_str()).unwrap();
+        assert_eq!(source.worktree_path, "C:/项目 with spaces/repo");
+        assert!(source.check_peer(&source.peer_revision, &source.peer_identity).is_ok());
+        assert!(source.check_tree(&source.worktree_path, &source.worktree_identity).is_ok());
+        assert!(source.check_tree("C:/different/repo", &source.worktree_identity).is_err());
+        assert!(source.check_tree(&source.worktree_path, &"0".repeat(64)).is_err());
+        for invalid in ["C:relative", "C:/../repo", "C:/repo//child", "C:\\repo"] {
+            assert!(!super::super::valid_path(invalid, true), "{invalid}");
         }
-        source.worktree_path = original["root"].as_str().unwrap().into();
-        request.path = source.worktree_path.clone();
-        // Same authenticated peer, same canonical path and same reachable commit,
-        // but a replacement checkout has a different agent Worktree.key.
-        source.worktree_identity = "0".repeat(64);
-        let replaced = connect(
-            &helper,
-            &request,
-            None,
-            Some(&source),
-            &Channel::new(|_| Ok(())),
-            None,
-        )
-        .await;
-        assert_eq!(replaced.err().unwrap().code, "target_changed");
-        source.worktree_identity = original["repo"].as_str().unwrap().into();
-        let opened = connect(
-            &helper,
-            &request,
-            None,
-            Some(&source),
-            &Channel::new(|_| Ok(())),
-            None,
-        )
-        .await
-        .unwrap();
-        assert!(matches!(opened, super::super::Opened::Worktree(_, _)));
     }
 
     #[cfg(unix)]
@@ -977,12 +889,13 @@ esac
             peer_identity: source.peer_identity.clone(),
             peer_revision: source.peer_revision.clone(),
             root: source.worktree_path.clone(),
+            worktree_identity: None,
             baseline: source.baseline.clone(),
             review_id: Some(source.review_id.clone()),
             hunk_stageable: false,
             // 这条测试只走 v1 内嵌组件：没有 v2 写入令牌，也没有 v2 私有目录。
-            agent_version: super::super::V1_VERSION.to_string(),
-            state_token: std::sync::Mutex::new(None),
+            agent_version: "v1".into(),
+            state_token: std::sync::Mutex::default(),
             _session_dir: None,
         };
         let state = RemoteWorktrees::new(root.path().join("journal"));
@@ -1047,7 +960,7 @@ esac
             assert!(!drifted
                 .as_str()
                 .contains(source.baseline.as_deref().unwrap()));
-            book.record_commit(&other.review_id, &session, &head);
+            book.record_result(&other.review_id, &session, Outcome::Committed, &head);
             assert!(book.entry(&other.review_id).unwrap().committed.is_none());
             assert!(book.end(&source.review_id, "cancelled").unwrap().is_none());
             assert!(book.bound(&source.review_id, "local-a", &session).is_err());
@@ -1173,11 +1086,12 @@ esac
             peer_identity: source.peer_identity.clone(),
             peer_revision: source.peer_revision.clone(),
             root: source.worktree_path.clone(),
+            worktree_identity: None,
             baseline: source.baseline.clone(),
             review_id: Some(source.review_id.clone()),
             hunk_stageable: false,
-            agent_version: super::super::V1_VERSION.to_string(),
-            state_token: std::sync::Mutex::new(None),
+            agent_version: "v1".into(),
+            state_token: std::sync::Mutex::default(),
             _session_dir: None,
         });
         let state = RemoteWorktrees::new(root.path().join("journal"));
@@ -1194,11 +1108,11 @@ esac
                 .unwrap();
         }
 
-        // 假连接器：list/probe 各读自己那份 JSON；把 probe.json 改坏就让这一次复核失败。
+        // 假连接器：源码跳转和落库确认独立，只有后者可推进阶段。
         let helper = root.path().join("helper");
         std::fs::write(
             &helper,
-            "#!/bin/sh\ncd -- \"$(dirname \"$0\")\" || exit 1\ncase \"$2\" in\nlist|probe) cat \"$2.json\" ;;\n*) exit 1 ;;\nesac\n",
+            "#!/bin/sh\ncd -- \"$(dirname \"$0\")\" || exit 1\ncase \"$2\" in\nversion|list|probe-v2|review-receipt) cat \"$2.json\" ;;\n*) exit 1 ;;\nesac\n",
         )
         .unwrap();
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1206,13 +1120,17 @@ esac
             "targetId":source.target_id,"name":"A","host":"A","user":"dev",
             "port":22,"authMethod":"key","targetRevision":source.target_revision}]});
         std::fs::write(root.path().join("list.json"), catalog.to_string()).unwrap();
+        std::fs::write(root.path().join("version.json"), r#"{"protocol":1,"capabilities":["reviewReceipt"]}"#).unwrap();
         let good = json!({"system":"Linux","pythonVersion":"3.11",
             "peerRevision":source.peer_revision,"peerIdentity":source.peer_identity});
         let broken = json!({"system":"Linux","pythonVersion":"3.11",
             "peerRevision":source.peer_revision,
             "peerIdentity":"e".repeat(64)});
         let write_probe = |value: &Value| {
-            std::fs::write(root.path().join("probe.json"), value.to_string()).unwrap();
+            std::fs::write(root.path().join("probe-v2.json"), value.to_string()).unwrap();
+        };
+        let write_receipt = |stored: bool| {
+            std::fs::write(root.path().join("review-receipt.json"), json!({"stored":stored}).to_string()).unwrap();
         };
         write_probe(&good);
         // connector() 只认这一个环境变量；本用例独占它，结束时清掉。
@@ -1230,6 +1148,7 @@ esac
             (Outcome::Committed, true),
             (Outcome::Merged, true),
         ] {
+            write_receipt(false);
             // committed/merged 都必须有这次审查记录的提交，否则连尝试都只是声称进展。
             if need_commit {
                 git(&["commit", "--allow-empty", "-qm", stage.name()]);
@@ -1238,7 +1157,7 @@ esac
                     .reviews
                     .lock()
                     .unwrap()
-                    .record_commit(&source.review_id, &session, &head);
+                    .record_result(&source.review_id, &session, stage, &head);
             }
             let before = observed(&state);
             // 1) 复核在送达之前失败：阶段与修订号原地不动，占位也释放，Cliora 没收到任何东西。
@@ -1270,6 +1189,8 @@ esac
             return_review(&state, &source.review_id, &session_id, stage, |url| {
                 delivered += 1;
                 last = Some(url.to_string());
+                assert_eq!(observed(&state).1, before.1);
+                write_receipt(true);
                 Ok(())
             })
             .await

@@ -254,9 +254,14 @@ pub fn validate_ssh_target(mut target: SshTarget) -> Result<SshTarget, AppError>
     let local_absolute = |path: &str| Path::new(path).is_absolute();
     target.identity_file = ssh_path(target.identity_file, local_absolute).ok_or_else(invalid_target)?;
     target.ssh_config = ssh_path(target.ssh_config, local_absolute).ok_or_else(invalid_target)?;
-    // Remote repositories are on Linux or macOS, regardless of the desktop OS.
+    // The path is interpreted on the SSH host, independently of the desktop OS.
     target.default_path = ssh_path(target.default_path, |path| {
-        path.starts_with('/') || local_absolute(path)
+        path.starts_with('/')
+            || path.as_bytes().get(..3).is_some_and(|prefix| {
+                prefix[0].is_ascii_alphabetic()
+                    && prefix[1] == b':'
+                    && matches!(prefix[2], b'/' | b'\\')
+            })
     })
     .ok_or_else(invalid_target)?;
     // 密钥认证可以不指定文件（由 ssh-agent 或默认身份文件提供）；给了就必须是绝对路径。
@@ -976,10 +981,11 @@ mod tests {
         // 仅显示名与默认目录变化：连接身份不变，修订不动。
         let mut renamed = first.clone();
         renamed.display_name = "构建机（改名）".into();
-        renamed.default_path = Some("/srv/app2".into());
+        renamed.default_path = Some("C:/项目 with spaces/repo".into());
         let renamed = store.save_remote_ssh_target(renamed).unwrap();
         assert_eq!(renamed.revision, 1);
         assert_eq!(renamed.display_name, "构建机（改名）");
+        assert_eq!(renamed.default_path.as_deref(), Some("C:/项目 with spaces/repo"));
 
         // 主机变化：必须推进修订，要求重新确认。
         let mut moved = renamed.clone();

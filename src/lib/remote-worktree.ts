@@ -39,6 +39,10 @@ export interface RemoteWorktreeSnapshot {
   generation: string;
   files: { path: string; xy: string }[];
   reviewFiles?: string[];
+  reviewFilesTruncated?: boolean;
+  reviewError?: { code: string; message: string } | null;
+  worktreeIdentity?: string;
+  watchDegraded?: boolean;
 }
 
 export interface RemoteWorkspace {
@@ -64,7 +68,7 @@ export interface RemoteConnectionProgress {
 }
 
 export type RemoteOpenResult =
-  | { kind: "open"; sessionId: string; snapshot: RemoteWorktreeSnapshot; pendingWrite: RemotePendingWrite | null }
+  | { kind: "open"; sessionId: string; snapshot: RemoteWorktreeSnapshot; pendingWrite: RemotePendingWrite | null; reviewOutcome?: RemoteReviewOutcome | null }
   | { kind: "install_required"; version: string; size: number; confirmationId?: string };
 
 export type RemoteDiffView = "staged" | "unstaged" | "task";
@@ -75,6 +79,10 @@ export interface RemoteDiffRequest {
   path: string;
   view: RemoteDiffView;
   cursor?: string;
+  original?: string;
+  head?: string;
+  context?: number;
+  asText?: boolean;
 }
 
 export interface RemoteDiffPage {
@@ -110,6 +118,8 @@ export type RemoteWriteRequest = RemoteWriteAction & {
  * 前端不得据此回退到本机 Git。
  */
 export const REMOTE_READ_OPS = [
+  "taskReview",
+  "taskReviewToken",
   "history",
   "fileHistory",
   "commitDetail",
@@ -184,7 +194,7 @@ export interface RemoteCallRequest {
 export type RemoteCallResult = RemoteWriteResult | Record<string, unknown>;
 
 export type RemoteWriteResult =
-  | { state: "completed"; operationId: string; snapshot: RemoteWorktreeSnapshot; head?: string | null }
+  | { state: "completed"; operationId: string; snapshot: RemoteWorktreeSnapshot; head?: string | null; reviewOutcome?: RemoteReviewOutcome | null }
   // Return "failed" only when the outcome is verified and the write had no effect.
   | { state: "failed" | "unknown"; operationId: string; message: string };
 
@@ -245,7 +255,7 @@ export const remoteReviewPort = {
   end: (reviewId: string, reason: string) => invoke<void>("remote_review_end", { reviewId, reason }),
   /** 结果阶段只能前进（reviewed → committed → merged），回退或重复由后端拒绝。 */
   returnReview: (reviewId: string, sessionId: string, outcome?: RemoteReviewOutcome) =>
-    invoke<void>("remote_review_return", { reviewId, sessionId, outcome }),
+    invoke<RemoteReviewOutcome | void>("remote_review_return", { reviewId, sessionId, outcome }),
 };
 
 /**
@@ -373,8 +383,8 @@ function normalizeRemoteDrivePath(path: string): string | null {
 
 export function normalizeRemotePath(input: string): string | null {
   const path = input.trim();
-  if (path.includes("\0")) return null;
-  return path.startsWith("/") ? path : normalizeRemoteDrivePath(path);
+  if (/[\u0000-\u001f\u007f]/.test(path)) return null;
+  return path.startsWith("/") ? path.replace(/\/+$/, "") || "/" : normalizeRemoteDrivePath(path);
 }
 
 /**

@@ -13,39 +13,29 @@ Twiglane 与 Cliora 的双向跳转在交接仓库或审查上下文之前，先
 
 ## 1. 会话
 
-**协议版本 2，两种调用形态都接受。** 调用方必须先读对端 `version`，再决定传参方式：
-
-```
-<对端可执行文件> --host-sync-v1 version
-{"protocol":2,"kind":"host-sync-v1","app":"twiglane","capabilities":["stdinArgs","legacyArgv","confirmation"],"actions":["begin","check","fetch","settle","receive","confirm"],"ttlSeconds":120,"confirmation":{"required":"password","ttlSeconds":120}}
-```
-
-- 对端 `capabilities` 里有 `stdinArgs` → 用 **stdin 形态**（v2）：argv 只放动作名（`receive` 另加
-  对端程序路径），会话引用与主机标识从 stdin 读一行参数（首选一行 JSON，也接受同样的定位纯文本字段）。
-- 对端没有 `stdinArgs`，或 `version` 根本不返回能力 → 用 **旧 argv 形态**（v1）：动作名与参数都在
-  argv。已发布的 Cliora v0.4.168 的 helper 只按 argv 位置解析参数，并且它 spawn 对端时 stdin 是
-  `Stdio::null()`，所以对它写 stdin 只会得到 broken pipe——这是与它互通的唯一方式。
-- 两种形态解析出同一套动作参数；argv 位置对不上（多一个或少一个参数）一律 `host_sync_argv_rejected`，
-  不会被悄悄忽略。
-
-stdin 形态（v2）：
+**协议版本 2，只有一种调用形态：动作名在 argv，参数与秘密只走 stdin。** argv 里出现参数一律
+`host_sync_argv_rejected`，这样 `ps`、进程审计与崩溃报告都看不到会话引用与主机标识。
 
 ```
 echo '{"hostId":"<hostId>"}' | <来源应用可执行文件> --host-sync-v1 begin
 ```
 
-旧 argv 形态（v1）：
+`receive` 的 argv 上额外允许一个对端程序路径，其余参数同样只走 stdin。
+
+### 1.1 版本协商：不一致就拒绝，不降级
+
+调用对端之前必须先读它的 `version`：
 
 ```
-<来源应用可执行文件> --host-sync-v1 begin <hostId>
-<来源应用可执行文件> --host-sync-v1 check <sessionRef> <challenge>
-<来源应用可执行文件> --host-sync-v1 fetch <sessionRef> <challenge> config|password|all
-<来源应用可执行文件> --host-sync-v1 settle <sessionRef>
+<对端可执行文件> --host-sync-v1 version
+{"protocol":2,"kind":"host-sync-v1","app":"twiglane","capabilities":["stdinArgs","confirmation"],"actions":["begin","check","fetch","settle","receive","confirm"],"ttlSeconds":120,"confirmation":{"required":"password","ttlSeconds":120}}
 ```
 
-**代价与边界**：argv 形态下 `ps`、进程审计与崩溃报告能看到本次会话引用与主机标识（配置层面的
-可见性）。**密码不受影响**：无论哪种形态，password scope 都必须持有一次性确认票据（第 3.1 节），
-argv 形态没有票据同样返回 `sync_confirmation_required`，因此 argv 可观测性最多泄漏配置，不泄漏密码。
+- 对端 `protocol >= 2` 且 `capabilities` 含 `stdinArgs` → 正常调用（动作名在 argv，参数走 stdin）。
+- 对端是 v1（`protocol` 更小、`capabilities` 不含 `stdinArgs`，或根本没有 `version` 动作）→
+  **直接失败**，错误码 `host_sync_peer_protocol_unsupported`，不发出任何带参数的调用。
+- 没有 argv 兼容形态：v1 对端只按 argv 位置解析参数，本版本不接受 argv 传参，强行互通只会得到
+  半通不通的结果。**两端一起升级到 host-sync v2 之前，双向同步不可用**（见第 8 节）。
 
 来源应用（发起跳转的一方）在桌面进程里创建会话。成功时 stdout 只输出一行 JSON：
 
@@ -163,7 +153,7 @@ scope 含 `password` 时还必须持有一张一次性确认票据（见第 3.1 
 5. **分别回执**：配置与密码各自一条回执。密码写入失败时保留原密码（不删除、不改写），结果是 `partial`，
    会话不销毁，可用原会话上下文重试；重试时已一致的字段不再改写。
 6. **密码缺票据不算整体失败**：需要密码而对端返回 `sync_confirmation_required` 时，接收方**照写配置**，
-   并分别回执 `{"kind":"config","state":"saved"}` 与 `{"kind":"password","state":"needs_confirmation"}`，
+   并分别回执 `{"kind":"config","state":"applied"}` 与 `{"kind":"password","state":"needs_confirmation"}`，
    `result` 是 `partial`、`password` 是 `needs_confirmation`、`sessionClosed` 为 `false`。
    既不回滚配置，也不把 `sync_confirmation_required` 折叠成 `host_sync_failed`。
    被拒的这一趟对端没有读取任何秘密，也不消耗它的 fetch 次数，所以用户 `confirm` 之后还能再取一次密码。
@@ -171,13 +161,13 @@ scope 含 `password` 时还必须持有一张一次性确认票据（见第 3.1 
 响应：
 
 ```json
-{"protocol":2,"kind":"host-sync-v1","role":"receiver","result":"applied","hostId":"...","sharedHostId":"...","password":"equal","receipts":[{"kind":"config","state":"saved"},{"kind":"password","state":"saved"}],"revision":2,"sessionClosed":true}
+{"protocol":2,"kind":"host-sync-v1","role":"receiver","result":"applied","hostId":"...","sharedHostId":"...","password":"equal","receipts":[{"kind":"config","state":"applied"},{"kind":"password","state":"applied"}],"revision":2,"sessionClosed":true}
 ```
 
 `result` 取值：`consistent`、`applied`、`partial`、`unknown`、`unchanged`、`association_required`、`association_conflict`、`conflict`。
 `association_conflict` 与 `association_required` 都不写任何记录，所以它们的回执**不带** `hostId`
 与 `password`（`association_conflict` 带 `sharedHostId` 与 `conflicts`，每项含 `hostId`、`displayName`、
-`host`、`sharedHostId`），`receipts` 为空。`receipts[].state` 取值：`unchanged`、`saved`、`failed`、
+`host`、`sharedHostId`），`receipts` 为空。`receipts[].state` 取值：`unchanged`、`applied`、`failed`、
 `absent`、`unavailable`、`conflict`、`needs_confirmation`。`password` 取值：`equal`、`differs`、`absent`、
 `unknown`、`needs_confirmation`。回执里没有密码，也没有私钥内容。
 
@@ -188,19 +178,21 @@ echo '{"sessionRef":"<sessionRef>","resolveTo":"<本机 hostId>"}' \
   | <来源应用可执行文件> --host-sync-v1 receive <来源应用可执行文件>
 ```
 
-`resolveTo` 可省略（按 `sharedHostId` 自动对齐）。这是 v2 的 stdin 形态：动作名与对端程序路径是 argv 上
-仅有的两段内容，其余参数走 stdin。v1 的 argv 形态见第 1 节。
+`resolveTo` 可省略（按 `sharedHostId` 自动对齐）。动作名与对端程序路径是 argv 上仅有的两段内容，
+其余参数一律走 stdin（第 1 节）。
 
 ## 5. 错误
 
 局部错误以退出码 2 结束，stderr 只有一行 `{"error":"<code>"}`：`host_sync_request`、`host_sync_argv_rejected`、
 `sync_confirmation_required`、`session_expired`、`session_stale`、`target_unavailable`、`host_sync_busy`、
 `host_sync_unavailable`、`host_sync_protocol`、`host_sync_failed`、`association_conflict`、
-`host_sync_tty_required`、`host_sync_declined`。
+`host_sync_tty_required`、`host_sync_declined`、`host_sync_peer_protocol_unsupported`。
 stderr 不含诊断文本、主机名、路径或密码。
 
 - `host_sync_argv_rejected`：argv 里出现了这次动作不接受的内容（位置对不上、多给了参数，
   或 `confirm` 给了不止一个会话引用）。两种合法形态见第 1 节。
+- `host_sync_peer_protocol_unsupported`：对端 helper 不是 host-sync v2（`protocol < 2`、
+  `capabilities` 不含 `stdinArgs`，或没有 `version` 动作），本次没有向它发出任何带参数的调用。
 - `host_sync_tty_required`：`confirm` 的 stdin 不是 TTY，拒绝写票据。
 - `host_sync_declined`：用户在终端里没有输入 `y`/`yes`，没有写票据。
 - `sync_confirmation_required`：password scope 缺确认票据；接收方据此只把密码回执记成
@@ -222,9 +214,8 @@ stderr 不含诊断文本、主机名、路径或密码。
 - **别的用户**：会话文件 0700/0600、票据 0600，都在当前用户的状态目录里；同机其它用户既读不到会话，
   也写不了票据，因此既不能调用 `fetch` 拿到会话，也无法伪造确认。
 - **远程进程**：同步完全不发起或接受任何网络连接（不启动 SSH），远端无法直接触达 helper。
-- **argv 观测**：v2 调用形态下会话引用与主机标识只走 stdin，`ps`、进程审计与崩溃报告看不到它们。
-  与 v1 对端（Cliora v0.4.168）互通时必须走 argv 形态，此时会话引用与主机标识对 `ps` 可见
-  （配置层面的可见性）；**密码仍受确认票据约束，argv 形态拿不到密码**。
+- **argv 观测**：会话引用、主机标识与一次性挑战只走 stdin，`ps`、进程审计与崩溃报告看不到它们；
+  argv 里出现参数直接 `host_sync_argv_rejected`。
 - **重放**：会话一次性（`settle` 即删，TTL 120 秒，`fetch` 最多 2 次），票据用后即删且绑定 hostId
   与 sharedHostId，同一张票据不能用第二次，也不能换主机用。
 - **长期读取面**：会话不是主机簿或密码的通用读取接口——它只覆盖 begin 时冻结的那一台主机，配置变化即作废。
@@ -250,6 +241,10 @@ stderr 不含诊断文本、主机名、路径或密码。
 - 应用内 IPC 接收接线（`remote_host_sync_begin` / `remote_host_sync_receive` 两条命令、ACL 与 capability 登记、前端调用）延后到 T6；本版本只有 helper 级入口与 URL 解析。
 - 确认票据在本版本由终端命令 `--host-sync-v1 confirm <sessionRef>` 写入（第 3.2 节），**不需要**等待 UI。
   T6 落地后由界面按钮写同一格式、同一路径的票据，作为同一个入口的图形版本；两条路径都不得代写票据。
-- 与 Cliora v0.4.168（只有 argv 形态）联跑时，`password` scope 仍要求对端也有一张确认票据；对端侧
-  的写票据入口不在本仓范围内。本版本接收侧已保证：即使密码没取到，配置也照写、回执照实分两条。
+- **Cliora 侧需同步升级到 host-sync v2**：已发布的 Cliora v0.4.168 的 helper 只按 argv 位置解析参数，
+  且它 spawn 对端时 stdin 是 `Stdio::null()`。本版本不接受 argv 传参、也不再提供 argv 兼容形态，
+  因此**升级前双向同步不可用**：Twiglane 调它会得到 `host_sync_peer_protocol_unsupported`，
+  它调 Twiglane 会得到 `host_sync_argv_rejected`。两端一起升到 v2 后才恢复。
+- 升级后联跑时，`password` scope 仍要求对端也有一张确认票据；对端侧的写票据入口不在本仓范围内。
+  本版本接收侧已保证：即使密码没取到，配置也照写、回执照实分两条。
 - `secrets()` 与 `cliora_helper()` 目前带 `allow(dead_code)`：T6 把两条命令注册进 invoke handler 与 ACL 后应删掉这两个标记。

@@ -169,7 +169,7 @@ export type HostSyncPasswordState =
 
 export interface HostSyncReceipt {
   kind: "config" | "password";
-  state: "unchanged" | "saved" | "failed" | "absent" | "unavailable" | "conflict" | "needs_confirmation";
+  state: "unchanged" | "applied" | "failed" | "absent" | "unavailable" | "conflict" | "needs_confirmation";
 }
 
 export interface HostSyncCandidate {
@@ -217,7 +217,7 @@ export function hostSyncMessage(result: HostSyncResult): string {
     case "consistent":
       return "这台主机的配置与密码在两端一致，没有取回或改写任何内容。";
     case "applied": {
-      const saved = result.receipts.filter((receipt) => receipt.state === "saved").map((receipt) => receipt.kind);
+      const saved = result.receipts.filter((receipt) => receipt.state === "applied").map((receipt) => receipt.kind);
       if (saved.length === 0) return "这台主机已同步，没有需要改写的字段。";
       return `这台主机已同步：${saved.map((kind) => (kind === "config" ? "配置" : "密码")).join("、")}已写入本机。`;
     }

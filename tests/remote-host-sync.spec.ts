@@ -107,7 +107,7 @@ describe("host-sync v1 前端契约", () => {
     expect(pending.result).toBe("partial");
     // 配置与密码分别回执：配置写好了，密码只是等确认，不是失败。
     expect(pending.receipts).toEqual([
-      { kind: "config", state: "saved" },
+      { kind: "config", state: "applied" },
       { kind: "password", state: "needs_confirmation" },
     ]);
     expect(pending.password).toBe("needs_confirmation");
@@ -118,11 +118,13 @@ describe("host-sync v1 前端契约", () => {
     expect(message).not.toContain(fixture.secretSentinel);
   });
 
-  it("协议版本与两种调用形态都写在契约里", () => {
+  it("协议版本与 v2 的唯一调用形态都写在契约里", () => {
     expect(fixture.protocol).toBe(2);
     expect(fixture.capabilities).toContain("stdinArgs");
-    expect(fixture.capabilities).toContain("legacyArgv");
     expect(fixture.capabilities).toContain("confirmation");
+    // v2 没有 argv 参数兼容形态：对端不是 v2 就直接拒绝。
+    expect(fixture.capabilities).not.toContain("legacyArgv");
+    expect(read("docs/integrations/host-sync-v1.md")).toContain("host_sync_peer_protocol_unsupported");
     // 冲突回执不写记录，所以 hostId/password 可以缺省（与 association_* 对齐）。
     const conflict = fixture.cases.find((item: { name: string }) => item.name === "association-conflict")
       .receive as HostSyncResult;

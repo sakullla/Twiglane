@@ -1,7 +1,7 @@
 {
   "protocol": 2,
   "kind": "host-sync-v1",
-  "capabilities": ["stdinArgs", "legacyArgv", "confirmation"],
+  "capabilities": ["stdinArgs", "confirmation"],
   "secretSentinel": "s3cret-do-not-leak",
   "sessionRef": "9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f",
   "deepLink": "twiglane://remote-review?v=1&reviewId=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee&sessionId=11111111-2222-3333-4444-666666666666&targetId=host-a&targetRevision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&peerRevision=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&peerIdentity=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc&worktreeIdentity=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd&worktreePath=%2Fsrv%2Fapp&hostSync=9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f",
@@ -58,7 +58,7 @@
         "receipts": [
           {
             "kind": "config",
-            "state": "saved"
+            "state": "applied"
           },
           {
             "kind": "password",
@@ -86,7 +86,7 @@
           },
           {
             "kind": "password",
-            "state": "saved"
+            "state": "applied"
           }
         ],
         "sessionClosed": true
@@ -106,7 +106,7 @@
         "receipts": [
           {
             "kind": "config",
-            "state": "saved"
+            "state": "applied"
           },
           {
             "kind": "password",
@@ -130,7 +130,7 @@
         "receipts": [
           {
             "kind": "config",
-            "state": "saved"
+            "state": "applied"
           },
           {
             "kind": "password",

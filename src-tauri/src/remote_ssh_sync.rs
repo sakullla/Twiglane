@@ -35,11 +35,10 @@ use crate::state::{AppStore, SshTarget};
 pub(crate) const FLAG: &str = "--host-sync-v1";
 /// 协议版本。
 ///
-/// v1 只认「动作名与参数都在 argv」的调用形态；v2 增加 version 能力宣告与 stdin 参数形态，
-/// 同时**继续接受** v1 的 argv 形态，因此已发布的对端（Cliora v0.4.168 的 helper 只按 argv
-/// 位置解析，且它 spawn 对端时 stdin 是 null）与本版本仍能双向调用。
-/// 调用方必须先用 version 读 capabilities，再决定用哪种形态：
-/// 对端没有 `stdinArgs` 就走 argv 形态，有就走 stdin 形态。
+/// v2 的线协议只有一种形态：动作名在 argv，参数与秘密只走 stdin，argv 里带参数一律
+/// `host_sync_argv_rejected`。版本化的用途是**拒绝**协议不一致的对端而不是兼容它：
+/// 调用方先用 version 读 capabilities，对端没有 `stdinArgs` 就直接返回
+/// `host_sync_peer_protocol_unsupported`；两端一起升到 v2 之前，双向同步不可用。
 const PROTOCOL: u64 = 2;
 const KIND: &str = "host-sync-v1";
 /// 会话有效期。超时后 helper 直接删除会话文件，任何调用都只会拿到 session_expired。
@@ -684,9 +683,9 @@ trait Peer {
 /// 通过私有 stdin/stdout 管道驱动来源应用的 headless helper。
 struct HelperPeer {
     program: PathBuf,
-    /// 对端是否支持 stdin 参数形态。第一次调用前用 version 探测并缓存：
-    /// 已发布的 Cliora v0.4.168 只按 argv 位置解析参数，不能指望它读 stdin。
-    stdin_args: OnceLock<bool>,
+    /// 对端是否是 host-sync v2。第一次调用前用 version 探测并缓存：
+    /// v1 对端只按 argv 位置解析参数，而本版本只接受 stdin 传参，必须先判协议再调用。
+    probe: OnceLock<bool>,
 }
 
 fn first_json_line(bytes: &[u8]) -> Result<Value> {
@@ -703,7 +702,7 @@ impl HelperPeer {
     fn new(program: PathBuf) -> Self {
         Self {
             program,
-            stdin_args: OnceLock::new(),
+            probe: OnceLock::new(),
         }
     }
 
@@ -760,50 +759,35 @@ impl HelperPeer {
         first_json_line(&output.stdout)
     }
 
-    /// 探测对端能力：先读 version 的 capabilities。
-    /// 探测失败（旧 helper 没有 version 动作）按「没有 stdinArgs」处理，退回 argv 形态。
-    fn stdin_args(&self) -> bool {
-        *self.stdin_args.get_or_init(|| {
-            let probe = self.run_child(&["version".to_string()], None);
-            probe.is_ok_and(|value| {
-                value["capabilities"]
-                    .as_array()
-                    .is_some_and(|caps| caps.iter().any(|cap| cap.as_str() == Some("stdinArgs")))
-            })
+    /// 对端必须是 host-sync v2：version 要报 `protocol >= 2` 且 capabilities 含 `stdinArgs`。
+    /// 探测失败（旧 helper 没有 version 动作）一律按不兼容处理，结果只缓存一次。
+    fn peer_supports_v2(&self) -> bool {
+        *self.probe.get_or_init(|| {
+            self.run_child(&["version".to_string()], None)
+                .is_ok_and(|value| {
+                    value["protocol"]
+                        .as_u64()
+                        .is_some_and(|protocol| protocol >= PROTOCOL)
+                        && value["capabilities"].as_array().is_some_and(|caps| {
+                            caps.iter().any(|cap| cap.as_str() == Some("stdinArgs"))
+                        })
+                })
         })
     }
 
-    /// 按对端能力选形态：
-    /// - 有 stdinArgs（v2）：argv 只放动作名，参数走 stdin 的一行 JSON，会话引用不会被 ps 看到；
-    /// - 没有 stdinArgs（v1，Cliora v0.4.168）：动作名与参数都放 argv，与它自己的解析方式一致。
+    /// 动作名走 argv，参数只走 stdin 的一行 JSON：会话引用不会被 ps 或进程审计看到。
     fn call(&self, action: &str, params: Value) -> Result<Value> {
-        if self.stdin_args() {
-            let line = format!("{params}\n");
-            self.run_child(&[action.to_string()], Some(&line))
-        } else {
-            let mut args = vec![action.to_string()];
-            args.extend(positional_argv(action, &params)?);
-            self.run_child(&args, None)
+        if !self.peer_supports_v2() {
+            // 两端一起升级到 host-sync v2。旧对端只按 argv 位置解析参数，而本版本只接受
+            // stdin 传参，因此这里给明确错误码，不做半通不通的降级。
+            return Err(error(
+                "host_sync_peer_protocol_unsupported",
+                "来源应用的同步 helper 不是 host-sync v2，双向同步暂不可用；请把两端都升级到 host-sync v2 后重试。",
+            ));
         }
+        let line = format!("{params}\n");
+        self.run_child(&[action.to_string()], Some(&line))
     }
-}
-
-/// 旧 argv 形态下参数的位置顺序。只用于没有 stdinArgs 能力的对端。
-fn positional_argv(action: &str, params: &Value) -> Result<Vec<String>> {
-    let field = |key: &str| {
-        params
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .ok_or_else(invalid)
-    };
-    Ok(match action {
-        "begin" => vec![field("hostId")?],
-        "check" => vec![field("sessionRef")?, field("challenge")?],
-        "fetch" => vec![field("sessionRef")?, field("challenge")?, field("scope")?],
-        "settle" => vec![field("sessionRef")?],
-        _ => return Err(invalid()),
-    })
 }
 
 impl Peer for HelperPeer {
@@ -1208,7 +1192,7 @@ impl<'a> Receiver<'a> {
             let saved = self.store.save_remote_ssh_target(target)?;
             host_id = Some(saved.id.clone());
             revision = Some(saved.revision);
-            config_state = "saved";
+            config_state = "applied";
         }
         receipts.push(Receipt {
             kind: "config",
@@ -1234,7 +1218,7 @@ impl<'a> Receiver<'a> {
                                 password_state = PasswordState::Equal;
                                 receipts.push(Receipt {
                                     kind: "password",
-                                    state: "saved",
+                                    state: "applied",
                                 });
                             }
                             Err(_) => {
@@ -1280,7 +1264,7 @@ impl<'a> Receiver<'a> {
         let pending = receipts
             .iter()
             .any(|receipt| receipt.state == "needs_confirmation");
-        let wrote = receipts.iter().any(|receipt| receipt.state == "saved");
+        let wrote = receipts.iter().any(|receipt| receipt.state == "applied");
         // 什么都没写且密码状态未知时不能报成功：unknown 必须如实返回，交给用户重试。
         let result = if partial || pending {
             "partial"
@@ -1567,49 +1551,6 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
     // 只写一行结构化结果：日志与 URL 里不出现配置或秘密。
     println!("{value}");
     Ok(())
-}
-
-/// 一次调用的参数来源：先认旧 argv 形态（v1 对端），否则按 v2 从 stdin 读。
-fn request(action: &str, rest: &[String]) -> Result<Params> {
-    if let Some(params) = argv_params(action, rest) {
-        return Ok(params);
-    }
-    verify_argv(rest, usize::from(action == "receive"))?;
-    parse_params(action, &request_line()?)
-}
-
-/// 旧 argv 形态（v1）：动作名与参数都在 argv，按位置解析。
-///
-/// 已发布的 Cliora v0.4.168 的 helper 只按 argv 位置解析参数，并且它 spawn 对端时
-/// stdin 是 null，因此这是与它互通的唯一形态。argv 可观测性最多泄漏这一次的会话引用
-/// 与主机标识（配置层面的可见性），密码仍然必须持有确认票据才能取回。
-fn argv_params(action: &str, rest: &[String]) -> Option<Params> {
-    match (action, rest) {
-        ("begin", [host_id]) => Some(Params::Begin {
-            host_id: host_id.clone(),
-        }),
-        ("check", [session_ref, challenge]) => Some(Params::Check {
-            session_ref: session_ref.clone(),
-            challenge: challenge.clone(),
-        }),
-        ("fetch", [session_ref, challenge, scope]) => Some(Params::Fetch {
-            session_ref: session_ref.clone(),
-            challenge: challenge.clone(),
-            scope: scope.clone(),
-        }),
-        ("settle", [session_ref]) => Some(Params::Settle {
-            session_ref: session_ref.clone(),
-        }),
-        ("receive", [_, session_ref]) => Some(Params::Receive {
-            session_ref: session_ref.clone(),
-            resolve_to: None,
-        }),
-        ("receive", [_, session_ref, resolve_to]) => Some(Params::Receive {
-            session_ref: session_ref.clone(),
-            resolve_to: Some(resolve_to.clone()),
-        }),
-        _ => None,
-    }
 }
 
 /// 在桌面前置流程里分流：以协议参数启动时只当 helper，不初始化 Tauri。
@@ -2111,7 +2052,7 @@ mod tests {
         assert_eq!(value["result"], "applied");
         assert_eq!(value["password"], "equal");
         assert_eq!(value["receipts"][0]["state"], "unchanged", "配置没变就不重写");
-        assert_eq!(value["receipts"][1]["state"], "saved");
+        assert_eq!(value["receipts"][1]["state"], "applied");
         assert_eq!(secrets.password("host-a").as_deref(), Some("new-password"));
         assert_eq!(fs::read(dir.path().join("state.json")).unwrap(), before, "只有密码变了");
         assert_eq!(store.remote_ssh_target("host-a").unwrap().revision, revision);
@@ -2136,7 +2077,7 @@ mod tests {
         let receiver = Receiver::new(&store, &secrets);
         let value = receiver.receive(&peer, &peer.reference, None).unwrap();
         assert_eq!(value["result"], "applied");
-        assert_eq!(value["receipts"][0]["state"], "saved");
+        assert_eq!(value["receipts"][0]["state"], "applied");
         let saved = store.remote_ssh_target("host-a").unwrap();
         assert_eq!(HostConfig::of(&saved), remote);
         assert_eq!(saved.revision, 2, "身份字段变化推进一次修订");
@@ -2169,7 +2110,7 @@ mod tests {
         let receiver = Receiver::new(&store, &secrets);
         let value = receiver.receive(&peer, &peer.reference, None).unwrap();
         assert_eq!(value["result"], "partial");
-        assert_eq!(value["receipts"][0]["state"], "saved");
+        assert_eq!(value["receipts"][0]["state"], "applied");
         assert_eq!(value["receipts"][1]["state"], "failed");
         assert_eq!(value["sessionClosed"], false, "部分失败不销毁会话，可以原上下文重试");
         assert_eq!(*peer.settled.lock().unwrap(), 0);
@@ -2567,63 +2508,41 @@ mod tests {
         assert_eq!(*peer.settled.lock().unwrap(), 0);
     }
 
-    /// 两种调用形态必须解析出同一套动作参数：v1 对端只认 argv，v2 才走 stdin。
+    /// v2 只有一种调用形态：参数走 stdin，argv 里带参数一律拒绝。
     #[test]
-    fn both_call_forms_parse_the_same_action() {
+    fn parameters_come_from_stdin_and_argv_parameters_are_rejected() {
         let reference = "a".repeat(64);
         let challenge = "b".repeat(64);
-        // 旧 argv 形态（v1，Cliora v0.4.168 只按位置解析）。
+        // argv 上只允许动作名（receive 另加对端程序路径）。
+        assert!(verify_argv(&[], 0).is_ok());
+        assert!(verify_argv(&["/usr/bin/cliora".to_string()], 1).is_ok());
+        for rest in [
+            vec!["host-a".to_string()],
+            vec![reference.clone(), challenge.clone()],
+            vec![reference.clone(), challenge.clone(), "all".to_string()],
+            vec![reference.clone()],
+        ] {
+            assert_eq!(
+                verify_argv(&rest, 0).unwrap_err().code,
+                "host_sync_argv_rejected"
+            );
+        }
+        // receive 只多允许一位对端路径：再多一位仍然拒绝。
         assert_eq!(
-            argv_params("begin", &["host-a".to_string()]),
-            Some(Params::Begin {
-                host_id: "host-a".to_string()
-            })
+            verify_argv(
+                &[
+                    "/usr/bin/cliora".to_string(),
+                    reference.clone(),
+                    "host-a".to_string()
+                ],
+                1
+            )
+            .unwrap_err()
+            .code,
+            "host_sync_argv_rejected"
         );
-        assert_eq!(
-            argv_params("check", &[reference.clone(), challenge.clone()]),
-            Some(Params::Check {
-                session_ref: reference.clone(),
-                challenge: challenge.clone()
-            })
-        );
-        assert_eq!(
-            argv_params(
-                "fetch",
-                &[reference.clone(), challenge.clone(), "all".to_string()]
-            ),
-            Some(Params::Fetch {
-                session_ref: reference.clone(),
-                challenge: challenge.clone(),
-                scope: "all".to_string()
-            })
-        );
-        assert_eq!(
-            argv_params("settle", std::slice::from_ref(&reference)),
-            Some(Params::Settle {
-                session_ref: reference.clone()
-            })
-        );
-        assert_eq!(
-            argv_params(
-                "receive",
-                &["/usr/bin/cliora".to_string(), reference.clone()]
-            ),
-            Some(Params::Receive {
-                session_ref: reference.clone(),
-                resolve_to: None
-            })
-        );
-        // 位置对不上一律不认：多余参数不会被悄悄忽略。
-        assert_eq!(
-            argv_params(
-                "check",
-                &[reference.clone(), challenge.clone(), "all".to_string()]
-            ),
-            None
-        );
-        assert_eq!(argv_params("begin", &[]), None);
 
-        // v2 stdin 形态解析出同样的动作参数。
+        // 动作参数只从 stdin 读。
         let line = format!(
             "{{\"sessionRef\":\"{reference}\",\"challenge\":\"{challenge}\",\"scope\":\"all\"}}"
         );
@@ -2671,28 +2590,11 @@ mod tests {
         }
         assert!(parse_params("nope", "x").is_err());
 
-        // request() 先认 argv（不读 stdin）；argv 形态不成立时才要求 argv 只有动作名。
-        assert_eq!(
-            request("check", &[reference.clone(), challenge.clone()]).unwrap(),
-            Params::Check {
-                session_ref: reference.clone(),
-                challenge: challenge.clone()
-            }
-        );
-        assert_eq!(
-            request(
-                "check",
-                &[reference.clone(), challenge.clone(), "all".to_string()]
-            )
-            .unwrap_err()
-            .code,
-            "host_sync_argv_rejected"
-        );
     }
 
-    /// argv 形态也必须持有确认票据才能取回密码：argv 可观测性不扩大到秘密。
+    /// password scope 必须持有确认票据才能取回密码：与版本无关，任何入口都一样。
     #[test]
-    fn legacy_argv_password_scope_still_requires_a_ticket() {
+    fn password_scope_needs_a_ticket_even_when_the_session_is_fresh() {
         let (dir, store) = fixture("host-a", "example.test");
         let secrets = FakeSecrets::with_password("host-a", "hunter2");
         let (source, confirm) = confirm_source(&store, &secrets, dir.path());
@@ -2701,23 +2603,22 @@ mod tests {
             .unwrap()
             .to_string();
         let challenge = random_hex();
-        let Some(Params::Fetch {
+        let line = format!(
+            "{{\"sessionRef\":\"{reference}\",\"challenge\":\"{challenge}\",\"scope\":\"all\"}}"
+        );
+        let Ok(Params::Fetch {
             session_ref,
-            challenge: argv_challenge,
+            challenge: parsed,
             scope,
-        }) = argv_params(
-            "fetch",
-            &[reference.clone(), challenge.clone(), "all".to_string()],
-        )
+        }) = parse_params("fetch", &line)
         else {
-            panic!("旧 argv 形态必须可用");
+            panic!("stdin 上的 fetch 参数必须可解析");
         };
-        assert_eq!(argv_challenge, challenge);
-        let failure = source.fetch(&session_ref, &argv_challenge, &scope).unwrap_err();
+        let failure = source.fetch(&session_ref, &parsed, &scope).unwrap_err();
         assert_eq!(failure.code, "sync_confirmation_required");
         assert!(!failure.message.contains("hunter2"));
         assert!(!confirm.exists(), "没有确认就不会产生票据");
-        // 只取配置这一路不带秘密，argv 形态下照常可用。
+        // 只取配置这一路不带秘密，照常可用。
         let value = source.fetch(&session_ref, &random_hex(), "config").unwrap();
         assert!(value["password"].is_null());
         assert!(!value.to_string().contains("hunter2"));
@@ -2768,7 +2669,7 @@ mod tests {
         assert_eq!(value["result"], "partial");
         assert_eq!(value["receipts"].as_array().unwrap().len(), 2);
         assert_eq!(value["receipts"][0]["kind"], "config");
-        assert_eq!(value["receipts"][0]["state"], "saved", "配置照写");
+        assert_eq!(value["receipts"][0]["state"], "applied", "配置照写");
         assert_eq!(value["receipts"][1]["kind"], "password");
         assert_eq!(value["receipts"][1]["state"], "needs_confirmation");
         assert_eq!(value["password"], "needs_confirmation");
@@ -2869,13 +2770,16 @@ mod tests {
 
     /// version 必须同时宣告两种形态，调用方据此选路。
     #[test]
-    fn version_declares_both_call_forms() {
+    fn version_declares_the_v2_wire_format() {
         assert_eq!(PROTOCOL, 2);
         let source = include_str!("remote_ssh_sync.rs");
         assert!(
-            source.contains("\"capabilities\": [\"stdinArgs\", \"legacyArgv\", \"confirmation\"]"),
-            "version 必须宣告 stdinArgs 与 legacyArgv"
+            source.contains("\"capabilities\": [\"stdinArgs\", \"confirmation\"]"),
+            "version 必须宣告 stdinArgs 与 confirmation"
         );
+        // argv 只放动作名，带参数一律拒绝：这是唯一的调用形态。
+        assert!(source.contains("verify_argv(rest, 0)?"));
+        assert!(source.contains("host_sync_peer_protocol_unsupported"));
     }
 
     /// 造一个假 helper 脚本：把收到的 argv 与 stdin 记到文件里，便于断言调用形态。
@@ -2888,10 +2792,10 @@ mod tests {
         path
     }
 
-    /// 对端没有 stdinArgs（Cliora v0.4.168）：调用方必须退回 argv 形态。
+    /// 对端是 v1（没有 stdinArgs）：给明确错误码，且不向它发出任何带参数的调用。
     #[cfg(unix)]
     #[test]
-    fn a_peer_without_stdin_args_is_called_through_legacy_argv() {
+    fn a_v1_peer_is_refused_with_an_explicit_protocol_error() {
         let dir = tempfile::tempdir().unwrap();
         let argv_log = dir.path().join("argv.log");
         let script = "#!/bin/sh\nprintf '%s\\n' \"$*\" >> __ARGV_LOG__\ncase \"$2\" in\n  version) printf '%s\\n' '{\"protocol\":1,\"kind\":\"host-sync-v1\",\"capabilities\":[\"check\",\"fetch\",\"settle\"]}' ;;
@@ -2903,18 +2807,18 @@ esac\n"
         let peer = HelperPeer::new(fake_helper(dir.path(), &script));
         let reference = "b".repeat(64);
         let challenge = "c".repeat(64);
-        let checked = peer.check(&reference, &challenge).unwrap();
-        assert_eq!(checked.revision, 7);
-        assert_eq!(checked.shared_host_id.as_deref(), Some("shared-1"));
-        assert_eq!(checked.password_state, "absent");
+        let failure = peer.check(&reference, &challenge).unwrap_err();
+        assert_eq!(failure.code, "host_sync_peer_protocol_unsupported");
+        assert!(!failure.message.contains(&reference), "错误里不回显会话引用");
+        // 探测过 version 之后就不再调用任何动作：不存在「退回 argv」这条路径。
         let log = fs::read_to_string(&argv_log).unwrap();
         let lines: Vec<&str> = log.lines().collect();
-        assert_eq!(lines[0], "--host-sync-v1 version", "先探测能力");
-        assert_eq!(
-            lines[1],
-            format!("--host-sync-v1 check {reference} {challenge}"),
-            "旧对端只按 argv 位置解析，参数必须在 argv 上"
-        );
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "--host-sync-v1 version");
+        // 同一个 peer 再调一次也不会重新探测（结论已缓存）。
+        let again = peer.settle(&reference).unwrap_err();
+        assert_eq!(again.code, "host_sync_peer_protocol_unsupported");
+        assert_eq!(fs::read_to_string(&argv_log).unwrap().lines().count(), 1);
     }
 
     /// 对端宣告 stdinArgs（v2）：参数走 stdin，argv 只留动作名。
@@ -2924,7 +2828,7 @@ esac\n"
         let dir = tempfile::tempdir().unwrap();
         let argv_log = dir.path().join("argv.log");
         let stdin_log = dir.path().join("stdin.log");
-        let script = "#!/bin/sh\nprintf '%s\\n' \"$*\" >> __ARGV_LOG__\ncase \"$2\" in\n  version) printf '%s\\n' '{\"protocol\":2,\"kind\":\"host-sync-v1\",\"capabilities\":[\"stdinArgs\",\"legacyArgv\",\"confirmation\"]}' ;;
+        let script = "#!/bin/sh\nprintf '%s\\n' \"$*\" >> __ARGV_LOG__\ncase \"$2\" in\n  version) printf '%s\\n' '{\"protocol\":2,\"kind\":\"host-sync-v1\",\"capabilities\":[\"stdinArgs\",\"confirmation\"]}' ;;
   check) IFS= read -r line; printf '%s\\n' \"$line\" >> __STDIN_LOG__; printf '%s\\n' '{\"protocol\":2,\"kind\":\"host-sync-v1\",\"hostId\":\"host-a\",\"sharedHostId\":\"shared-1\",\"configFingerprint\":\"__FP__\",\"configRevision\":9,\"password\":{\"state\":\"absent\"}}' ;;
   *) printf '%s\\n' '{\"protocol\":2,\"kind\":\"host-sync-v1\",\"settled\":true}' ;;
 esac\n"

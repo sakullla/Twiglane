@@ -8,14 +8,25 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::AppError;
 use crate::git::ops::RepoState;
+use crate::identity::WorktreeIdentity;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiffView {
+    Staged,
+    Unstaged,
+    Task,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Selection {
     pub path: String,
     pub original: Option<String>,
-    pub staged: bool,
+    pub view: DiffView,
 }
 
 #[derive(Default)]
@@ -31,16 +42,27 @@ pub struct Session {
     pub key: String,
     /// common Git dir：跨进程写锁和持久回执都放在这里。
     pub git_dir: PathBuf,
+    pub identity: WorktreeIdentity,
+    pub baseline: Option<String>,
     state: Arc<Mutex<RepoState>>,
     diff: Arc<DiffTracker>,
 }
 
 impl Session {
-    pub fn new(root: PathBuf, key: String, git_dir: PathBuf, state: RepoState) -> Self {
+    pub fn new(
+        root: PathBuf,
+        key: String,
+        git_dir: PathBuf,
+        state: RepoState,
+        identity: WorktreeIdentity,
+        baseline: Option<String>,
+    ) -> Self {
         Self {
             root,
             key,
             git_dir,
+            identity,
+            baseline,
             state: Arc::new(Mutex::new(state)),
             diff: Arc::new(DiffTracker::default()),
         }

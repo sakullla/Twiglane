@@ -189,7 +189,7 @@ impl Fixture {
     fn new(label: &str) -> Self {
         let root = TempDir::new().unwrap();
         // macOS 的 /var 是 /private/var 的符号链接；仓库键用规范路径，夹具也统一用它。
-        let base = std::fs::canonicalize(root.path()).unwrap();
+        let base = dunce::canonicalize(root.path()).unwrap();
         let state = base.join(format!("state-{label}"));
         std::fs::create_dir_all(&state).unwrap();
         let config = write_config(&base);
@@ -244,7 +244,18 @@ fn handshake_reports_v2_capabilities_and_rejects_v1_frames() {
     assert_eq!(hello["generation"], json!("numeric"));
     assert_eq!(hello["stateToken"], json!("opaque"));
     let capabilities = hello["capabilities"].as_array().unwrap();
-    for expected in ["open", "status", "diff", "stage", "unstage", "patch", "commit", "receipt"] {
+    for expected in [
+        "open",
+        "status",
+        "diff",
+        "stage",
+        "unstage",
+        "patch",
+        "commit",
+        "receipt",
+        "taskReview",
+        "reviewIdentity",
+    ] {
         assert!(
             capabilities.contains(&json!(expected)),
             "capabilities 缺少 {expected}"
@@ -951,6 +962,246 @@ fn token_of(result: &Value) -> String {
 
 fn base_of(fixture: &Fixture) -> PathBuf {
     std::fs::canonicalize(fixture.root.path()).unwrap()
+}
+
+#[test]
+fn a_bound_task_keeps_history_and_files_available_and_pages_the_net_diff() {
+    let fixture = Fixture::new("baseline");
+    fixture.init();
+    fixture.write("note.txt", "base\n");
+    fixture.commit_all("first commit");
+    let baseline = git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD"]);
+    let baseline = baseline.trim();
+    fixture.write("note.txt", "base\ncommitted\n");
+    fixture.commit_all("second commit");
+    let head = git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD"]);
+    let head = head.trim();
+    fixture.write("note.txt", "base\ncommitted\nstaged\n");
+    git(&fixture.repo, &fixture.config, &["add", "note.txt"]);
+    fixture.write("note.txt", "base\ncommitted\nstaged\nworking\n");
+    fixture.write("new.txt", "untracked\n");
+
+    let mut agent = fixture.agent();
+    let normal = open(&mut agent, &fixture.repo_str());
+    let repo = &normal["repo"];
+    assert_eq!(normal["baseline"], Value::Null);
+    assert_eq!(normal["reviewFiles"], Value::Null);
+    assert_eq!(
+        agent.error_code("task-none", "taskReview", json!({ "repo": repo })),
+        "invalid_baseline",
+    );
+    let opened = agent.ok(
+        "open-baseline",
+        "open",
+        json!({
+            "path": fixture.repo_str(), "baseline": baseline,
+            "worktreeIdentity": normal["worktreeIdentity"],
+        }),
+    );
+    assert_eq!(opened["baseline"], json!(baseline));
+    assert_eq!(opened["worktreeIdentity"], normal["worktreeIdentity"]);
+    assert_eq!(opened["reviewFiles"], json!(["new.txt", "note.txt"]));
+    assert_eq!(opened["reviewFilesTruncated"], json!(false));
+
+    let history = agent.ok("task-history", "history", json!({ "repo": repo }));
+    let commits = history["page"]["commits"].as_array().unwrap();
+    assert_eq!(commits.len(), 2);
+    assert_eq!(commits[0]["oid"], json!(head));
+    assert_eq!(commits[1]["oid"], json!(baseline));
+    let detail = agent.ok(
+        "task-detail",
+        "commitDetail",
+        json!({ "repo": repo, "oid": baseline }),
+    );
+    assert_eq!(detail["commit"]["commit"]["summary"], json!("first commit"));
+    let content = agent.ok(
+        "task-file",
+        "fileContent",
+        json!({ "repo": repo, "relative": "note.txt" }),
+    );
+    assert_eq!(
+        content["content"]["lines"],
+        json!(["base", "committed", "staged", "working"])
+    );
+
+    let review = agent.ok("task-snapshot", "taskReview", json!({ "repo": repo }));
+    assert_eq!(review["review"]["baselineOid"], json!(baseline));
+    assert_eq!(review["review"]["headOid"], json!(head));
+    assert_eq!(review["review"]["commitCount"], json!(1));
+    assert_eq!(review["review"]["untrackedFiles"], json!(1));
+    let mut pages = Vec::new();
+    let mut cursor = Value::Null;
+    let mut offset = 0;
+    let mut first_cursor = Value::Null;
+    loop {
+        let mut request = json!({ "repo": repo, "view": "task", "path": "note.txt", "offset": offset, "limit": 2 });
+        if !cursor.is_null() {
+            request["cursor"] = cursor;
+        }
+        let page = agent.ok(&format!("task-page-{offset}"), "diff", request);
+        assert_eq!(page["view"], json!("task"));
+        assert_eq!(page["diff"]["offset"], json!(offset));
+        assert!(page["diff"]["hunks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|hunk| hunk["stageable"] == json!(false)));
+        let lines = page["diff"]["lines"].as_array().unwrap();
+        pages.extend(lines.iter().cloned());
+        cursor = page["nextCursor"].clone();
+        if offset == 0 {
+            first_cursor = cursor.clone();
+            assert!(first_cursor.is_string());
+        }
+        if cursor.is_null() {
+            assert_eq!(
+                pages.len() as u64,
+                page["diff"]["totalLines"].as_u64().unwrap()
+            );
+            break;
+        }
+        assert!(!lines.is_empty());
+        offset += lines.len();
+    }
+    let added: Vec<_> = pages
+        .iter()
+        .filter(|line| line["kind"] == json!("add"))
+        .map(|line| line["text"].as_str().unwrap().trim_start_matches('+'))
+        .collect();
+    assert_eq!(added, ["committed", "staged", "working"]);
+
+    assert_eq!(
+        agent.error_code("task-wrong-view", "diff", json!({
+            "repo": repo, "view": "unstaged", "path": "note.txt", "offset": 2, "limit": 2, "cursor": first_cursor,
+        })),
+        "cursor_expired",
+    );
+    fixture.write(
+        "note.txt",
+        "base\ncommitted\nstaged\nchanged after first page\n",
+    );
+    assert_eq!(
+        agent.error_code("task-stale-page", "diff", json!({
+            "repo": repo, "view": "task", "path": "note.txt", "offset": 2, "limit": 2, "cursor": first_cursor,
+        })),
+        "cursor_expired",
+    );
+    let refreshed = agent.ok("task-status", "status", json!({ "repo": repo }));
+    assert_eq!(refreshed["baseline"], json!(baseline));
+    assert_eq!(refreshed["reviewFiles"], opened["reviewFiles"]);
+}
+
+#[test]
+fn review_binding_rejects_bad_baselines_and_a_different_worktree() {
+    let fixture = Fixture::new("baseline-binding");
+    fixture.init();
+    fixture.write("note.txt", "base\n");
+    fixture.commit_all("first commit");
+    let path = fixture.repo_str();
+    let mut agent = fixture.agent();
+    let opened = open(&mut agent, &path);
+    let identity = &opened["worktreeIdentity"];
+    assert_eq!(identity.as_str().unwrap().len(), 64);
+    let reported = agent.ok(
+        "identity",
+        "reviewIdentity",
+        json!({ "repo": opened["repo"] }),
+    );
+    assert_eq!(reported["worktreeIdentity"], *identity);
+    assert_eq!(reported["worktreePath"], opened["worktreePath"]);
+
+    for (id, baseline, expected) in [
+        ("invalid", json!("HEAD"), "invalid_baseline"),
+        ("bad-shape", json!(1), "invalid_baseline"),
+        ("missing", json!("0".repeat(40)), "task_baseline_missing"),
+    ] {
+        assert_eq!(
+            agent.error_code(id, "open", json!({ "path": path, "baseline": baseline })),
+            expected
+        );
+    }
+    let tree = git(
+        &fixture.repo,
+        &fixture.config,
+        &["rev-parse", "HEAD^{tree}"],
+    );
+    let unrelated = git(
+        &fixture.repo,
+        &fixture.config,
+        &["commit-tree", tree.trim(), "-m", "unrelated"],
+    );
+    assert_eq!(
+        agent.error_code(
+            "unrelated",
+            "open",
+            json!({ "path": path, "baseline": unrelated.trim() })
+        ),
+        "task_baseline_not_ancestor",
+    );
+    let baseline = git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD"]);
+    agent.ok(
+        "bind-before-switch",
+        "open",
+        json!({ "path": path, "baseline": baseline.trim() }),
+    );
+    git(
+        &fixture.repo,
+        &fixture.config,
+        &["update-ref", "refs/heads/unrelated", unrelated.trim()],
+    );
+    git(&fixture.repo, &fixture.config, &["switch", "unrelated"]);
+    let switched = agent.ok("switched", "status", json!({ "repo": opened["repo"] }));
+    assert_eq!(
+        switched["snapshot"]["branch"]["headOid"],
+        json!(unrelated.trim())
+    );
+    assert_eq!(switched["reviewFiles"], Value::Null);
+    assert_eq!(
+        switched["reviewError"]["code"],
+        json!("task_baseline_not_ancestor")
+    );
+    let history = agent.ok(
+        "switched-history",
+        "history",
+        json!({ "repo": opened["repo"] }),
+    );
+    assert_eq!(
+        history["page"]["commits"][0]["oid"],
+        json!(unrelated.trim())
+    );
+
+    let linked = fixture.repo.parent().unwrap().join("联动 worktree 🐚");
+    git(
+        &fixture.repo,
+        &fixture.config,
+        &["worktree", "add", "--detach", linked.to_str().unwrap()],
+    );
+    assert_eq!(
+        agent.error_code(
+            "different-tree",
+            "open",
+            json!({ "path": linked, "worktreeIdentity": identity })
+        ),
+        "target_changed",
+    );
+    let linked_open = agent.ok("linked-open", "open", json!({ "path": linked }));
+    assert_ne!(linked_open["worktreeIdentity"], *identity);
+    assert!(linked_open["worktreePath"]
+        .as_str()
+        .unwrap()
+        .ends_with("/联动 worktree 🐚"));
+    let mut restarted = fixture.agent();
+    let reopened = restarted.ok(
+        "reopened",
+        "open",
+        json!({
+            "path": linked, "worktreeIdentity": linked_open["worktreeIdentity"],
+        }),
+    );
+    assert_eq!(
+        reopened["worktreeIdentity"],
+        linked_open["worktreeIdentity"]
+    );
 }
 
 #[test]

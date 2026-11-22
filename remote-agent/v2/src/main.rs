@@ -56,6 +56,7 @@ mod terminal;
 mod workspaces;
 
 mod events;
+mod identity;
 mod protocol;
 mod pty;
 mod receipts;

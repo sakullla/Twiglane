@@ -17,27 +17,29 @@ use tokio::sync::{mpsc, Semaphore};
 use crate::error::AppError;
 use crate::events::{self, ChangeFeed};
 use crate::git::changes;
+use crate::git::command::common_dir_command;
 use crate::git::document::{self, DocumentSource};
 use crate::git::files::{self, DeleteMode, RepositoryCreateEntryKind};
-use crate::git::command::common_dir_command;
 use crate::git::gate::RepoWriteLock;
 use crate::git::heads;
 use crate::git::history::{self, HistoryRequest};
 use crate::git::ops::{self, Backend, RepoState};
 use crate::git::resolve;
-use crate::git::sync;
-use crate::git::tags;
-use crate::git::worktree as worktree_ops;
 use crate::git::runner::RealRunner;
 use crate::git::schedule::{internal_request_id, JobKind};
-use crate::model::{DiffLineSelection, RepositorySearchScope};
+use crate::git::sync;
+use crate::git::tags;
+use crate::git::task;
+use crate::git::worktree as worktree_ops;
+use crate::identity::WorktreeIdentity;
+use crate::model::{DiffLineSelection, RepositorySearchScope, TaskReview};
 use crate::protocol::{self, Request, CAPABILITIES, MAX_IN_FLIGHT, MAX_REQUEST_BYTES, PROTOCOL};
 use crate::pty::{self, FrameEvents};
-use crate::terminal::{TerminalManager, TerminalProfile, TerminalSnapshot};
 use crate::receipts::{Receipt, ReceiptStore, COMPLETED, FAILED};
-use crate::session::{Selection, Session};
+use crate::session::{DiffView, Selection, Session};
 use crate::shutdown::Shutdown;
 use crate::state::AppStore;
+use crate::terminal::{TerminalManager, TerminalProfile, TerminalSnapshot};
 
 const AGENT_NAME: &str = "twiglane-agent/2";
 const MAX_FIELD: usize = 4096;
@@ -525,6 +527,8 @@ impl Context {
             "open" => self.open(&request.fields, cancel).await,
             "status" => self.status(&request.fields, cancel).await,
             "diff" => self.diff(&request.fields, cancel).await,
+            "taskReview" => self.task_review(&request.fields, cancel).await,
+            "reviewIdentity" => self.review_identity(&request.fields, cancel).await,
             // 历史、比较与文件历史：只按页读取当前选择。
             "history" => self.history(&request.fields, cancel).await,
             "fileHistory" => self.file_history(&request.fields, cancel).await,
@@ -601,12 +605,8 @@ impl Context {
         fields: &Map<String, Value>,
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
-        if fields.contains_key("baseline") {
-            return Err(AppError::new(
-                "unsupported_baseline",
-                "v2 的审阅基线在后续任务接入，本版本不接受 baseline。",
-            ));
-        }
+        let baseline = baseline_field(fields)?.map(str::to_owned);
+        let expected_identity = optional_string_field(fields, "worktreeIdentity")?;
         let path = string_field(fields, "path")?;
         check_cancel(cancel)?;
         let opened = ops::open_repository(&self.backend, &path, internal_request_id()).await?;
@@ -614,7 +614,23 @@ impl Context {
         let state: RepoState =
             ops::state_token(&self.backend, &root, internal_request_id()).await?;
         let git_dir = self.common_dir(&root).await?;
-        let session = Session::new(root, opened.summary.path.clone(), git_dir, state.clone());
+        let identity = WorktreeIdentity::read(&self.backend, &root).await?;
+        if expected_identity
+            .as_ref()
+            .is_some_and(|expected| expected != &identity.digest)
+        {
+            return Err(worktree_changed());
+        }
+        let session = Session::new(
+            root,
+            opened.summary.path.clone(),
+            git_dir,
+            state.clone(),
+            identity,
+            baseline,
+        );
+        let review = self.bound_task_review(&session, opened.generation).await?;
+        check_cancel(cancel)?;
         // 变化事件源与仓库同生命周期：watch 不可用时如实降级，不启动任何轮询。
         let feed = ChangeFeed::start(
             &session.key,
@@ -630,8 +646,7 @@ impl Context {
         *self
             .session
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(session);
-        check_cancel(cancel)?;
+            .unwrap_or_else(|error| error.into_inner()) = Some(session.clone());
         Ok(json!({
             "protocol": PROTOCOL,
             "agent": AGENT_NAME,
@@ -648,6 +663,11 @@ impl Context {
             "watchDegraded": degraded,
             "events": "notification",
             "capabilities": CAPABILITIES,
+            "worktreeIdentity": session.identity.digest,
+            "worktreePath": session.identity.path,
+            "baseline": session.baseline,
+            "reviewFiles": review_file_paths(review.as_ref()),
+            "reviewFilesTruncated": review.is_some_and(|review| review.files_truncated),
         }))
     }
     async fn status(
@@ -656,16 +676,29 @@ impl Context {
         cancel: &AtomicBool,
     ) -> Result<Value, AppError> {
         let session = self.session(fields)?;
+        check_bound_baseline(&session, fields)?;
         let generation = match optional_u64_field(fields, "generation")? {
             Some(generation) => generation,
             None => self.backend.scheduler.current_generation(&session.key),
         };
         check_cancel(cancel)?;
-        let snapshot =
-            ops::refresh_status(&self.backend, &session.key, generation, internal_request_id())
-                .await?;
+        self.check_identity(&session).await?;
+        let snapshot = ops::refresh_status(
+            &self.backend,
+            &session.key,
+            generation,
+            internal_request_id(),
+        )
+        .await?;
         let state: RepoState =
             ops::state_token(&self.backend, &session.root, internal_request_id()).await?;
+        // A branch switch or rewrite can invalidate the review range while
+        // leaving the worktree usable for ordinary repository operations.
+        let (review, review_error) =
+            match self.bound_task_review(&session, snapshot.generation).await {
+                Ok(review) => (review, None),
+                Err(error) => (None, Some(error)),
+            };
         session.set_state(state.clone());
         check_cancel(cancel)?;
         Ok(json!({
@@ -673,8 +706,81 @@ impl Context {
             "generation": snapshot.generation,
             "stateToken": state.token,
             "snapshot": snapshot,
+            "worktreeIdentity": session.identity.digest,
+            "worktreePath": session.identity.path,
+            "baseline": session.baseline,
+            "reviewFiles": review_file_paths(review.as_ref()),
+            "reviewFilesTruncated": review.is_some_and(|review| review.files_truncated),
+            "reviewError": review_error,
         }))
     }
+
+    async fn check_identity(&self, session: &Session) -> Result<(), AppError> {
+        let identity = WorktreeIdentity::read(&self.backend, &session.root).await?;
+        if identity.digest != session.identity.digest || identity.path != session.identity.path {
+            return Err(worktree_changed());
+        }
+        Ok(())
+    }
+
+    async fn review_identity(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        check_cancel(cancel)?;
+        self.check_identity(&session).await?;
+        check_cancel(cancel)?;
+        Ok(json!({
+            "repo": session.key,
+            "worktreeIdentity": session.identity.digest,
+            "worktreePath": session.identity.path,
+        }))
+    }
+
+    async fn bound_task_review(
+        &self,
+        session: &Session,
+        generation: u64,
+    ) -> Result<Option<TaskReview>, AppError> {
+        let Some(baseline) = session.baseline.as_deref() else {
+            return Ok(None);
+        };
+        let review = task::task_review(
+            &self.backend,
+            &session.key,
+            baseline,
+            generation,
+            internal_request_id(),
+        )
+        .await?;
+        // The shared local reader also accepts refs and peels tags. A remote
+        // review source must identify the commit itself.
+        if review.baseline_oid != baseline {
+            return Err(invalid_baseline());
+        }
+        Ok(Some(review))
+    }
+
+    async fn task_review(
+        &self,
+        fields: &Map<String, Value>,
+        cancel: &AtomicBool,
+    ) -> Result<Value, AppError> {
+        let session = self.session(fields)?;
+        check_bound_baseline(&session, fields)?;
+        check_cancel(cancel)?;
+        self.check_identity(&session).await?;
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        let review = self
+            .bound_task_review(&session, generation)
+            .await?
+            .ok_or_else(invalid_baseline)?;
+        check_cancel(cancel)?;
+        Ok(json!({ "repo": session.key, "generation": review.generation, "review": review }))
+    }
+
     async fn diff(
         &self,
         fields: &Map<String, Value>,
@@ -682,69 +788,123 @@ impl Context {
     ) -> Result<Value, AppError> {
         let session = self.session(fields)?;
         let path = string_field(fields, "path")?;
-        let original = optional_string_field(fields, "original")?;
-        let staged = match string_field(fields, "view")?.as_str() {
-            "staged" => true,
-            "unstaged" => false,
+        let mut original = optional_string_field(fields, "original")?;
+        let view = match string_field(fields, "view")?.as_str() {
+            "staged" => DiffView::Staged,
+            "unstaged" => DiffView::Unstaged,
+            "task" => DiffView::Task,
             _ => {
                 return Err(AppError::new(
                     "invalid_view",
-                    "差异视图只能是 staged 或 unstaged。",
+                    "差异视图只能是 staged、unstaged 或 task。",
                 ))
             }
         };
-        let offset = optional_u64_field(fields, "offset")?.unwrap_or(0) as u32;
+        let offset = u32::try_from(optional_u64_field(fields, "offset")?.unwrap_or(0))
+            .map_err(|_| AppError::new("invalid_request", "差异偏移超出范围。"))?;
         let limit = optional_u64_field(fields, "limit")?
-            .map(|limit| (limit as u32).clamp(1, MAX_DIFF_LINES))
+            .map(|limit| limit.clamp(1, u64::from(MAX_DIFF_LINES)) as u32)
             .unwrap_or(DEFAULT_DIFF_LINES);
         let context = optional_u64_field(fields, "context")?
-            .map(|context| (context as u32).min(MAX_CONTEXT))
+            .map(|context| context.min(u64::from(MAX_CONTEXT)) as u32)
             .unwrap_or(3);
         let selection = Selection {
             path: path.clone(),
             original: original.clone(),
-            staged,
+            view,
         };
-        let epoch = session.begin_diff(selection, offset == 0);
-        if let Some(cursor) = optional_string_field(fields, "cursor")? {
-            Cursor::decode(&cursor)?.check(
-                &session,
+        let epoch = session.begin_diff(selection.clone(), offset == 0);
+        let cursor = optional_string_field(fields, "cursor")?;
+        let generation = self.backend.scheduler.current_generation(&session.key);
+        check_cancel(cancel)?;
+        let task_range = if view == DiffView::Task {
+            check_bound_baseline(&session, fields)?;
+            let baseline = session.baseline.as_deref().ok_or_else(invalid_baseline)?;
+            self.check_identity(&session).await?;
+            let state =
+                ops::state_token(&self.backend, &session.root, internal_request_id()).await?;
+            Some((baseline, state))
+        } else {
+            None
+        };
+        if task_range.is_some() && original.is_none() {
+            if let Some(review) = self.bound_task_review(&session, generation).await? {
+                original = review
+                    .files
+                    .into_iter()
+                    .find(|file| file.path == path)
+                    .and_then(|file| file.original_path);
+            }
+        }
+        let token = task_range
+            .as_ref()
+            .map_or_else(|| session.token(), |(_, state)| state.token.clone());
+        let query = CursorBody {
+            repo: session.key.clone(),
+            identity: session.identity.digest.clone(),
+            baseline: session.baseline.clone(),
+            token,
+            selection,
+            limit,
+            offset,
+            context,
+        };
+        if let Some(cursor) = cursor {
+            Cursor::decode(&cursor)?.check(&query)?;
+        }
+        let staged = view == DiffView::Staged;
+        let diff = if let Some((baseline, state)) = task_range {
+            let head = state.head.as_deref().ok_or_else(invalid_baseline)?;
+            let mut diff = task::load_task_diff(
+                &self.backend,
+                &session.key,
+                baseline,
+                head,
+                &path,
+                original.as_deref(),
+                generation,
+                internal_request_id(),
+                offset,
+                limit,
+                context,
+                false,
+            )
+            .await?;
+            let after =
+                ops::state_token(&self.backend, &session.root, internal_request_id()).await?;
+            if state.token != after.token {
+                return Err(cursor_expired());
+            }
+            for hunk in &mut diff.hunks {
+                hunk.stageable = false;
+            }
+            // A diff is read-only. Return its observed token without replacing a
+            // newer token obtained by a concurrent status or write.
+            diff
+        } else {
+            changes::load_diff_with_context(
+                &self.backend,
+                &session.key,
                 &path,
                 original.as_deref(),
                 staged,
-                limit,
+                generation,
+                internal_request_id(),
                 offset,
-            )?;
-        }
-        let generation = self.backend.scheduler.current_generation(&session.key);
-        check_cancel(cancel)?;
-        let diff = changes::load_diff_with_context(
-            &self.backend,
-            &session.key,
-            &path,
-            original.as_deref(),
-            staged,
-            generation,
-            internal_request_id(),
-            offset,
-            limit,
-            context,
-            false,
-        )
-        .await?;
+                limit,
+                context,
+                false,
+            )
+            .await?
+        };
         session.check_epoch(epoch)?;
         check_cancel(cancel)?;
         let consumed = diff.offset + diff.lines.len() as u32;
-        let token = session.token();
+        let token = query.token.clone();
         let next = (consumed < diff.total_lines).then(|| {
             Cursor(CursorBody {
-                repo: session.key.clone(),
-                token: token.clone(),
-                path: path.clone(),
-                original: original.clone(),
-                staged,
-                limit,
                 offset: consumed,
+                ..query
             })
             .encode()
         });
@@ -752,6 +912,7 @@ impl Context {
             "repo": session.key,
             "path": diff.path,
             "staged": staged,
+            "view": view,
             "generation": diff.generation,
             "stateToken": token,
             "nextCursor": next,
@@ -1694,6 +1855,7 @@ impl Context {
                     AppError::new("write_lock_unavailable", "写入锁已中断，未写入仓库。")
                 })??
         };
+        self.check_identity(&session).await?;
         let store = ReceiptStore::new(&session.git_dir);
         if let Some(existing) = store.read(&operation_id)? {
             if existing.request_digest != request_digest || existing.op != op.name() {
@@ -2457,15 +2619,16 @@ impl Context {
     }
 }
 /// 一次性差异游标：绑定仓库、状态令牌、查询与下一页偏移。
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, PartialEq)]
 struct CursorBody {
     repo: String,
+    identity: String,
+    baseline: Option<String>,
     token: String,
-    path: String,
-    original: Option<String>,
-    staged: bool,
+    selection: Selection,
     limit: u32,
     offset: u32,
+    context: u32,
 }
 
 struct Cursor(CursorBody);
@@ -2485,31 +2648,65 @@ impl Cursor {
         Ok(Self(body))
     }
 
-    fn check(
-        &self,
-        session: &Session,
-        path: &str,
-        original: Option<&str>,
-        staged: bool,
-        limit: u32,
-        offset: u32,
-    ) -> Result<(), AppError> {
-        let same = self.0.repo == session.key
-            && self.0.path == path
-            && self.0.original.as_deref() == original
-            && self.0.staged == staged
-            && self.0.limit == limit
-            && self.0.offset == offset
-            && self.0.token == session.token();
-        if same {
+    fn check(&self, query: &CursorBody) -> Result<(), AppError> {
+        if &self.0 == query {
             Ok(())
         } else {
-            Err(AppError::new(
-                "cursor_expired",
-                "差异游标绑定的仓库、状态或选择已经变化，请重新读取第一页。",
-            ))
+            Err(cursor_expired())
         }
     }
+}
+
+fn invalid_baseline() -> AppError {
+    AppError::new(
+        "invalid_baseline",
+        "任务起点必须是当前工作树的完整提交标识。",
+    )
+}
+
+fn baseline_field(fields: &Map<String, Value>) -> Result<Option<&str>, AppError> {
+    match fields.get("baseline") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value))
+            if matches!(value.len(), 40 | 64)
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')) =>
+        {
+            Ok(Some(value))
+        }
+        Some(_) => Err(invalid_baseline()),
+    }
+}
+
+fn check_bound_baseline(session: &Session, fields: &Map<String, Value>) -> Result<(), AppError> {
+    if baseline_field(fields)?.is_some_and(|baseline| Some(baseline) != session.baseline.as_deref())
+    {
+        return Err(invalid_baseline());
+    }
+    Ok(())
+}
+
+fn review_file_paths(review: Option<&TaskReview>) -> Option<Vec<&str>> {
+    review.map(|review| {
+        let mut paths: Vec<_> = review.files.iter().map(|file| file.path.as_str()).collect();
+        paths.sort_unstable();
+        paths
+    })
+}
+
+fn worktree_changed() -> AppError {
+    AppError::new(
+        "target_changed",
+        "远端工作树身份已变化，请从原任务重新打开。",
+    )
+}
+
+fn cursor_expired() -> AppError {
+    AppError::new(
+        "cursor_expired",
+        "差异游标绑定的仓库、状态或选择已经变化，请重新读取第一页。",
+    )
 }
 
 fn request_digest(op: WriteOp, fields: &Map<String, Value>) -> String {

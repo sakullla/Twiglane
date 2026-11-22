@@ -711,8 +711,13 @@ export async function remoteReturnReview(key: string): Promise<RemoteReturnOutco
     throw remoteError("write_pending", "请先核对远端操作结果，再返回 Cliora。", session.generation);
   }
   try {
-    // 阶段由这次会话里真正做成的提交或合入决定；什么都没做就是 reviewed。
-    await remoteReviewPort.returnReview(session.reviewId, session.sessionId, session.outcome);
+    // 阶段由这次会话里真正做成的提交或合入决定。什么都没做就是 reviewed，而这个阶段
+    // 沿旧调用方的语义省略 outcome：端口与后端都把它当缺省值处理，协议保持向后兼容。
+    if (session.outcome === "reviewed") {
+      await remoteReviewPort.returnReview(session.reviewId, session.sessionId);
+    } else {
+      await remoteReviewPort.returnReview(session.reviewId, session.sessionId, session.outcome);
+    }
   } catch (error) {
     const failure = normalizeError(error);
     // 同一阶段重复点击（或阶段回退）由远端按 conflict 拒绝：这一阶段已经送达过，

@@ -11,7 +11,7 @@
 | R3 主机、工作树与任务基线 | 两种架构的冒烟测试均从直接入口读到提交，并通过 Cliora 连接器打开同一已认证账号与工作树，验证任务基线。WebView 的 Cliora 主机簿回放覆盖选主机及路径。已安装应用通过操作系统跳转并将审查结果送回原任务仍待验证。 |
 | R4 失败与回执恢复 | Debian x64 两条 WebView 入口用待确认的创建操作回放。普通重连保留旧 ID 且目标目录仍未创建。明确确认新操作后，远端 `git init` 成功、桌面待确认状态清除，旧回执保持原字节。冒烟测试另外从两条入口找回真实旧版提交回执，操作类型不符时保留待确认记录。见[待确认截图](ssh-parity-development/provision-pending-native.png)。 |
 
-原生冒烟由 [`verify-desktop-parity.mjs`](../../scripts/remote-worktree/verify-desktop-parity.mjs) 生成，[Debian x86_64（含旧回执）](ssh-parity-development/debian-x64.json)与 [Debian aarch64](ssh-parity-development/debian-arm64.json)均通过 [`verify-remote-worktree-evidence.mjs`](../../scripts/verify-remote-worktree-evidence.mjs) 检查。它们记录角色、架构、源码和产物摘要，以及各自的未测项。
+原生冒烟由 [`verify-desktop-parity.mjs`](../../scripts/remote-worktree/verify-desktop-parity.mjs) 生成，[Debian x86_64（含旧回执）](ssh-parity-development/debian-x64.json)与 [Debian aarch64](ssh-parity-development/debian-arm64.json)均通过 [`verify-remote-worktree-evidence.mjs`](../../scripts/verify-remote-worktree-evidence.mjs) 检查。两份 JSON 记录下方迁移复验后的候选源码、架构、产物摘要和未测项。WebView 截图来自上文的隔离构建。
 
 ## 回归结果
 
@@ -25,6 +25,12 @@
 | Cliora Windows 原生专项 `remote::twiglane::` | 3 项通过。 |
 | Cliora Windows 原生全量 | 1713 项通过，16 项失败，36 项忽略。失败包括工作区深链的 POSIX 路径夹具、迁移版本断言、远端事务及上传、provider 套接字 `WouldBlock`。 |
 | Twiglane `npm run verify:delivery` | 退出码 1。缺少发行证据 `docs/verification/report.json`。 |
+
+## Cliora 迁移复验
+
+旧候选的四个测试在数据库迁移到 38 后仍断言 36。Cliora `bc0b9dc453fa71b10fc67bdbb9474e2cc7c6fdb8` 统一了这四处的版本断言，并保留回执、已有记录和重开的检查。同一 Windows 主机上运行改造前的 Cliora `0cba868d7c4bd607995ef0b77a1b9b1234253ba2`，结果为 1714 项通过、11 项失败、36 项忽略。集成修复后的全量复跑为 1718 项通过、11 项失败、36 项忽略，失败测试与改造前逐名一致。旧候选的 provider 套接字失败未复现。
+
+首次正式收集中的 Cliora 原生命令遇到 Windows 构建文件占用。随后在集成工作树完成了上面的原生全量复跑。正式收集中的 Cliora 浏览器套件为 1139 项通过、2 项超时、1 项跳过，两个超时的测试单独串行复跑均通过。
 
 ## R5 与 R6 待验收
 

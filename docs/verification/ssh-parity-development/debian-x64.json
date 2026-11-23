@@ -3,14 +3,14 @@
   "scope": "development-native-ssh-smoke",
   "status": "passed",
   "reason": null,
-  "startedAt": "2026-11-23T00:38:17.244Z",
+  "startedAt": "2026-11-23T01:19:23.138Z",
   "desktop": {
     "platform": "windows",
     "architecture": "x86_64"
   },
   "source": {
-    "twiglane": "6be2aba434fef3ad0fe2562b29ef9fe24a3f1b4c",
-    "cliora": "2765a91339d1241783c60d1f7bff481ce5ce0183"
+    "twiglane": "4a4a1ffc745857536b1e4b7394cba02d7bb752a3",
+    "cliora": "bc0b9dc453fa71b10fc67bdbb9474e2cc7c6fdb8"
   },
   "remote": {
     "platform": "linux",
@@ -30,14 +30,14 @@
     }
   },
   "artifacts": {
-    "connectorSha256": "777269b46e9b0677f066e718db8b79fe8f8e78977304b1421d4248f8cda75b12",
+    "connectorSha256": "5a62b10b36b01c7306740df13abe2fec90f6015c4e5a4c4400e33a76193cdbab",
     "peerHelperSha256": "65bbe8ad601ff15afb4ae8e5cf009b79a1214006c88a21a853a630e4c4153bdb",
     "agentManifestSha256": "3b5e1395a1eda0ae27c3d1e8e0884835b15a5df97cf42c217a3c6ccf41cdbbae",
     "agentResourcesSha256": "a5466a54c6b8bc98a6bb9d008db1c5b12bed17205ad9800ea56691b3e4c89540"
   },
   "fixture": {
-    "beforeSha256": "773e06fd5898919f45ee8ad8dc6dbfb9ac38660154f655f42580177072002244",
-    "afterSha256": "773e06fd5898919f45ee8ad8dc6dbfb9ac38660154f655f42580177072002244",
+    "beforeSha256": "e7c563f7c8351caf5ee61f6effbb9f797beca3f424e1c308204304390a927f2f",
+    "afterSha256": "e7c563f7c8351caf5ee61f6effbb9f797beca3f424e1c308204304390a927f2f",
     "probeBeforeSha256": "81ee9a12a44801eccce658e5534f24be74b51e26fabe0b75b2552ab7051f4748",
     "probeAfterSha256": "81ee9a12a44801eccce658e5534f24be74b51e26fabe0b75b2552ab7051f4748",
     "legacyRequested": true
@@ -52,7 +52,7 @@
       "legacyV1ReceiptRecovery": "passed"
     }
   },
-  "finishedAt": "2026-11-23T00:38:39.585Z",
+  "finishedAt": "2026-11-23T01:19:51.602Z",
   "unverified": {
     "desktopPlatforms": [
       "linux",

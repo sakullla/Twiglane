@@ -165,7 +165,7 @@ jobs:
   remote-agent-v2:
     name: Sign and assemble all remote agents
     needs: [gate, remote-agent-v2-build]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7

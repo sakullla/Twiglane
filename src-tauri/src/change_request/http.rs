@@ -34,7 +34,7 @@ impl Default for HttpSettings {
 pub struct Http {
     client: reqwest::Client,
     body_limit: usize,
-    pub(crate) discovery_timeout: Duration,
+    pub(crate) timeout: Duration,
 }
 
 /// 一次 HTTP 往返的结果。状态码之外的原文只作为分类输入，不直接进界面。
@@ -63,7 +63,6 @@ impl Http {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(settings.timeout)
             .connect_timeout(settings.connect_timeout)
             .pool_max_idle_per_host(1)
             .pool_idle_timeout(Duration::from_secs(30))
@@ -73,7 +72,7 @@ impl Http {
         Ok(Self {
             client,
             body_limit: settings.body_limit,
-            discovery_timeout: settings.timeout,
+            timeout: settings.timeout,
         })
     }
 
@@ -87,7 +86,10 @@ impl Http {
     }
 
     /// 不带认证的读取：只用于平台发现。认证头不会出现在这里。
-    pub(crate) async fn probe(&self, url: &str) -> Result<HttpReply, AppError> {
+    pub(crate) async fn probe(&self, url: &str, deadline: tokio::time::Instant) -> Result<HttpReply, AppError> {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(AppError::new("change_request_network", "平台自动识别已超时。"));
+        }
         self.request("GET", url, Vec::new(), None, true).await
     }
 
@@ -125,6 +127,10 @@ impl Http {
             .request(method.clone(), parsed)
             .header(reqwest::header::USER_AGENT, "Twiglane")
             .header(reqwest::header::ACCEPT, "application/json");
+        // 发现流程由同一个 deadline 取消。避免单请求超时先唤醒发现流程并启动下一探针。
+        if !probe {
+            request = request.timeout(self.timeout);
+        }
         for (name, value) in headers {
             request = request.header(name, value);
         }

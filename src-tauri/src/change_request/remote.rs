@@ -264,9 +264,9 @@ pub(crate) async fn resolve_repository(
     }
     let loopback = host_is_loopback(&location.host);
     let mut responded = false;
-    let deadline = tokio::time::Instant::now() + http.discovery_timeout;
+    let deadline = tokio::time::Instant::now() + http.timeout;
     for (base, repo_path) in &location.candidates {
-        match tokio::time::timeout_at(deadline, probe_instance(http, base, &mut responded)).await {
+        match tokio::time::timeout_at(deadline, probe_instance(http, base, &mut responded, deadline)).await {
             Ok(Some((provider, api_base))) => {
                 let (namespace, name) = repo_coordinates(provider, repo_path)?;
                 return Ok(Repository {
@@ -373,9 +373,9 @@ fn manual_gitlab(
 /// 在候选实例基址上依次尝试：GitHub Enterprise 元数据、Gitea 版本、
 /// GitLab API 版本、GitLab 登录页标记。任何 HTTP 响应都算“实例可达”，
 /// 只有全部候选都没有响应时才算网络失败。
-async fn probe_instance(http: &Http, base: &str, responded: &mut bool) -> Option<(Provider, String)> {
+async fn probe_instance(http: &Http, base: &str, responded: &mut bool, deadline: tokio::time::Instant) -> Option<(Provider, String)> {
     let github_meta = format!("{base}/api/v3/meta");
-    if let Ok(reply) = http.probe(&github_meta).await {
+    if let Ok(reply) = http.probe(&github_meta, deadline).await {
         *responded = true;
         if reply.status == 200 && looks_like_github_meta(&reply) {
             return Some((Provider::GitHub, format!("{base}/api/v3")));
@@ -383,7 +383,7 @@ async fn probe_instance(http: &Http, base: &str, responded: &mut bool) -> Option
     }
 
     let gitea_version = format!("{base}/api/v1/version");
-    if let Ok(reply) = http.probe(&gitea_version).await {
+    if let Ok(reply) = http.probe(&gitea_version, deadline).await {
         *responded = true;
         if reply.status == 200 && looks_like_gitea_version(&reply) {
             return Some((Provider::Gitea, format!("{base}/api/v1")));
@@ -391,7 +391,7 @@ async fn probe_instance(http: &Http, base: &str, responded: &mut bool) -> Option
     }
 
     let gitlab_version = format!("{base}/api/v4/version");
-    if let Ok(reply) = http.probe(&gitlab_version).await {
+    if let Ok(reply) = http.probe(&gitlab_version, deadline).await {
         *responded = true;
         if reply.status == 200 {
             if let Some(json) = reply.json() {
@@ -405,7 +405,7 @@ async fn probe_instance(http: &Http, base: &str, responded: &mut bool) -> Option
     // GitLab 的版本接口需要认证；未配置令牌时用同实例登录页的官方标记确认实例，
     // 这只能证明“这是 GitLab 页面”，具体版本与创建能力仍由创建路由判定。
     let sign_in = format!("{base}/users/sign_in");
-    if let Ok(mut reply) = http.probe(&sign_in).await {
+    if let Ok(mut reply) = http.probe(&sign_in, deadline).await {
         *responded = true;
         if reply.status == 200 {
             reply.body.make_ascii_lowercase();

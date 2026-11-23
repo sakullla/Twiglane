@@ -597,7 +597,7 @@ fn v2_diff_page(diff: &Value, peer_next: Option<&str>, offset: u64) -> (String, 
     (text, next)
 }
 
-fn remote_error(code: &str) -> AppError {
+pub(crate) fn remote_error(code: &str) -> AppError {
     // agent v2 的错误码与本地分类不同名：把它们翻成同一套面向用户的分类，既不把
     // 「仓库状态已变」说成 SSH 失败，也不把「组件不支持」折叠成连接问题。
     match code {
@@ -3557,7 +3557,6 @@ input.on("line", line => {
 
     /// 现在发行的 v1 组件没有这些 op：明确拒绝要按「未生效」收尾并清掉待确认记录，
     /// 而不是留下一条永远核对不掉的写入。
-    #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn an_op_the_remote_component_lacks_fails_without_leaving_a_pending_write() {
         let dir = tempfile::tempdir().unwrap();
@@ -3583,6 +3582,7 @@ input.on("line", line => {
         .await
         .unwrap();
         assert_eq!(result["state"], "failed");
+        assert_eq!(result["code"], "unsupported_operation");
         assert!(result["message"]
             .as_str()
             .is_some_and(|message| message.contains("不支持")));

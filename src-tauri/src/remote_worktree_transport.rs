@@ -729,10 +729,15 @@ async fn read_responses(
         };
         let result = match (response.ok, response.result, response.error) {
             (true, Some(result), None) if result.is_object() => Ok(result),
-            (false, None, Some(err)) if token(&err.code) => Err(AppError::new(
-                err.code,
-                crate::redact::redact_error_text(&err.message),
-            )),
+            (false, None, Some(err)) if token(&err.code) => {
+                let message = match err.code.as_str() {
+                    "unsupported_operation" | "unsupported_capability" => {
+                        crate::remote_worktree::remote_error(&err.code).message
+                    }
+                    _ => crate::redact::redact_error_text(&err.message),
+                };
+                Err(AppError::new(err.code, message))
+            }
             _ => return protocol_error(),
         };
         let mut pending = pending.lock().unwrap_or_else(|e| e.into_inner());

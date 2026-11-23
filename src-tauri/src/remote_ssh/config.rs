@@ -327,11 +327,6 @@ impl Snapshot {
 
     /// 把冻结配置与信任材料写进本次连接的私有目录，返回 `ssh` 参数（止于 `--` 与目标）。
     /// 目录生命周期跟随调用方：连接结束即删除，权限只给当前用户。
-    #[cfg(test)]
-    pub(crate) fn args(&self, folder: &Path, target: &SshTarget) -> Result<Vec<OsString>, AppError> {
-        self.args_with_host_key(folder, target, None)
-    }
-
     pub(crate) fn args_with_host_key(
         &self,
         folder: &Path,
@@ -553,7 +548,7 @@ mod tests {
             .prefix("Twiglane SSH profile ")
             .tempdir()
             .unwrap();
-        let args = snapshot.args(dir.path(), &target).unwrap();
+        let args = snapshot.args_with_host_key(dir.path(), &target, None).unwrap();
         let frozen = fs::read_to_string(dir.path().join("config")).unwrap();
         assert!(!frozen.contains("__PROGRAMDATA__"));
         assert!(frozen.contains("StrictHostKeyChecking yes"));

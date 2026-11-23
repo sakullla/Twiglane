@@ -675,9 +675,7 @@ describe("合并面板", () => {
     completeMerge.mockResolvedValue({ oid: "d".repeat(40), generation: 7, summary: "已完成合并提交，包含 1 个路径。", files: [], snapshot: opened.snapshot });
     renderPanel();
     expect(await screen.findByText("可以合并，没有冲突")).toBeTruthy();
-    // 明细默认收起，结论与数字已经够做决定；展开后先看文件的最终结果，提交在第二页。
-    expect(screen.queryByRole("listbox", { name: "将带入的文件" })).toBeNull();
-    await fireEvent.click(screen.getByRole("button", { name: /查看改动明细/ }));
+    // 明细直接铺在下方：先看文件的最终结果，提交在第二页。
     expect(screen.getByRole("listbox", { name: "将带入的文件" })).toBeTruthy();
     await fireEvent.click(screen.getByRole("tab", { name: /提交/ }));
     expect(screen.getByRole("listbox", { name: "将带入的提交" }).textContent).toContain("加上登录页");

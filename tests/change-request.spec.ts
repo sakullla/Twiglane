@@ -482,6 +482,31 @@ const sourceMissing = {
 };
 
 describe("准备阶段失败与重新读取（R2、R6）", () => {
+  it("自建 GitLab 识别失败后允许输入实例地址并沿用已确认的远程范围", async () => {
+    const url = "https://git.example.test:8443/tools/gitlab";
+    const manual: ChangeRequestPrepare = {
+      ...ready,
+      provider: "gitlab",
+      providerLabel: "GitLab",
+      host: "git.example.test",
+      repository: "team/sub/app",
+      repositoryWeb: `${url}/team/sub/app`,
+      gitlabInstance: { url, remoteFingerprint: "a".repeat(64) },
+    };
+    mocks.prepareChangeRequest
+      .mockRejectedValueOnce({ code: "change_request_network", message: "无法连接平台实例" })
+      .mockResolvedValueOnce(manual);
+    showModal();
+    const address = await screen.findByLabelText("自建 GitLab 实例地址");
+    await fireEvent.input(address, { target: { value: url } });
+    await fireEvent.click(screen.getByRole("button", { name: "使用此 GitLab 实例" }));
+    expect(mocks.prepareChangeRequest).toHaveBeenLastCalledWith(repoPath, null, 4, expect.any(Number), url);
+    await readyForm();
+    expect(screen.getByRole("list", { name: "创建范围" }).textContent).toContain(url);
+    await waitFor(() => expect(mocks.changeRequestTokenStatus).toHaveBeenCalledWith(repoPath, "origin", 4, expect.any(Number), manual));
+    expect(mocks.createChangeRequest).not.toHaveBeenCalled();
+  });
+
   it("prepare 拒绝时正文显示原生原因，不报成功，也没有可用的创建按钮", async () => {
     mocks.prepareChangeRequest.mockRejectedValue(sourceMissing);
     const { props } = showModal();

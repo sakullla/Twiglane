@@ -1,13 +1,15 @@
 //! 远程地址到可信平台上下文的解析与发现。
 //!
 //! 这里不接收前端传入的 owner/repo/API base：仓库坐标从当前远程地址推导，
-//! 自托管实例只靠平台元数据或同 host 的登录页标记确认，不按 host 名称猜平台。
-//! SSH / scp-like 地址只能提供 host 与 path，因此必须先经 HTTPS 上的同 host
-//! 实例发现确认，不能静默把任意端口或子路径改写成 web 基址。
+//! 自托管实例默认靠平台元数据或同 host 的登录页标记确认。SSH / scp-like 地址
+//! 只提供 Git host 与仓库路径。Web 部署地址不同时，可以显式指定 GitLab 实例，
+//! 平台写入前仍须用该实例的项目 API 核对仓库。
 
 use std::net::IpAddr;
 
 use reqwest::Url;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::error::AppError;
 
@@ -25,6 +27,14 @@ pub(crate) struct Repository {
     pub name: String,
     pub host: String,
     pub loopback: bool,
+    pub gitlab_instance: Option<GitLabInstance>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GitLabInstance {
+    pub url: String,
+    remote_fingerprint: String,
 }
 
 impl Repository {
@@ -233,8 +243,12 @@ pub(crate) fn repo_coordinates(
 pub(crate) async fn resolve_repository(
     http: &Http,
     remote_url: &str,
+    gitlab_instance_url: Option<&str>,
 ) -> Result<Repository, AppError> {
     let location = parse_remote_location(remote_url)?;
+    if let Some(instance_url) = gitlab_instance_url {
+        return manual_gitlab(remote_url, &location, instance_url);
+    }
     if let Some(public) = public_instance(&location.host) {
         let (namespace, name) = repo_coordinates(public.provider, &location.repo_path)?;
         return Ok(Repository {
@@ -245,13 +259,15 @@ pub(crate) async fn resolve_repository(
             name,
             host: location.host,
             loopback: false,
+            gitlab_instance: None,
         });
     }
     let loopback = host_is_loopback(&location.host);
     let mut responded = false;
+    let deadline = tokio::time::Instant::now() + http.discovery_timeout;
     for (base, repo_path) in &location.candidates {
-        match probe_instance(http, base).await {
-            InstanceProbe::Found(provider, api_base) => {
+        match tokio::time::timeout_at(deadline, probe_instance(http, base, &mut responded)).await {
+            Ok(Some((provider, api_base))) => {
                 let (namespace, name) = repo_coordinates(provider, repo_path)?;
                 return Ok(Repository {
                     provider,
@@ -261,10 +277,11 @@ pub(crate) async fn resolve_repository(
                     name,
                     host: location.host.clone(),
                     loopback,
+                    gitlab_instance: None,
                 });
             }
-            InstanceProbe::Responded => responded = true,
-            InstanceProbe::Silent => {}
+            Ok(None) => {}
+            Err(_) => break,
         }
     }
     if responded {
@@ -275,46 +292,111 @@ pub(crate) async fn resolve_repository(
     } else {
         Err(AppError::new(
             "change_request_network",
-            "无法连接远程所在的平台实例，未确认平台，也没有创建 MR/PR。",
+            "桌面端无法连接远程对应的 Web 实例。请确认网络、HTTPS 地址和证书。",
         ))
     }
 }
 
-enum InstanceProbe {
-    Found(Provider, String),
-    Responded,
-    Silent,
+fn manual_gitlab(
+    remote_url: &str,
+    location: &RemoteLocation,
+    instance_url: &str,
+) -> Result<Repository, AppError> {
+    let invalid = || AppError::new(
+        "change_request_gitlab_instance",
+        "请输入 GitLab 实例的 HTTPS 地址，可包含端口和部署子路径。请去掉用户名、查询参数与片段。",
+    );
+    let instance_url = instance_url.trim();
+    if instance_url.len() > 4096 || instance_url.chars().any(char::is_control) {
+        return Err(invalid());
+    }
+    let instance = Url::parse(instance_url).map_err(|_| invalid())?;
+    let host = instance.host_str().ok_or_else(invalid)?.to_string();
+    let loopback = host_is_loopback(&host);
+    if !(instance.scheme() == "https" || (instance.scheme() == "http" && loopback))
+        || !instance.username().is_empty()
+        || instance.password().is_some()
+        || instance.query().is_some()
+        || instance.fragment().is_some()
+    {
+        return Err(invalid());
+    }
+    let prefix = instance.path().trim_end_matches('/');
+    if !prefix.is_empty() && prefix[1..].split('/').any(|segment| {
+        segment.is_empty() || !segment.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
+        })
+    }) {
+        return Err(invalid());
+    }
+
+    let remote = remote_url.trim().contains("://")
+        .then(|| Url::parse(remote_url.trim()).ok())
+        .flatten();
+    let git_origin = match remote.as_ref() {
+        Some(url) => {
+            let scheme = url.scheme();
+            let host = &location.host;
+            match url.port() {
+                Some(port) => format!("{scheme}://{host}:{port}"),
+                None => format!("{scheme}://{host}"),
+            }
+        }
+        None => format!("ssh://{}", location.host),
+    };
+    // Web clones on this instance include its deployment prefix. SSH paths are
+    // project coordinates, even if the web instance lives under a subdirectory.
+    let repo_path = if !prefix.is_empty() && same_origin(&git_origin, instance.as_str()) {
+        location.repo_path.strip_prefix(&format!("{}/", &prefix[1..])).unwrap_or(&location.repo_path)
+    } else {
+        &location.repo_path
+    };
+    let (namespace, name) = repo_coordinates(Provider::GitLab, repo_path)?;
+    let web_base = format!("{}{prefix}", instance.origin().ascii_serialization());
+    let git_remote = format!("{git_origin}/{}", location.repo_path);
+    let gitlab_instance = GitLabInstance {
+        url: web_base.clone(),
+        remote_fingerprint: format!("{:x}", Sha256::digest(git_remote.as_bytes())),
+    };
+    Ok(Repository {
+        provider: Provider::GitLab,
+        api_base: format!("{web_base}/api/v4"),
+        web_base,
+        namespace,
+        name,
+        host,
+        loopback,
+        gitlab_instance: Some(gitlab_instance),
+    })
 }
 
 /// 在候选实例基址上依次尝试：GitHub Enterprise 元数据、Gitea 版本、
 /// GitLab API 版本、GitLab 登录页标记。任何 HTTP 响应都算“实例可达”，
 /// 只有全部候选都没有响应时才算网络失败。
-async fn probe_instance(http: &Http, base: &str) -> InstanceProbe {
-    let mut responded = false;
-
+async fn probe_instance(http: &Http, base: &str, responded: &mut bool) -> Option<(Provider, String)> {
     let github_meta = format!("{base}/api/v3/meta");
-    if let Ok(reply) = http.get(&github_meta).await {
-        responded = true;
+    if let Ok(reply) = http.probe(&github_meta).await {
+        *responded = true;
         if reply.status == 200 && looks_like_github_meta(&reply) {
-            return InstanceProbe::Found(Provider::GitHub, format!("{base}/api/v3"));
+            return Some((Provider::GitHub, format!("{base}/api/v3")));
         }
     }
 
     let gitea_version = format!("{base}/api/v1/version");
-    if let Ok(reply) = http.get(&gitea_version).await {
-        responded = true;
+    if let Ok(reply) = http.probe(&gitea_version).await {
+        *responded = true;
         if reply.status == 200 && looks_like_gitea_version(&reply) {
-            return InstanceProbe::Found(Provider::Gitea, format!("{base}/api/v1"));
+            return Some((Provider::Gitea, format!("{base}/api/v1")));
         }
     }
 
     let gitlab_version = format!("{base}/api/v4/version");
-    if let Ok(reply) = http.get(&gitlab_version).await {
-        responded = true;
+    if let Ok(reply) = http.probe(&gitlab_version).await {
+        *responded = true;
         if reply.status == 200 {
             if let Some(json) = reply.json() {
                 if json.get("version").is_some() && json.get("revision").is_some() {
-                    return InstanceProbe::Found(Provider::GitLab, format!("{base}/api/v4"));
+                    return Some((Provider::GitLab, format!("{base}/api/v4")));
                 }
             }
         }
@@ -323,21 +405,20 @@ async fn probe_instance(http: &Http, base: &str) -> InstanceProbe {
     // GitLab 的版本接口需要认证；未配置令牌时用同实例登录页的官方标记确认实例，
     // 这只能证明“这是 GitLab 页面”，具体版本与创建能力仍由创建路由判定。
     let sign_in = format!("{base}/users/sign_in");
-    if let Ok(reply) = http.get(&sign_in).await {
-        responded = true;
+    if let Ok(mut reply) = http.probe(&sign_in).await {
+        *responded = true;
         if reply.status == 200 {
-            let text = reply.text().to_ascii_lowercase();
-            if text.contains("og:site_name") && text.contains("gitlab") {
-                return InstanceProbe::Found(Provider::GitLab, format!("{base}/api/v4"));
+            reply.body.make_ascii_lowercase();
+            let has_marker = |marker: &str| {
+                reply.body.utf8_chunks().any(|chunk| chunk.valid().contains(marker))
+            };
+            if has_marker("og:site_name") && has_marker("gitlab") {
+                return Some((Provider::GitLab, format!("{base}/api/v4")));
             }
         }
     }
 
-    if responded {
-        InstanceProbe::Responded
-    } else {
-        InstanceProbe::Silent
-    }
+    None
 }
 
 fn looks_like_github_meta(reply: &super::http::HttpReply) -> bool {

@@ -50,6 +50,8 @@
 
   let phase = $state<Phase>({ kind: "preparing" });
   let prepared = $state<ChangeRequestPrepare | null>(null);
+  let requestedRemote = $state<string | null>(null);
+  let gitlabInstanceDraft = $state("");
   /** 令牌状态只有三种：已配置 / 未配置 / 读不到（钥匙串不可用）。 */
   let token = $state<"configured" | "missing" | "unavailable">("missing");
   let tokenEditing = $state(false);
@@ -68,6 +70,11 @@
   let alive = true;
 
   const submitting = $derived(phase.kind === "submitting");
+  const canConfigureGitLab = $derived(phase.kind === "failed" && (
+    phase.code === "change_request_gitlab_instance" || phase.code === "change_request_gitlab_project" ||
+    ((!prepared || prepared.gitlabInstance) &&
+      (phase.code === "change_request_network" || phase.code === "change_request_platform_unknown"))
+  ));
   /**
    * 可以提交的阶段：首次填写（ready）与普通失败后由用户再点一次（failed）。
    * submitting 期间与 unknown（结果未知）都不提供再次创建。
@@ -108,13 +115,20 @@
   });
 
   /** 准备：remote 为空时由原生按上游/唯一远程推断，多远程返回候选。 */
-  async function start(remote: string | null) {
+  async function start(remote: string | null, instanceUrl?: string) {
+    if (tokenBusy) return;
+    requestedRemote = remote;
     const path = opened.summary.path;
     const ticket = ++serial;
     phase = { kind: "preparing" };
     tokenError = null;
+    tokenDraft = "";
+    tokenEditing = false;
     try {
-      const result = await api.prepareChangeRequest(path, remote, opened.generation, nextId());
+      const args = [path, remote, opened.generation, nextId()] as const;
+      const result = instanceUrl
+        ? await api.prepareChangeRequest(...args, instanceUrl)
+        : await api.prepareChangeRequest(...args);
       if (!current(path, ticket)) return;
       if (result.status === "remoteChoice") {
         prepared = null;
@@ -122,12 +136,14 @@
         return;
       }
       prepared = result;
+      token = "missing";
       // 目标分支以平台元数据为准，只在用户还没动过时预选：清空过的输入不被覆盖。
       if (!targetTouched) target = result.targetBranch;
       phase = { kind: "ready" };
       void readToken(result);
     } catch (error) {
       if (!current(path, ticket)) return;
+      prepared = null;
       const failure = normalizeError(error);
       if (failure.code === "change_request_unknown") {
         phase = { kind: "unknown", message: failure.message };
@@ -293,9 +309,33 @@
       <ul class="scope-list" aria-label="创建范围">
         <li>平台 · {info.providerLabel || info.provider}</li>
         <li>远程 · {info.remote}（{info.host}）</li>
+        {#if info.gitlabInstance}<li>实例 · {info.gitlabInstance.url}</li>{/if}
         <li>仓库 · {info.repository}</li>
         <li>来源分支 · {info.sourceBranch}（只读，来自当前分支）</li>
       </ul>
+    {/if}
+
+    {#if canConfigureGitLab}
+      <div class="change-request-form">
+        <label class="label" for="change-request-gitlab-instance">自建 GitLab 实例地址</label>
+        <input
+          id="change-request-gitlab-instance"
+          class="input"
+          type="url"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="https://git.example.com:8443/gitlab"
+          bind:value={gitlabInstanceDraft}
+        />
+        <p class="change-request-hint">填写浏览器访问 GitLab 的实例根地址，保留实际端口和部署子路径。</p>
+        <div><button
+          type="button"
+          class="btn btn-secondary btn-sm"
+          disabled={tokenBusy || gitlabInstanceDraft.trim() === ""}
+          title={tokenBusy ? "正在写入钥匙串" : !gitlabInstanceDraft.trim() ? "先填写 GitLab 实例地址" : undefined}
+          onclick={() => void start(prepared?.remote ?? requestedRemote, gitlabInstanceDraft.trim())}
+        >使用此 GitLab 实例</button></div>
+      </div>
     {/if}
 
     <!-- 结果提示与表单分开渲染：prepare 阶段失败时没有 prepared，正文也不能是空的。 -->
@@ -457,8 +497,9 @@
       <button
         type="button"
         class="btn btn-secondary"
-        title={prepared ? undefined : "重新读取远程与平台信息后再决定"}
-        onclick={() => void start(prepared?.remote ?? null)}
+        title={tokenBusy ? "正在写入钥匙串" : prepared ? undefined : "重新读取远程与平台信息后再决定"}
+        disabled={tokenBusy}
+        onclick={() => void start(prepared?.remote ?? requestedRemote, prepared?.gitlabInstance?.url)}
       >重新读取</button>
       {#if prepared}
         <!-- 没有可信上下文（prepare 失败）时不提供创建：先重新读取。 -->

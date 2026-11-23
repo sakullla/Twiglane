@@ -68,7 +68,7 @@ fn remote_location_rejects_untrusted_inputs() {
 async fn public_cloud_hosts_use_official_api_and_web_without_network() {
     // 只给 1ms 超时：公共 host 的解析不应发起任何请求，否则这里会失败。
     let http = http_with(256, 1);
-    let github = resolve_repository(&http, "https://github.com/acme/app.git")
+    let github = resolve_repository(&http, "https://github.com/acme/app.git", None)
         .await
         .unwrap();
     assert_eq!(github.provider, Provider::GitHub);
@@ -78,7 +78,7 @@ async fn public_cloud_hosts_use_official_api_and_web_without_network() {
     assert_eq!(github.web_url(), "https://github.com/acme/app");
     assert_eq!(github.token_key(), "github|https://api.github.com");
 
-    let gitlab = resolve_repository(&http, "git@gitlab.com:group/sub/app.git")
+    let gitlab = resolve_repository(&http, "git@gitlab.com:group/sub/app.git", None)
         .await
         .unwrap();
     assert_eq!(gitlab.provider, Provider::GitLab);
@@ -86,7 +86,7 @@ async fn public_cloud_hosts_use_official_api_and_web_without_network() {
     assert_eq!(gitlab.full_path(), "group/sub/app");
     assert_eq!(gitlab.token_key(), "gitlab|https://gitlab.com/api/v4");
 
-    let gitea = resolve_repository(&http, "https://gitea.com/acme/app")
+    let gitea = resolve_repository(&http, "https://gitea.com/acme/app", None)
         .await
         .unwrap();
     assert_eq!(gitea.provider, Provider::Gitea);
@@ -94,7 +94,7 @@ async fn public_cloud_hosts_use_official_api_and_web_without_network() {
     assert_eq!(gitea.token_key(), "gitea|https://gitea.com/api/v1");
 
     // 公共 host 但路径不是 owner/repo：不猜，直接拒绝。
-    let error = resolve_repository(&http, "https://github.com/acme")
+    let error = resolve_repository(&http, "https://github.com/acme", None)
         .await
         .unwrap_err();
     assert_eq!(error.code, "change_request_remote_url");
@@ -186,6 +186,7 @@ fn insecure_plain_http_instances_never_receive_tokens() {
         name: "app".to_string(),
         host: "git.example.test".to_string(),
         loopback: false,
+        gitlab_instance: None,
     };
     assert_eq!(
         ensure_secure_channel(&insecure).unwrap_err().code,
@@ -213,6 +214,23 @@ fn insecure_plain_http_instances_never_receive_tokens() {
     assert!(!host_is_loopback("git.example.test"));
     assert!(same_origin("https://a.test/x", "https://a.test"));
     assert!(!same_origin("https://a.test/x", "http://a.test"));
+}
+
+#[tokio::test]
+async fn manual_gitlab_strips_a_same_origin_web_clone_prefix_and_requires_safe_input() {
+    let http = http_with(256, 200);
+    let remote = "https://git.example.test:8443/tools/gitlab/team/sub/app.git";
+    let repo = resolve_repository(&http, remote, Some("https://git.example.test:8443/tools/gitlab/")).await.unwrap();
+    assert_eq!(repo.full_path(), "team/sub/app");
+    assert_eq!(repo.api_base, "https://git.example.test:8443/tools/gitlab/api/v4");
+    for invalid in [
+        "http://git.example.test/tools/gitlab",
+        "https://user:password@git.example.test/tools/gitlab",
+        "https://git.example.test/tools/gitlab?query=secret",
+        "https://git.example.test/tools/gitlab#fragment",
+    ] {
+        assert_eq!(resolve_repository(&http, remote, Some(invalid)).await.unwrap_err().code, "change_request_gitlab_instance");
+    }
 }
 
 struct FailingOpener;

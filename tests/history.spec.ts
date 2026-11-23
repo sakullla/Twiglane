@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { createRawSnippet, tick } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import DiffView from "../src/lib/components/DiffView.svelte";
+import { nextRelativeTimeChange, relativeTime } from "../src/lib/ui";
 import {
   commitFileLabel,
   commitLineTotalLabel,
@@ -343,6 +344,62 @@ describe("历史面板", () => {
       files: [],
     });
     commitFileDiff.mockResolvedValue(diff);
+  });
+
+  it("共享时钟只在可见时刷新列表与详情，恢复时无需重新读 Git", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(false);
+    try {
+      const row = commit(0);
+      vi.setSystemTime((row.authoredAt + 16 * 60) * 1000);
+      historyPage.mockResolvedValue({ generation: 3, commits: [row], hasMore: false, offset: 0, pageSize: 100, state: "ok" });
+      const { unmount } = render(HistoryPanel, panelProps());
+      const option = await screen.findByRole("option", { name: /commit-0/ });
+      await waitFor(() => expect(document.querySelector(".commit-head")?.textContent).toContain("16 分钟前"));
+      expect(option.textContent).toContain("16 分钟前");
+      const requests = [historyPage.mock.calls.length, commitDetail.mock.calls.length];
+
+      vi.advanceTimersByTime(60_000);
+      await tick();
+      expect(option.textContent).toContain("17 分钟前");
+      expect(document.querySelector(".commit-head")?.textContent).toContain("17 分钟前");
+
+      hidden.mockReturnValue(true);
+      document.dispatchEvent(new Event("visibilitychange"));
+      await tick();
+      expect(vi.getTimerCount()).toBe(0);
+      vi.advanceTimersByTime(13 * 60_000);
+      await tick();
+      expect(option.textContent).toContain("17 分钟前");
+      hidden.mockReturnValue(false);
+      document.dispatchEvent(new Event("visibilitychange"));
+      await tick();
+      expect(option.textContent).toContain("30 分钟前");
+      expect([historyPage.mock.calls.length, commitDetail.mock.calls.length]).toEqual(requests);
+      expect(vi.getTimerCount()).toBe(1);
+      vi.setSystemTime((row.authoredAt + 31 * 86400) * 1000);
+      document.dispatchEvent(new Event("visibilitychange"));
+      await tick();
+      expect(option.textContent).toContain(relativeTime(row.authoredAt));
+      expect(vi.getTimerCount()).toBe(0);
+      unmount();
+    } finally {
+      hidden.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("相对时间只在下一个文字边界需要刷新", () => {
+    const seconds = 1_700_000_000;
+    for (const age of [-60, 0, 44, 45, 89, 90, 3599, 3600, 86399, 86400, 29.9 * 86400]) {
+      const now = (seconds + age) * 1000;
+      const next = nextRelativeTimeChange(seconds, now);
+      expect(next).toBeGreaterThan(now);
+      expect(relativeTime(seconds, next - 1)).toBe(relativeTime(seconds, now));
+      expect(relativeTime(seconds, next)).not.toBe(relativeTime(seconds, now));
+    }
+    expect(nextRelativeTimeChange(seconds, (seconds + 30 * 86400) * 1000)).toBe(Infinity);
+    expect(nextRelativeTimeChange(0, Date.now())).toBe(Infinity);
   });
 
   it("历史右键撤销只针对 HEAD，先预览再确认且保留改动", async () => {
@@ -822,7 +879,7 @@ describe("历史面板", () => {
   });
 
   it("切换搜索条件时历史列表回到顶部（与刷新区分）", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       const commits = Array.from({ length: 100 }, (_, index) => commit(index));
       historyPage.mockResolvedValue({ generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits });
@@ -848,7 +905,7 @@ describe("历史面板", () => {
 
 
   it("搜索在停顿后把关键词交给全部历史，而不是立刻过滤", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       historyPage.mockResolvedValue({
         generation: 3,
@@ -979,7 +1036,7 @@ describe("历史面板", () => {
   });
 
   it("筛选取交集，清除路径时保留作者，当前分支没有提交时写明范围", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       historyPage.mockResolvedValue({
         generation: 3,
@@ -1101,7 +1158,7 @@ describe("历史面板", () => {
   });
 
   it("搜索词在提交说明与哈希里加亮，收起筛选后生效条件成标签可逐项清除，计数改为匹配", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       historyPage.mockResolvedValue({
         generation: 3,
@@ -1159,7 +1216,7 @@ describe("历史面板", () => {
   });
 
   it("作者按姓名或邮箱补全，键盘选择后立即应用，Esc 分层关闭", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       historyPage.mockResolvedValue({
         generation: 3,

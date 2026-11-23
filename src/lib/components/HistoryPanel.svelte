@@ -56,7 +56,7 @@
     GRAPH_MAX_LANES,
     type GraphSegment,
   } from "../history-graph";
-  import { BUSY_REASON, fileNavState, hueOf, initialOf, relativeTime, splitPath, statusMark, type FileNavState } from "../ui";
+  import { BUSY_REASON, fileNavState, hueOf, initialOf, nextRelativeTimeChange, relativeTime, splitPath, statusMark, type FileNavState } from "../ui";
   import BranchPicker from "./BranchPicker.svelte";
   import CommitDiffList from "./CommitDiffList.svelte";
   import CommitBranches from "./CommitBranches.svelte";
@@ -208,6 +208,20 @@
     taskDetail,
     onTaskFocus,
   }: Props = $props();
+
+  let historyNow = $state(Date.now());
+  let clockVisible = $state(false);
+  $effect(() => {
+    if (!active) return;
+    function syncVisibility() {
+      const visible = !document.hidden;
+      clockVisible = visible;
+      if (visible) historyNow = Date.now();
+    }
+    syncVisibility();
+    document.addEventListener("visibilitychange", syncVisibility);
+    return () => document.removeEventListener("visibilitychange", syncVisibility);
+  });
   /** 提交差异读取的上下文：完整文件时整份读出，否则用后端默认的 3 行。只在需要时追加参数。 */
   function contextArgs(full: boolean): [] | [number] {
     return full ? [FULL_FILE_CONTEXT] : [];
@@ -813,6 +827,27 @@
   );
   let selectedIds = $derived(new Set(selectedOids));
   let selectedCommits = $derived(commits.filter((commit) => selectedIds.has(commit.oid)));
+  $effect(() => {
+    if (!active || !clockVisible) return;
+    const shownAt = historyNow;
+    let next = Infinity;
+    for (const row of visible) next = Math.min(next, nextRelativeTimeChange(row.authoredAt, shownAt));
+    if (!taskShown && selectedOids.length > 1) {
+      for (const row of selectedCommits) next = Math.min(next, nextRelativeTimeChange(row.authoredAt, shownAt));
+    } else if (!taskShown && detail) {
+      next = Math.min(next, nextRelativeTimeChange(detail.commit.authoredAt, shownAt));
+    }
+    const now = Date.now();
+    if (next <= now || now < shownAt) {
+      historyNow = now;
+      return;
+    }
+    if (!Number.isFinite(next)) return;
+    // 合并相邻行的变化时间；远在未来的提交也不能溢出 DOM 的 32 位定时器。
+    const delay = Math.min(2_147_483_647, Math.ceil(next / 15_000) * 15_000 - now);
+    const timer = window.setTimeout(() => { historyNow = Date.now(); }, delay);
+    return () => window.clearTimeout(timer);
+  });
   let unionScroll = $state(0);
   let unionViewport = $state(0);
   let unionList = $state<HTMLDivElement | null>(null);
@@ -2185,7 +2220,7 @@
                     {#if pills.length > 2}<span class="ref-more" title={pills.slice(2).map((pill) => pill.label).join("\n")}>+{pills.length - 2}</span>{/if}
                     <span class="hr-author">{commit.authorName}</span>
                     <span class="hr-dot"></span>
-                    <span class="hr-time">{relativeTime(commit.authoredAt)}</span>
+                    <span class="hr-time">{relativeTime(commit.authoredAt, historyNow)}</span>
                     {#if commit.parents.length > 1}
                       <span class="hr-merge" title={parentCaption(commit.parents)}><Icon name="merge" size={11} />合并</span>
                     {/if}
@@ -2302,7 +2337,7 @@
               <button type="button" class="union-commit" title={`只看这个提交：${commit.summary}`} onclick={() => singleSelect(commit.oid)}>
                 <span class="avatar" style={`--hue:${hueOf(commit.authorName)}`} aria-hidden="true">{initialOf(commit.authorName)}</span>
                 <span class="union-commit-summary">{commit.summary}</span>
-                <span class="union-commit-meta">{commit.authorName} · {relativeTime(commit.authoredAt)}</span>
+                <span class="union-commit-meta">{commit.authorName} · {relativeTime(commit.authoredAt, historyNow)}</span>
                 <code>{shortOid(commit.oid)}</code>
               </button>
             </li>
@@ -2461,7 +2496,7 @@
               <span class="avatar" style={`--hue:${hueOf(detail.commit.authorName)}`} aria-hidden="true">{initialOf(detail.commit.authorName)}</span>
               <strong>{detail.commit.authorName}</strong>
               <span class="commit-email">{detail.commit.authorEmail}</span>
-              <span title={formatAuthoredAt(detail.commit.authoredAt)}>{relativeTime(detail.commit.authoredAt)} · {formatAuthoredAt(detail.commit.authoredAt)}</span>
+              <span title={formatAuthoredAt(detail.commit.authoredAt)}>{relativeTime(detail.commit.authoredAt, historyNow)} · {formatAuthoredAt(detail.commit.authoredAt)}</span>
               <span class="commit-parents">{parentCaption(detail.commit.parents, detail.root)}</span>
               {#if pills.length > 1}
                 <!-- 引用多时才给收起入口：收起后只留计数，窄窗口把这一行让给差异。 -->

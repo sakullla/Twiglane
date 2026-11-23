@@ -7,6 +7,7 @@
 //! （404 / 405 / 501）。孤立 404、列表可用、认证、权限、限流、网络失败、超时和
 //! 未知响应都不回退。
 
+use reqwest::Url;
 use serde_json::{json, Value};
 
 use crate::error::AppError;
@@ -171,7 +172,7 @@ async fn fetch_repository_meta_inner(
     let Some(json) = reply.json() else {
         return Err(unknown_error("平台返回的仓库信息无法解析，未创建 MR/PR。"));
     };
-    let Some(meta) = repo.provider.parse_repo_meta(&json) else {
+    let Some(mut meta) = repo.provider.parse_repo_meta(&json) else {
         return Err(unknown_error(
             "平台返回的仓库信息缺少仓库网页地址，未创建 MR/PR。",
         ));
@@ -180,6 +181,18 @@ async fn fetch_repository_meta_inner(
         return Err(unknown_error(
             "平台返回的仓库地址与已确认实例不一致，未创建 MR/PR。",
         ));
+    }
+    if repo.gitlab_instance.is_some() {
+        let expected = repo.web_url();
+        let matches = Url::parse(&meta.web_url).ok().zip(Url::parse(&expected).ok())
+            .is_some_and(|(actual, expected)| actual.path().trim_end_matches('/') == expected.path());
+        if !matches {
+            return Err(AppError::new(
+                "change_request_gitlab_project",
+                "GitLab 返回的项目地址与当前 Git 远程不一致。请检查实例地址与仓库路径。",
+            ));
+        }
+        meta.web_url = expected;
     }
     Ok(meta)
 }

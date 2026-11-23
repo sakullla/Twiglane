@@ -1748,8 +1748,8 @@ const apiBase = {
    * 「创建 MR / PR」的只读准备：远程解析、平台发现与来源分支都由原生从当前仓库重新推导，
    * 前端不传 owner/repo/API base。remote 为空时按上游或唯一远程推断，多远程返回候选。
    */
-  prepareChangeRequest: (path: string, remote: string | null, generation: number, requestId: number) =>
-    invoke<ChangeRequestPrepare>("change_request_prepare", { path, remote, generation, requestId }),
+  prepareChangeRequest: (path: string, remote: string | null, generation: number, requestId: number, gitlabInstanceUrl?: string) =>
+    invoke<ChangeRequestPrepare>("change_request_prepare", { path, remote, generation, requestId, gitlabInstanceUrl }),
   /** 显式创建：成功只接受平台返回且原生已验证的链接；普通/未知错误由调用方分类展示。 */
   createChangeRequest: (
     path: string,
@@ -1759,7 +1759,7 @@ const apiBase = {
     body: string,
     generation: number,
     requestId: number,
-    _prepared?: ChangeRequestPrepare,
+    prepared?: ChangeRequestPrepare,
   ) =>
     invoke<ChangeRequestOutcome>("change_request_create", {
       path,
@@ -1769,10 +1769,11 @@ const apiBase = {
       body,
       generation,
       requestId,
+      expected: prepared && preparedChangeSource(prepared),
     }),
   /** 当前实例的令牌状态：只有布尔值，不回传令牌。 */
-  changeRequestTokenStatus: (path: string, remote: string, generation: number, requestId: number, _prepared?: ChangeRequestPrepare) =>
-    invoke<ChangeRequestTokenStatus>("change_request_token_status", { path, remote, generation, requestId }),
+  changeRequestTokenStatus: (path: string, remote: string, generation: number, requestId: number, prepared?: ChangeRequestPrepare) =>
+    invoke<ChangeRequestTokenStatus>("change_request_token_status", { path, remote, generation, requestId, expected: prepared && preparedChangeSource(prepared) }),
   /** 保存或替换当前实例的令牌：只经 IPC 参数进入原生，随后直接写入系统钥匙串。 */
   setChangeRequestToken: (
     path: string,
@@ -1780,7 +1781,7 @@ const apiBase = {
     token: string,
     generation: number,
     requestId: number,
-    _prepared?: ChangeRequestPrepare,
+    prepared?: ChangeRequestPrepare,
   ) =>
     invoke<ChangeRequestTokenStatus>("change_request_set_token", {
       path,
@@ -1788,10 +1789,11 @@ const apiBase = {
       token,
       generation,
       requestId,
+      expected: prepared && preparedChangeSource(prepared),
     }),
   /** 只删除用户显式点选的当前实例令牌；关闭功能开关不会调用它。 */
-  deleteChangeRequestToken: (path: string, remote: string, generation: number, requestId: number, _prepared?: ChangeRequestPrepare) =>
-    invoke<ChangeRequestTokenStatus>("change_request_delete_token", { path, remote, generation, requestId }),
+  deleteChangeRequestToken: (path: string, remote: string, generation: number, requestId: number, prepared?: ChangeRequestPrepare) =>
+    invoke<ChangeRequestTokenStatus>("change_request_delete_token", { path, remote, generation, requestId, expected: prepared && preparedChangeSource(prepared) }),
   setPanelWidths: (widths: PanelWidths) => invoke<PanelWidths>("set_panel_widths", { widths }),
   saveDraft: (path: string, message: string) => invoke<void>("save_draft", { path, message }),
   cancelReads: () => invoke<void>("cancel_reads"),
@@ -2402,8 +2404,8 @@ function preparedChangeSource(prepared?: ChangeRequestPrepare) {
   if (!prepared || prepared.status !== "ready") {
     throw remoteError("change_request_stale", "请重新打开创建 MR/PR 的页面并核对远程仓库。");
   }
-  const { provider, host, repository, repositoryWeb, sourceBranch } = prepared;
-  return { provider, host, repository, repositoryWeb, sourceBranch };
+  const { provider, host, repository, repositoryWeb, sourceBranch, gitlabInstance } = prepared;
+  return { provider, host, repository, repositoryWeb, sourceBranch, ...(gitlabInstance && { gitlabInstance }) };
 }
 
 async function remoteChangeRequest<T>(session: RemoteRepositorySession, fields: BridgePayload): Promise<T> {
@@ -2427,10 +2429,10 @@ const remoteOverrides: Record<string, unknown> = {
     return { snapshot: remoteStatus(result.snapshot, session.generation), note: result.ignore.note };
   },
 
-  async prepareChangeRequest(path: string, remote: string | null, generation: number, requestId: number) {
-    if (!isRemoteRepositoryKey(path)) return apiBase.prepareChangeRequest(path, remote, generation, requestId);
+  async prepareChangeRequest(path: string, remote: string | null, generation: number, requestId: number, gitlabInstanceUrl?: string) {
+    if (!isRemoteRepositoryKey(path)) return apiBase.prepareChangeRequest(path, remote, generation, requestId, gitlabInstanceUrl);
     const session = remoteBridgeSession(path, generation);
-    const prepared = await remoteChangeRequest<ChangeRequestPrepare>(session, { action: "prepare", remote });
+    const prepared = await remoteChangeRequest<ChangeRequestPrepare>(session, { action: "prepare", remote, ...(gitlabInstanceUrl && { gitlabInstanceUrl }) });
     checkRemoteResponse(session, generation);
     return { ...prepared, generation };
   },
@@ -2438,7 +2440,7 @@ const remoteOverrides: Record<string, unknown> = {
   async createChangeRequest(path: string, remote: string, targetBranch: string, title: string, body: string,
     generation: number, requestId: number, prepared?: ChangeRequestPrepare) {
     if (!isRemoteRepositoryKey(path)) {
-      return apiBase.createChangeRequest(path, remote, targetBranch, title, body, generation, requestId);
+      return apiBase.createChangeRequest(path, remote, targetBranch, title, body, generation, requestId, prepared);
     }
     return remoteChangeRequest<ChangeRequestOutcome>(remoteBridgeSession(path, generation), {
       action: "create", remote, targetBranch, title, body, expected: preparedChangeSource(prepared),
@@ -2446,21 +2448,21 @@ const remoteOverrides: Record<string, unknown> = {
   },
 
   async changeRequestTokenStatus(path: string, remote: string, generation: number, requestId: number, prepared?: ChangeRequestPrepare) {
-    if (!isRemoteRepositoryKey(path)) return apiBase.changeRequestTokenStatus(path, remote, generation, requestId);
+    if (!isRemoteRepositoryKey(path)) return apiBase.changeRequestTokenStatus(path, remote, generation, requestId, prepared);
     return remoteChangeRequest<ChangeRequestTokenStatus>(remoteBridgeSession(path, generation), {
       action: "token", remote, expected: preparedChangeSource(prepared), credential: { operation: "status" },
     });
   },
 
   async setChangeRequestToken(path: string, remote: string, token: string, generation: number, requestId: number, prepared?: ChangeRequestPrepare) {
-    if (!isRemoteRepositoryKey(path)) return apiBase.setChangeRequestToken(path, remote, token, generation, requestId);
+    if (!isRemoteRepositoryKey(path)) return apiBase.setChangeRequestToken(path, remote, token, generation, requestId, prepared);
     return remoteChangeRequest<ChangeRequestTokenStatus>(remoteBridgeSession(path, generation), {
       action: "token", remote, expected: preparedChangeSource(prepared), credential: { operation: "set", token },
     });
   },
 
   async deleteChangeRequestToken(path: string, remote: string, generation: number, requestId: number, prepared?: ChangeRequestPrepare) {
-    if (!isRemoteRepositoryKey(path)) return apiBase.deleteChangeRequestToken(path, remote, generation, requestId);
+    if (!isRemoteRepositoryKey(path)) return apiBase.deleteChangeRequestToken(path, remote, generation, requestId, prepared);
     return remoteChangeRequest<ChangeRequestTokenStatus>(remoteBridgeSession(path, generation), {
       action: "token", remote, expected: preparedChangeSource(prepared), credential: { operation: "delete" },
     });

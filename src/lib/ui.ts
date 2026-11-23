@@ -129,14 +129,30 @@ export function sizeDelta(oldSize: number, newSize: number): string {
   return newSize > oldSize ? `增大 ${formatBytes(newSize - oldSize)}` : `减小 ${formatBytes(oldSize - newSize)}`;
 }
 
+const relativeUnits = [
+  { until: 3600, size: 60, label: "分钟" },
+  { until: 86400, size: 3600, label: "小时" },
+  { until: 30 * 86400, size: 86400, label: "天" },
+];
+
+/** 下次显示文字变化的毫秒时间戳。固定日期和未知时间不需要刷新。 */
+export function nextRelativeTimeChange(seconds: number, nowMs: number): number {
+  if (!Number.isFinite(seconds) || seconds <= 0) return Infinity;
+  const diff = Math.round(nowMs / 1000 - seconds);
+  const unit = relativeUnits.find((unit) => diff < unit.until);
+  if (!unit) return Infinity;
+  const next = diff < 45 ? 45 : Math.min(unit.until, (Math.round(diff / unit.size) + 0.5) * unit.size);
+  // relativeTime 先把时差四舍五入到整秒。
+  return (seconds + next - 0.5) * 1000;
+}
+
 /** 相对时间（秒级时间戳）。超过 30 天显示日期。 */
 export function relativeTime(seconds: number, nowMs = Date.now()): string {
   if (!Number.isFinite(seconds) || seconds <= 0) return "未知时间";
   const diff = Math.round(nowMs / 1000 - seconds);
   if (diff < 45) return "刚刚";
-  if (diff < 3600) return `${Math.max(1, Math.round(diff / 60))} 分钟前`;
-  if (diff < 86400) return `${Math.round(diff / 3600)} 小时前`;
-  if (diff < 86400 * 30) return `${Math.round(diff / 86400)} 天前`;
+  const unit = relativeUnits.find((unit) => diff < unit.until);
+  if (unit) return `${Math.round(diff / unit.size)} ${unit.label}前`;
   const date = new Date(seconds * 1000);
   const pad = (value: number) => String(value).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;

@@ -34,6 +34,7 @@ impl Default for HttpSettings {
 pub struct Http {
     client: reqwest::Client,
     body_limit: usize,
+    pub(crate) discovery_timeout: Duration,
 }
 
 /// 一次 HTTP 往返的结果。状态码之外的原文只作为分类输入，不直接进界面。
@@ -46,10 +47,6 @@ pub(crate) struct HttpReply {
 impl HttpReply {
     pub(crate) fn json(&self) -> Option<Value> {
         serde_json::from_slice(&self.body).ok()
-    }
-
-    pub(crate) fn text(&self) -> String {
-        String::from_utf8_lossy(&self.body).into_owned()
     }
 
     pub(crate) fn header(&self, name: &str) -> Option<&str> {
@@ -76,6 +73,7 @@ impl Http {
         Ok(Self {
             client,
             body_limit: settings.body_limit,
+            discovery_timeout: settings.timeout,
         })
     }
 
@@ -89,8 +87,8 @@ impl Http {
     }
 
     /// 不带认证的读取：只用于平台发现。认证头不会出现在这里。
-    pub(crate) async fn get(&self, url: &str) -> Result<HttpReply, AppError> {
-        self.send("GET", url, Vec::new(), None).await
+    pub(crate) async fn probe(&self, url: &str) -> Result<HttpReply, AppError> {
+        self.request("GET", url, Vec::new(), None, true).await
     }
 
     /// 发送一次请求。json 有值时按 JSON 序列化并附带 content-type。
@@ -100,6 +98,17 @@ impl Http {
         url: &str,
         headers: Vec<(&str, String)>,
         json: Option<&Value>,
+    ) -> Result<HttpReply, AppError> {
+        self.request(method, url, headers, json, false).await
+    }
+
+    async fn request(
+        &self,
+        method: &str,
+        url: &str,
+        headers: Vec<(&str, String)>,
+        json: Option<&Value>,
+        probe: bool,
     ) -> Result<HttpReply, AppError> {
         let parsed = reqwest::Url::parse(url)
             .map_err(|_| AppError::new("change_request_unknown", "平台请求地址无效。"))?;
@@ -127,16 +136,17 @@ impl Http {
             .await
             .map_err(|error| transport_error(&error, &method))?;
         let status = response.status().as_u16();
-        let headers = response
-            .headers()
-            .iter()
-            .filter_map(|(name, value)| {
-                value
-                    .to_str()
-                    .ok()
-                    .map(|text| (name.as_str().to_string(), text.to_string()))
-            })
-            .collect::<Vec<_>>();
+        let mut headers = Vec::new();
+        if probe && status != 200 {
+            return Ok(HttpReply { status, headers, body: Vec::new() });
+        }
+        if !probe {
+            for name in ["retry-after", "x-ratelimit-remaining"] {
+                if let Some(value) = response.headers().get(name).and_then(|value| value.to_str().ok()) {
+                    headers.push((name.to_owned(), value.to_owned()));
+                }
+            }
+        }
         if response
             .content_length()
             .is_some_and(|size| size > self.body_limit as u64)

@@ -29,12 +29,12 @@ async fn disabled_switch_blocks_every_command_before_credentials_or_network() {
     let store = FakeStore::with_token("gitea|http://127.0.0.1:1/api/v1", "secret-token");
     let http = http_with(256, 200);
 
-    let error = prepare_with(&backend, &repo_key(&dir), None, 0, 1, &http)
+    let error = prepare_with(&backend, &repo_key(&dir), None, 0, 1, &http, None)
         .await
         .unwrap_err();
     assert_eq!(error.code, "change_requests_disabled");
 
-    let error = create_with(&backend, token_input(&dir), 0, 2, &http, store.as_ref())
+    let error = create_with(&backend, token_input(&dir), 0, 2, &http, store.as_ref(), None)
         .await
         .unwrap_err();
     assert_eq!(error.code, "change_requests_disabled");
@@ -49,6 +49,7 @@ async fn disabled_switch_blocks_every_command_before_credentials_or_network() {
         3,
         &http,
         store.as_ref(),
+        None,
     )
     .await
     .unwrap_err();
@@ -63,6 +64,7 @@ async fn disabled_switch_blocks_every_command_before_credentials_or_network() {
         4,
         &http,
         store.as_ref(),
+        None,
     )
     .await
     .unwrap_err();
@@ -77,6 +79,7 @@ async fn disabled_switch_blocks_every_command_before_credentials_or_network() {
         5,
         &http,
         store.as_ref(),
+        None,
     )
     .await
     .unwrap_err();
@@ -102,7 +105,7 @@ async fn ambiguous_remotes_return_choices_before_any_platform_request() {
         },
     );
     let http = http_with(256, 200);
-    let prepared = prepare_with(&backend, &repo_key(&dir), None, 0, 1, &http)
+    let prepared = prepare_with(&backend, &repo_key(&dir), None, 0, 1, &http, None)
         .await
         .unwrap();
     assert_eq!(prepared.status, "remoteChoice");
@@ -149,7 +152,7 @@ async fn upstream_selects_remote_and_source_branch() {
         },
     );
     let http = http_with(256, 2000);
-    let prepared = prepare_with(&backend, &repo_key(&dir), None, 0, 1, &http)
+    let prepared = prepare_with(&backend, &repo_key(&dir), None, 0, 1, &http, None)
         .await
         .unwrap();
     assert_eq!(prepared.status, "ready");
@@ -189,7 +192,7 @@ async fn source_not_on_remote_is_refused_without_platform_request() {
         },
     );
     let http = http_with(256, 200);
-    let error = prepare_with(&backend, &repo_key(&dir), None, 0, 1, &http)
+    let error = prepare_with(&backend, &repo_key(&dir), None, 0, 1, &http, None)
         .await
         .unwrap_err();
     assert_eq!(error.code, "change_request_source_missing");
@@ -197,7 +200,7 @@ async fn source_not_on_remote_is_refused_without_platform_request() {
     assert!(error.message.contains("推送"), "{}", error.message);
 
     // 显式选择一个不存在的远程：直接拒绝。
-    let error = prepare_with(&backend, &repo_key(&dir), Some("ghost"), 0, 2, &http)
+    let error = prepare_with(&backend, &repo_key(&dir), Some("ghost"), 0, 2, &http, None)
         .await
         .unwrap_err();
     assert_eq!(error.code, "change_request_remote_missing");
@@ -220,7 +223,7 @@ async fn ssh_remote_without_instance_confirmation_fails_closed() {
         },
     );
     let http = http_with(256, 300);
-    let error = prepare_with(&backend, &repo_key(&dir), None, 0, 1, &http)
+    let error = prepare_with(&backend, &repo_key(&dir), None, 0, 1, &http, None)
         .await
         .unwrap_err();
     assert!(
@@ -250,7 +253,7 @@ async fn detached_and_unborn_branches_are_refused() {
     );
     let http = http_with(256, 200);
     git(&dir, &["checkout", "--detach"]);
-    let error = prepare_with(&backend, &repo_key(&dir), None, 0, 1, &http)
+    let error = prepare_with(&backend, &repo_key(&dir), None, 0, 1, &http, None)
         .await
         .unwrap_err();
     assert_eq!(error.code, "change_request_branch");
@@ -262,7 +265,7 @@ async fn detached_and_unborn_branches_are_refused() {
         &empty,
         &["remote", "add", "origin", "http://127.0.0.1:1/acme/app.git"],
     );
-    let error = prepare_with(&backend, &repo_key(&empty), None, 0, 2, &http)
+    let error = prepare_with(&backend, &repo_key(&empty), None, 0, 2, &http, None)
         .await
         .unwrap_err();
     assert_eq!(error.code, "change_request_branch");
@@ -308,6 +311,7 @@ async fn token_status_is_isolated_per_instance_and_never_returns_secret() {
         1,
         &http,
         store.as_ref(),
+        None,
     )
     .await
     .unwrap();
@@ -325,6 +329,7 @@ async fn token_status_is_isolated_per_instance_and_never_returns_secret() {
         2,
         &http,
         store.as_ref(),
+        None,
     )
     .await
     .unwrap();
@@ -369,6 +374,7 @@ async fn token_save_and_delete_use_the_instance_key() {
         1,
         &http,
         &store,
+        None,
     )
     .await
     .unwrap();
@@ -376,13 +382,13 @@ async fn token_save_and_delete_use_the_instance_key() {
     assert_eq!(store.stored(&key).as_deref(), Some(SECRET));
 
     // 令牌不会出现在状态返回值里。
-    let status = token_status_with(&backend, &path, "origin", 0, 2, &http, &store)
+    let status = token_status_with(&backend, &path, "origin", 0, 2, &http, &store, None)
         .await
         .unwrap();
     assert!(status.configured);
     assert!(!serde_json::to_string(&status).unwrap().contains(SECRET));
 
-    let deleted = delete_token_with(&backend, &path, "origin", 0, 3, &http, &store)
+    let deleted = delete_token_with(&backend, &path, "origin", 0, 3, &http, &store, None)
         .await
         .unwrap();
     assert!(!deleted.configured);
@@ -398,6 +404,7 @@ async fn token_save_and_delete_use_the_instance_key() {
         4,
         &http,
         &store,
+        None,
     )
     .await
     .unwrap_err();
@@ -405,4 +412,21 @@ async fn token_save_and_delete_use_the_instance_key() {
     assert_eq!(store.saves(), 1);
 
     server.join().unwrap();
+}
+
+#[tokio::test]
+async fn discovery_discards_error_pages_and_shares_one_deadline() {
+    let http = http_with(64, 1000);
+    let (base, server) = serve(vec![
+        reply(404, &"x".repeat(4096)),
+        reply(200, "{}").slow(1300),
+    ]);
+    // 已收到 404，因此实例可达。后续探针耗尽总预算后不能再启动任何请求。
+    let error = remote::resolve_repository(&http, &format!("{base}/sub/group/repo"), None)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "change_request_platform_unknown");
+    let (requests, extra) = server.join().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(extra, 0);
 }

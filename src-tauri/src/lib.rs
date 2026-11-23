@@ -2358,8 +2358,11 @@ async fn change_request_prepare(
     remote: Option<String>,
     generation: u64,
     request_id: u64,
+    gitlab_instance_url: Option<String>,
 ) -> Result<change_request::ChangeRequestPrepare, AppError> {
-    change_request::prepare(state.inner(), &path, remote.as_deref(), generation, request_id).await
+    change_request::prepare(
+        state.inner(), &path, remote.as_deref(), generation, request_id, gitlab_instance_url.as_deref(),
+    ).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2374,6 +2377,7 @@ async fn change_request_create<R: Runtime>(
     body: String,
     generation: u64,
     request_id: u64,
+    expected: Option<change_request::ExpectedSource>,
 ) -> Result<change_request::ChangeRequestOutcome, AppError> {
     let input = change_request::CreateInput {
         path,
@@ -2388,6 +2392,7 @@ async fn change_request_create<R: Runtime>(
         generation,
         request_id,
         &OpenerHandle(app),
+        expected.as_ref(),
     )
     .await
 }
@@ -2399,8 +2404,9 @@ async fn change_request_token_status(
     remote: String,
     generation: u64,
     request_id: u64,
+    expected: Option<change_request::ExpectedSource>,
 ) -> Result<change_request::ChangeRequestTokenStatus, AppError> {
-    change_request::token_status(state.inner(), &path, &remote, generation, request_id).await
+    change_request::token_status(state.inner(), &path, &remote, generation, request_id, expected.as_ref()).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2411,6 +2417,7 @@ async fn change_request_set_token(
     token: String,
     generation: u64,
     request_id: u64,
+    expected: Option<change_request::ExpectedSource>,
 ) -> Result<change_request::ChangeRequestTokenStatus, AppError> {
     change_request::set_token(
         state.inner(),
@@ -2419,6 +2426,7 @@ async fn change_request_set_token(
         &token,
         generation,
         request_id,
+        expected.as_ref(),
     )
     .await
 }
@@ -2430,8 +2438,9 @@ async fn change_request_delete_token(
     remote: String,
     generation: u64,
     request_id: u64,
+    expected: Option<change_request::ExpectedSource>,
 ) -> Result<change_request::ChangeRequestTokenStatus, AppError> {
-    change_request::delete_token(state.inner(), &path, &remote, generation, request_id).await
+    change_request::delete_token(state.inner(), &path, &remote, generation, request_id, expected.as_ref()).await
 }
 
 #[tauri::command]

@@ -30,7 +30,6 @@ fn harness(
     let (listener, base) = bind_server();
     let mut replies = discovery;
     replies.extend(tail(&base));
-    let server = serve_on(listener, replies);
     let fixture = crate::test_support::git_fixture(label);
     let backend = fixture.backend();
     enable(&backend);
@@ -48,6 +47,7 @@ fn harness(
         Some(secret) => FakeStore::with_token(&key, secret),
         None => Arc::new(FakeStore::default()),
     };
+    let server = serve_on(listener, replies);
     Harness {
         fixture,
         backend,
@@ -77,7 +77,7 @@ impl Harness {
             title: title.to_string(),
             body: body.to_string(),
         };
-        create_with(&self.backend, input, 0, 1, &self.http, self.store.as_ref()).await
+        create_with(&self.backend, input, 0, 1, &self.http, self.store.as_ref(), None).await
     }
 
     fn finish(self) -> (Vec<Recorded>, usize) {
@@ -122,6 +122,7 @@ async fn changes_to_prepared_source_are_rejected_before_token_access() {
             repository_web: if changed_branch { format!("{}/acme/app", probe.base) }
                 else { "http://127.0.0.1:1/acme/app".into() },
             source_branch: if changed_branch { "old-feature" } else { "feature" }.into(),
+            gitlab_instance: None,
         };
         let error = create_for(&git, &input, &probe.http, probe.store.as_ref(), Some(&expected))
             .await.expect_err("stale source");
@@ -180,6 +181,72 @@ async fn github_enterprise_create_sends_bearer_and_accepts_201_link() {
     assert!(requests
         .iter()
         .all(|request| !request.path.contains(TOKEN)));
+}
+
+#[tokio::test]
+async fn manual_gitlab_uses_web_port_and_prefix_for_an_ssh_remote() {
+    let (listener, origin) = bind_server();
+    let instance = format!("{origin}/tools/forge/gitlab");
+    let web_url = format!("{instance}/team/sub/app");
+    let mr_url = format!("{web_url}/-/merge_requests/7");
+    let fixture = crate::test_support::git_fixture("cr-gitlab-manual");
+    let backend = fixture.backend();
+    enable(&backend);
+    let clone_url = "ssh://git@ssh-alias.example.invalid:2222/team/sub/app.git";
+    let dir = seed_repo(&fixture, RepoOptions {
+        branch: "feature",
+        remotes: vec![("origin", clone_url.into())],
+        tracked: true,
+        upstream: None,
+    });
+    let path = repo_key(&dir);
+    let http = http_with(512 * 1024, 1500);
+    let prepared = prepare_with(&backend, &path, None, 0, 1, &http, Some(&instance)).await.unwrap();
+    assert_eq!(prepared.repository, "team/sub/app");
+    assert_eq!(prepared.repository_web, web_url);
+    let expected = ExpectedSource {
+        provider: prepared.provider,
+        host: prepared.host,
+        repository: prepared.repository,
+        repository_web: prepared.repository_web,
+        source_branch: prepared.source_branch,
+        gitlab_instance: prepared.gitlab_instance,
+    };
+    let store = FakeStore::default();
+    set_token_with(&backend, &path, "origin", TOKEN, 0, 2, &http, &store, Some(&expected)).await.unwrap();
+    assert_eq!(store.stored(&format!("gitlab|{instance}/api/v4")).as_deref(), Some(TOKEN));
+
+    git(&dir, &["remote", "set-url", "origin", "ssh://git@different-alias.example.invalid:2222/team/sub/app.git"]);
+    let error = token_status_with(&backend, &path, "origin", 0, 3, &http, &store, Some(&expected)).await.unwrap_err();
+    assert_eq!(error.code, "change_request_stale");
+    assert_eq!(store.loads(), 0);
+    git(&dir, &["remote", "set-url", "origin", clone_url]);
+
+    let server = serve_on(listener, vec![
+        reply(200, &serde_json::json!({ "web_url": format!("{instance}/other/app") }).to_string()),
+        reply(200, &serde_json::json!({ "web_url": web_url }).to_string()),
+        reply(201, &serde_json::json!({ "web_url": mr_url }).to_string()),
+    ]);
+
+    let input = || CreateInput {
+        path: path.clone(),
+        remote: Some("origin".into()),
+        target_branch: "main".into(),
+        title: "Change from SSH worktree".into(),
+        body: String::new(),
+    };
+    let error = create_with(&backend, input(), 0, 4, &http, &store, Some(&expected)).await.unwrap_err();
+    assert_eq!(error.code, "change_request_gitlab_project");
+    let outcome = created(create_with(&backend, input(), 0, 5, &http, &store, Some(&expected)).await.unwrap());
+    assert_eq!(outcome.url, mr_url);
+
+    let (requests, extra) = server.join().unwrap();
+    assert_eq!(extra, 0);
+    assert_eq!(requests.iter().map(|request| request.method.as_str()).collect::<Vec<_>>(), ["GET", "GET", "POST"]);
+    assert_eq!(requests[0].path, "/tools/forge/gitlab/api/v4/projects/team%2Fsub%2Fapp");
+    assert_eq!(requests[2].path, "/tools/forge/gitlab/api/v4/projects/team%2Fsub%2Fapp/merge_requests");
+    assert!(requests.iter().all(|request| request.header("PRIVATE-TOKEN") == Some(TOKEN)));
+    assert_eq!(requests[2].json()["source_branch"], "feature");
 }
 
 #[tokio::test]

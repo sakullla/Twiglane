@@ -74,6 +74,7 @@ pub(crate) struct ExpectedSource {
     pub repository: String,
     pub repository_web: String,
     pub source_branch: String,
+    pub gitlab_instance: Option<remote::GitLabInstance>,
 }
 
 impl ExpectedSource {
@@ -82,6 +83,7 @@ impl ExpectedSource {
             || self.host != repository.host
             || self.repository != repository.full_path()
             || self.repository_web != repository.web_url()
+            || self.gitlab_instance != repository.gitlab_instance
             || source.is_some_and(|source| source != self.source_branch)
         {
             return Err(AppError::new(
@@ -120,6 +122,8 @@ pub struct ChangeRequestPrepare {
     pub target_branch: String,
     pub default_branch: Option<String>,
     pub generation: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gitlab_instance: Option<remote::GitLabInstance>,
 }
 
 /// 令牌状态只有布尔值，永不返回令牌本身。
@@ -187,9 +191,10 @@ pub async fn prepare(
     remote: Option<&str>,
     generation: u64,
     request_id: u64,
+    gitlab_instance_url: Option<&str>,
 ) -> Result<ChangeRequestPrepare, AppError> {
     let http = Http::default_app()?;
-    prepare_with(backend, path, remote, generation, request_id, &http).await
+    prepare_with(backend, path, remote, generation, request_id, &http, gitlab_instance_url).await
 }
 
 pub(crate) async fn prepare_with(
@@ -199,16 +204,18 @@ pub(crate) async fn prepare_with(
     generation: u64,
     request_id: u64,
     http: &Http,
+    gitlab_instance_url: Option<&str>,
 ) -> Result<ChangeRequestPrepare, AppError> {
     ops::require_change_requests(backend)?;
     let git = LocalReader { backend, path, generation, request_id };
-    prepare_for(&git, requested, http).await
+    prepare_for(&git, requested, http, gitlab_instance_url).await
 }
 
 pub(crate) async fn prepare_for(
     git: &impl RepositoryReader,
     requested: Option<&str>,
     http: &Http,
+    gitlab_instance_url: Option<&str>,
 ) -> Result<ChangeRequestPrepare, AppError> {
     let state = git.state().await?;
     current_branch(&state)?;
@@ -220,7 +227,7 @@ pub(crate) async fn prepare_for(
             generation,
         } => {
             let url = remote_url(&state.remotes, &remote)?;
-            let repo = remote::resolve_repository(http, url).await?;
+            let repo = remote::resolve_repository(http, url, gitlab_instance_url).await?;
             Ok(ChangeRequestPrepare {
                 status: "ready".to_string(),
                 choices: Vec::new(),
@@ -235,6 +242,7 @@ pub(crate) async fn prepare_for(
                 target_branch: state.default_branch.clone().unwrap_or_default(),
                 default_branch: state.default_branch.clone(),
                 generation,
+                gitlab_instance: repo.gitlab_instance,
             })
         }
     }
@@ -258,6 +266,7 @@ fn empty_prepare(
         target_branch: String::new(),
         default_branch: None,
         generation,
+        gitlab_instance: None,
     }
 }
 
@@ -269,10 +278,11 @@ pub async fn create(
     generation: u64,
     request_id: u64,
     opener: &dyn WebOpener,
+    expected: Option<&ExpectedSource>,
 ) -> Result<ChangeRequestOutcome, AppError> {
     let http = Http::default_app()?;
     let store = KeyringStore::new();
-    match create_with(backend, input, generation, request_id, &http, &store).await? {
+    match create_with(backend, input, generation, request_id, &http, &store, expected).await? {
         CreateDecision::Created(outcome) => Ok(outcome),
         CreateDecision::Fallback(pending) => complete_fallback(opener, pending),
     }
@@ -285,11 +295,12 @@ pub(crate) async fn create_with(
     request_id: u64,
     http: &Http,
     store: &dyn CredentialStore,
+    expected: Option<&ExpectedSource>,
 ) -> Result<CreateDecision, AppError> {
     // 门禁在读令牌、探测平台之前：关闭时不读钥匙串、不发平台请求。
     ops::require_change_requests(backend)?;
     let git = LocalReader { backend, path: &input.path, generation, request_id };
-    create_for(&git, &input, http, store, None).await
+    create_for(&git, &input, http, store, expected).await
 }
 
 pub(crate) async fn create_for(
@@ -326,7 +337,7 @@ pub(crate) async fn create_for(
     };
 
     let url = remote_url(&state.remotes, &remote)?;
-    let repo = remote::resolve_repository(http, url).await?;
+    let repo = resolve_expected_repository(http, url, expected).await?;
     if let Some(expected) = expected {
         expected.check(&repo, Some(&source))?;
     }
@@ -411,6 +422,7 @@ pub async fn token_status(
     remote: &str,
     generation: u64,
     request_id: u64,
+    expected: Option<&ExpectedSource>,
 ) -> Result<ChangeRequestTokenStatus, AppError> {
     let http = Http::default_app()?;
     token_status_with(
@@ -421,10 +433,12 @@ pub async fn token_status(
         request_id,
         &http,
         &KeyringStore::new(),
+        expected,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn token_status_with(
     backend: &Backend,
     path: &str,
@@ -433,10 +447,11 @@ pub(crate) async fn token_status_with(
     request_id: u64,
     http: &Http,
     store: &dyn CredentialStore,
+    expected: Option<&ExpectedSource>,
 ) -> Result<ChangeRequestTokenStatus, AppError> {
     ops::require_change_requests(backend)?;
     let git = LocalReader { backend, path, generation, request_id };
-    token_for(&git, remote, TokenAction::Status, http, store, None).await
+    token_for(&git, remote, TokenAction::Status, http, store, expected).await
 }
 
 pub async fn set_token(
@@ -446,6 +461,7 @@ pub async fn set_token(
     token: &str,
     generation: u64,
     request_id: u64,
+    expected: Option<&ExpectedSource>,
 ) -> Result<ChangeRequestTokenStatus, AppError> {
     let http = Http::default_app()?;
     set_token_with(
@@ -457,6 +473,7 @@ pub async fn set_token(
         request_id,
         &http,
         &KeyringStore::new(),
+        expected,
     )
     .await
 }
@@ -471,10 +488,11 @@ pub(crate) async fn set_token_with(
     request_id: u64,
     http: &Http,
     store: &dyn CredentialStore,
+    expected: Option<&ExpectedSource>,
 ) -> Result<ChangeRequestTokenStatus, AppError> {
     ops::require_change_requests(backend)?;
     let git = LocalReader { backend, path, generation, request_id };
-    token_for(&git, remote, TokenAction::Set(token), http, store, None).await
+    token_for(&git, remote, TokenAction::Set(token), http, store, expected).await
 }
 
 pub async fn delete_token(
@@ -483,6 +501,7 @@ pub async fn delete_token(
     remote: &str,
     generation: u64,
     request_id: u64,
+    expected: Option<&ExpectedSource>,
 ) -> Result<ChangeRequestTokenStatus, AppError> {
     let http = Http::default_app()?;
     delete_token_with(
@@ -493,10 +512,12 @@ pub async fn delete_token(
         request_id,
         &http,
         &KeyringStore::new(),
+        expected,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn delete_token_with(
     backend: &Backend,
     path: &str,
@@ -505,10 +526,11 @@ pub(crate) async fn delete_token_with(
     request_id: u64,
     http: &Http,
     store: &dyn CredentialStore,
+    expected: Option<&ExpectedSource>,
 ) -> Result<ChangeRequestTokenStatus, AppError> {
     ops::require_change_requests(backend)?;
     let git = LocalReader { backend, path, generation, request_id };
-    token_for(&git, remote, TokenAction::Delete, http, store, None).await
+    token_for(&git, remote, TokenAction::Delete, http, store, expected).await
 }
 
 pub(crate) enum TokenAction<'a> {
@@ -530,7 +552,7 @@ pub(crate) async fn token_for(
     }
     let remotes = git.remotes().await?;
     let url = remote_url(&remotes, remote)?;
-    let repo = remote::resolve_repository(http, url).await?;
+    let repo = resolve_expected_repository(http, url, expected).await?;
     if let Some(expected) = expected {
         expected.check(&repo, None)?;
     }
@@ -549,6 +571,16 @@ pub(crate) async fn token_for(
         }
     };
     Ok(ChangeRequestTokenStatus { configured })
+}
+
+async fn resolve_expected_repository(
+    http: &Http,
+    remote_url: &str,
+    expected: Option<&ExpectedSource>,
+) -> Result<Repository, AppError> {
+    let instance_url = expected.and_then(|source| source.gitlab_instance.as_ref())
+        .map(|instance| instance.url.as_str());
+    remote::resolve_repository(http, remote_url, instance_url).await
 }
 
 // ---------------------------------------------------------------- 选择与校验

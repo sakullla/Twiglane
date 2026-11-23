@@ -1,6 +1,6 @@
 [package]
 name = "twiglane-agent-v2"
-version = "0.3.40"
+version = "0.3.44"
 description = "Twiglane remote Git agent v2 (shared Rust Git capability)"
 edition = "2021"
 publish = false

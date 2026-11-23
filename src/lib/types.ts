@@ -786,6 +786,7 @@ export interface ChangeRequestPrepare {
   targetBranch: string;
   defaultBranch: string | null;
   generation: number;
+  gitlabInstance?: { url: string; remoteFingerprint: string };
 }
 
 /** 令牌状态只有布尔值：原生永不把令牌本身交给前端。 */

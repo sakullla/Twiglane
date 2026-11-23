@@ -128,15 +128,22 @@ it("uses the old provisioning request on reconnect and sends replacement only wh
   expect(port.open.mock.lastCall?.[0]).toMatchObject({ path: location.path, provision, replacePendingProvision: id });
 });
 
-it("keeps PR credentials in desktop IPC and binds the prepared source to the active SSH connection", async () => {
+it.each([undefined, "https://git.example:8443/tools/gitlab"])("keeps PR credentials on the desktop for SSH (explicit GitLab instance: %s)", async (gitlabInstanceUrl) => {
   const repository = await openHost();
   const generation = repository.generation;
-  const expected = { provider: "gitea", host: "git.example", repository: "owner/project", repositoryWeb: "https://git.example/owner/project", sourceBranch: "feature" };
-  const ready = { ...expected, status: "ready", remote: "origin", choices: [], providerLabel: "Gitea", targetBranch: "main", defaultBranch: "main" };
+  const expected = {
+    provider: gitlabInstanceUrl ? "gitlab" : "gitea",
+    host: "git.example",
+    repository: "owner/project",
+    repositoryWeb: `${gitlabInstanceUrl ?? "https://git.example"}/owner/project`,
+    sourceBranch: "feature",
+    ...(gitlabInstanceUrl && { gitlabInstance: { url: gitlabInstanceUrl, remoteFingerprint: "a".repeat(64) } }),
+  };
+  const ready = { ...expected, status: "ready", remote: "origin", choices: [], providerLabel: gitlabInstanceUrl ? "GitLab" : "Gitea", targetBranch: "main", defaultBranch: "main" };
   invoke.mockResolvedValueOnce(ready);
-  const prepared = await api.prepareChangeRequest(keyA, null, generation, 1);
+  const prepared = await api.prepareChangeRequest(keyA, null, generation, 1, gitlabInstanceUrl);
   expect(invoke).toHaveBeenLastCalledWith("remote_change_request", {
-    request: { sessionId: "session-a", generation: "g1", action: "prepare", remote: null },
+    request: { sessionId: "session-a", generation: "g1", action: "prepare", remote: null, ...(gitlabInstanceUrl && { gitlabInstanceUrl }) },
   });
   await api.setChangeRequestToken(keyA, "origin", "test-only-token", generation, 2, prepared);
   expect(invoke).toHaveBeenLastCalledWith("remote_change_request", {

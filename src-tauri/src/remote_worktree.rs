@@ -2310,7 +2310,7 @@ pub struct RemoteChangeRequest {
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "camelCase", rename_all_fields = "camelCase")]
 enum ChangeRequestAction {
-    Prepare { remote: Option<String> },
+    Prepare { remote: Option<String>, gitlab_instance_url: Option<String> },
     Create {
         remote: String,
         expected: change_request::ExpectedSource,
@@ -2354,8 +2354,8 @@ pub async fn remote_change_request<R: Runtime>(
     let git = ChangeRequestReader(&session);
     let http = change_request::Http::default_app()?;
     match request.action {
-        ChangeRequestAction::Prepare { remote } => {
-            Ok(json!(change_request::prepare_for(&git, remote.as_deref(), &http).await?))
+        ChangeRequestAction::Prepare { remote, gitlab_instance_url } => {
+            Ok(json!(change_request::prepare_for(&git, remote.as_deref(), &http, gitlab_instance_url.as_deref()).await?))
         }
         ChangeRequestAction::Create { remote, expected, target_branch, title, body } => {
             let input = change_request::CreateInput {

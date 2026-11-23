@@ -245,17 +245,18 @@ describe("合并准备", () => {
     expect(rebase.hasAttribute("disabled")).toBe(false);
   });
 
-  it("预计冲突时直接列出冲突文件和逐处处理说明；明细默认收起，展开后有冲突页", async () => {
+  it("预计冲突时直接列出冲突文件和逐处处理说明；明细直接铺在下方，带冲突页", () => {
     renderSetup();
     expect(screen.getByText("预计 1 个文件有冲突")).toBeTruthy();
     expect(screen.getByRole("list", { name: "预计冲突的文件" }).textContent).toContain("app.ts");
     expect(document.querySelector(".merge-next")?.textContent).toContain("逐处解决 1 个文件");
-    expect(screen.queryByRole("tab")).toBeNull();
-    const toggle = screen.getByRole("button", { name: /查看改动明细/ });
-    expect(toggle.getAttribute("aria-expanded")).toBe("false");
-    await fireEvent.click(toggle);
-    expect(toggle.getAttribute("aria-expanded")).toBe("true");
     expect(screen.getByRole("tab", { name: /冲突/ })).toBeTruthy();
+  });
+
+  it("没有要带入的提交时不放明细，只给一句说明", () => {
+    renderSetup({ preview: preview({ incoming: 0, filesTotal: 0, files: [], commits: [], canStart: false, blocker: "up_to_date", conflictCheck: "clean", conflictPaths: [] }) });
+    expect(screen.queryByRole("tab")).toBeNull();
+    expect(screen.getByText("没有要带入的改动")).toBeTruthy();
   });
 
   it("数字一眼可读：带入提交、文件和可能冲突", () => {
@@ -289,7 +290,7 @@ describe("合并准备", () => {
     expect(screen.getByText(/开始时会先切换到 release/)).toBeTruthy();
   });
 
-  it("方向、结论和方式自上而下排在同一页；常用组合直接列成按钮，当前方向标为按下", async () => {
+  it("方向、结论和方式自上而下排在同一页；常用组合收进下拉，当前方向标为当前", async () => {
     const onPick = vi.fn();
     render(MergeSetup, {
       props: {
@@ -324,10 +325,11 @@ describe("合并准备", () => {
     const bar = screen.getByRole("region", { name: "合并方向" });
     expect(bar.textContent).toContain("来源");
     expect(bar.textContent).toContain("目标");
-    const quick = within(bar).getByRole("group", { name: "常用合并" });
-    const update = within(quick).getByRole("button", { name: "用 main 更新 feature" });
-    expect(update.getAttribute("aria-pressed")).toBe("true");
-    await fireEvent.click(within(quick).getByRole("button", { name: "把 feature 合并到 main" }));
+    await fireEvent.click(within(bar).getByRole("button", { name: "常用合并" }));
+    const menu = await screen.findByRole("listbox", { name: "常用合并" });
+    const update = within(menu).getByRole("option", { name: /用 main 更新 feature/ });
+    expect(update.textContent).toContain("当前");
+    await fireEvent.click(within(menu).getByRole("option", { name: /把 feature 合并到 main/ }));
     expect(onPick).toHaveBeenCalledWith("feature", "main");
   });
 

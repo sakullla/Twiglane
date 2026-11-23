@@ -914,11 +914,13 @@ mod tests {
             op: WriteKind::Commit.name().to_owned(),
             repo: session.repo.clone(),
             worktree_identity: None,
+            push_commit_id: None,
+            draft_digest: None,
         };
         let journal = session.journal(&state.data);
         save_pending(&journal, &pending).unwrap();
         let proof=session.agent.rpc("commit",json!({"repo":session.repo,"operationId":operation,"generation":snapshot["generation"],"message":"recorded"})).await;
-        let result = finish_write(&state, &session, &journal, &pending, proof, false)
+        let result = finish_write(&state, &session, &journal, &pending, proof, false, None)
             .await
             .unwrap();
         assert_eq!(result["state"], "completed");

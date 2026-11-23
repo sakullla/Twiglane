@@ -440,7 +440,7 @@ async fn a_changed_ssh_peer_never_receives_the_installation_gate() {
         .1 = "SHA256:a-different-key".into();
 
     let install = probe.shell.install(&"a".repeat(64), true).unwrap();
-    let error = spawn_connection(&context, &target(), &install, Some(&probe.peer_revision))
+    let error = spawn_connection(&context, &target(), &install, Some(&probe.peer_revision), None)
         .await
         .err()
         .expect("变更的主机密钥必须拒绝写入");
@@ -465,7 +465,7 @@ async fn password_auth_needs_a_saved_secret_and_then_uses_askpass_only() {
     let folder = Context::private_dir().unwrap();
     assert_eq!(
         context
-            .build(&password_target, &snapshot, folder.path(), "true", false)
+            .build(&password_target, &snapshot, folder.path(), "true", false, false)
             .err()
             .unwrap()
             .code,
@@ -475,7 +475,7 @@ async fn password_auth_needs_a_saved_secret_and_then_uses_askpass_only() {
     let saved = FakeStore::with(&[("host-a", "hunter2")]);
     let context = harness.context(&saved);
     let command = context
-        .build(&password_target, &snapshot, folder.path(), "true", false)
+        .build(&password_target, &snapshot, folder.path(), "true", false, false)
         .unwrap();
     let env: Vec<(String, String)> = command
         .as_std()
@@ -509,7 +509,7 @@ async fn key_auth_never_falls_back_to_interactive_prompts() {
     let snapshot = context.snapshot(&target()).await.unwrap();
     let folder = Context::private_dir().unwrap();
     let command = context
-        .build(&target(), &snapshot, folder.path(), "true", true)
+        .build(&target(), &snapshot, folder.path(), "true", true, false)
         .unwrap();
     let args: Vec<String> = command
         .as_std()

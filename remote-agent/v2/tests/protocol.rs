@@ -526,8 +526,18 @@ exec "$REAL_GIT" "$@"
         assert_eq!(std::fs::read_to_string(target.join("keep")).unwrap(), "replacement contents\n", "{phase}");
         assert!(!target.join(".git").exists(), "{phase}: the replacement must not be initialized");
         let mut reconnect = fixture.agent();
-        assert_eq!(reconnect.error_code("same-operation", "provisionRepository", request), "operation_pending", "{phase}");
+        assert_eq!(reconnect.error_code("same-operation", "provisionRepository", request.clone()), "operation_pending", "{phase}");
         assert!(!target.join(".git").exists(), "{phase}: the original request must not be repeated");
+
+        if phase == "clone" {
+            std::fs::rename(&target, base.join("checked-replacement")).unwrap();
+        }
+        let mut deliberate = request.clone();
+        deliberate["operationId"] = json!(provision_id());
+        let fresh = reconnect.ok("explicit-new-operation", "provisionRepository", deliberate);
+        assert_eq!(fresh["state"], "completed", "{phase}");
+        assert!(target.join(".git").is_dir());
+        assert_eq!(reconnect.error_code("preserved-old-receipt", "provisionRepository", request), "operation_pending", "{phase}");
     }
 }
 

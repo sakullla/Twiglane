@@ -170,6 +170,7 @@ pub struct OpenRequest {
     install_confirmation: Option<String>,
     review_id: Option<String>,
     provision: Option<crate::remote_provision::RepositoryProvision>,
+    replace_pending_provision: Option<String>,
     project_host_id: Option<String>,
 }
 
@@ -182,6 +183,7 @@ struct InstallTarget {
     path: String,
     baseline: Option<String>,
     provision_digest: Option<String>,
+    replace_pending_provision: Option<String>,
     project_host_id: Option<String>,
     digest: String,
     version: String,
@@ -191,6 +193,7 @@ struct InstallTarget {
 enum Opened {
     Worktree(Box<Session>, Value),
     NeedsInstall(Box<InstallTarget>),
+    ProvisionPending { operation_id: String, message: String },
 }
 
 /// 本机保存的目标与 Cliora 主机簿各自有独立的身份空间。
@@ -985,21 +988,26 @@ fn provision_journal_error() -> AppError {
 }
 
 impl ProvisionIntent {
-    fn begin(store: &AppStore, account: &str, request: &str) -> Result<Self> {
+    fn begin(store: &AppStore, account: &str, request: &str, replace: Option<&str>) -> Result<Self> {
         let directory = store.path().with_extension("provision");
         std::fs::create_dir_all(&directory).map_err(|_| provision_journal_error())?;
         let _lock = crate::git::gate::RepoWriteLock::acquire(&directory, Duration::from_secs(1))?;
         let key = Sha256::digest(json!([account, request]).to_string().as_bytes());
         let file = directory.join(format!("{key:x}.txt"));
-        let id = match std::fs::read_to_string(&file) {
-            Ok(id) if uuid(&id) => id,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let id = Uuid::new_v4().to_string();
-                crate::atomic::atomic_write(&file, id.as_bytes()).map_err(|_| provision_journal_error())?;
-                id
-            }
+        let current = match std::fs::read_to_string(&file) {
+            Ok(id) if uuid(&id) => Some(id),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             _ => return Err(provision_journal_error()),
         };
+        if let Some(old_id) = replace {
+            if current.as_deref() != Some(old_id) {
+                return Err(AppError::new("target_changed", "待核对的创建或克隆操作已变化，请重试核对。"));
+            }
+        } else if let Some(id) = current {
+            return Ok(Self { file, id });
+        }
+        let id = Uuid::new_v4().to_string();
+        crate::atomic::atomic_write(&file, id.as_bytes()).map_err(|_| provision_journal_error())?;
         Ok(Self { file, id })
     }
 
@@ -1214,6 +1222,7 @@ async fn connect_planned(
         provision_digest: request.provision.as_ref().map(|operation| {
             format!("{:x}", Sha256::digest(json!(operation).to_string().as_bytes()))
         }),
+        replace_pending_provision: request.replace_pending_provision.clone(),
         project_host_id: request.project_host_id.clone(),
         digest: plan.artifact.sha256.clone(),
         version: plan.artifact.version.clone(),
@@ -1288,14 +1297,27 @@ async fn connect_planned(
         {
             return Err(protocol_mismatch());
         }
-        let intent = ProvisionIntent::begin(access.store, &journal_identity, &operation.fingerprint(&request.path))?;
+        let intent = ProvisionIntent::begin(
+            access.store,
+            &journal_identity,
+            &operation.fingerprint(&request.path),
+            request.replace_pending_provision.as_deref(),
+        )?;
         publish(progress, "provisioning", None, None);
-        let proof = tokio::time::timeout(
+        let response = tokio::time::timeout(
             Duration::from_secs(600),
             agent.rpc("provisionRepository", json!({
                 "path":request.path, "operationId":intent.id, "operation":operation,
             })),
-        ).await.map_err(|_| remote_error("operation_pending"))??;
+        ).await.unwrap_or_else(|_| {
+            Err(AppError::new("operation_pending", "等待远端创建或克隆的结果超时，请先核对目标目录。"))
+        });
+        let proof = match response {
+            Err(error) if error.code == "operation_pending" => {
+                return Ok(Opened::ProvisionPending { operation_id: intent.id, message: error.message });
+            }
+            other => other?,
+        };
         if proof["operationId"].as_str() != Some(intent.id.as_str()) {
             return Err(protocol_mismatch());
         }
@@ -1476,6 +1498,7 @@ async fn bind_legacy_cliora(
             install_confirmation: None,
             review_id: None,
             provision: None,
+            replace_pending_provision: None,
             project_host_id: None,
         };
         let Ok(plan) = plan_cliora(helper.clone(), target, None, access).await else {
@@ -1594,6 +1617,9 @@ pub async fn remote_worktree_open(
     if request.provision.is_some() && (request.review_id.is_some() || request.baseline.is_some()) {
         return Err(AppError::new("invalid_request", "创建或克隆与打开 Cliora 审查是独立操作。"));
     }
+    if request.replace_pending_provision.as_deref().is_some_and(|id| request.provision.is_none() || !uuid(id)) {
+        return Err(AppError::new("invalid_request", "请选择要重新发起的创建或克隆操作。"));
+    }
     let source = request
         .review_id
         .as_deref()
@@ -1654,6 +1680,9 @@ pub async fn remote_worktree_open(
     }
     let (session, snapshot) = match response {
         Opened::Worktree(session, snapshot) => (session, snapshot),
+        Opened::ProvisionPending { operation_id, message } => {
+            return Ok(json!({"kind":"provision_pending", "operationId":operation_id, "message":message}));
+        }
         Opened::NeedsInstall(offer) => {
             let mut installs = state.installs.lock().unwrap();
             // The UI carries only one offer. Keep a small bounded set for resumed requests.
@@ -2913,23 +2942,61 @@ mod tests {
         let state_path = root.path().join("state.json");
         let store = AppStore::open(state_path.clone());
         let request = crate::remote_provision::RepositoryProvision::Create.fingerprint("/srv/repo");
-        let first = ProvisionIntent::begin(&store, "account", &request).unwrap();
+        let first = ProvisionIntent::begin(&store, "account", &request, None).unwrap();
         let saved = first.id.clone();
         drop(first);
         drop(store);
 
         let store = AppStore::open(state_path);
-        let retry = ProvisionIntent::begin(&store, "account", &request).unwrap();
+        let retry = ProvisionIntent::begin(&store, "account", &request, None).unwrap();
         assert_eq!(retry.id, saved);
-        let distinct_account = ProvisionIntent::begin(&store, "other-account", &request).unwrap();
+        let distinct_account = ProvisionIntent::begin(&store, "other-account", &request, None).unwrap();
         assert_ne!(distinct_account.id, saved);
-        let concurrent = ProvisionIntent::begin(&store, "account", &request).unwrap();
+        let concurrent = ProvisionIntent::begin(&store, "account", &request, None).unwrap();
         retry.finish().unwrap();
-        let next = ProvisionIntent::begin(&store, "account", &request).unwrap();
+        let next = ProvisionIntent::begin(&store, "account", &request, None).unwrap();
         assert_ne!(next.id, saved);
         concurrent.finish().unwrap();
-        assert_eq!(ProvisionIntent::begin(&store, "account", &request).unwrap().id, next.id);
+        assert_eq!(ProvisionIntent::begin(&store, "account", &request, None).unwrap().id, next.id);
         assert_eq!(std::fs::read_to_string(next.file).unwrap(), next.id);
+    }
+
+    #[test]
+    fn replacing_a_provision_intent_requires_the_current_id_after_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let state_path = root.path().join("state.json");
+        let store = AppStore::open(state_path.clone());
+        let request = crate::remote_provision::RepositoryProvision::Create.fingerprint("/srv/repo");
+        let original = ProvisionIntent::begin(&store, "account", &request, None).unwrap();
+        drop(store);
+
+        let store = AppStore::open(state_path);
+        let replacement = |account: &str, request: &str, old: &str| ProvisionIntent::begin(&store, account, request, Some(old));
+        for (account, fingerprint) in [("other-account", request.as_str()), ("account", "changed-request")] {
+            assert_eq!(replacement(account, fingerprint, &original.id).err().unwrap().code, "target_changed");
+        }
+        let barrier = std::sync::Barrier::new(2);
+        let next = std::thread::scope(|scope| {
+            let attempt = || {
+                barrier.wait();
+                replacement("account", &request, &original.id)
+            };
+            let first = scope.spawn(attempt);
+            let second = scope.spawn(attempt);
+            match (first.join().unwrap(), second.join().unwrap()) {
+                (Ok(next), Err(stale)) | (Err(stale), Ok(next)) => {
+                    assert_eq!(stale.code, "target_changed");
+                    next
+                }
+                _ => panic!("exactly one confirmation may replace the old ID"),
+            }
+        });
+        assert_ne!(next.id, original.id);
+        let next_id = next.id.clone();
+        original.finish().unwrap();
+        assert_eq!(ProvisionIntent::begin(&store, "account", &request, None).unwrap().id, next_id);
+        next.finish().unwrap();
+        assert_eq!(replacement("account", &request, &next_id).err().unwrap().code, "target_changed");
     }
 
     #[test]
@@ -3747,6 +3814,7 @@ esac
             install_confirmation: None,
             review_id: None,
             provision: None,
+            replace_pending_provision: None,
             project_host_id: None,
         };
         let progress = Channel::new(|_| Ok(()));
@@ -3763,10 +3831,18 @@ esac
                 "version":"1.0.0","sha256":format!("{:x}",Sha256::digest(b"artifact")),"signature":"c2ln",
                 "digestSignature":"YXR0"}],
         }).to_string()).unwrap();
+        let old_id = Uuid::new_v4().to_string();
+        request.provision = Some(crate::remote_provision::RepositoryProvision::Create);
+        request.replace_pending_provision = Some(old_id.clone());
         let Opened::NeedsInstall(offer) = connect(Some(&helper), &request, None, None, &progress, &access).await.unwrap() else {
             panic!("missing remote component requires confirmation");
         };
         request.allow_install = true;
+        request.replace_pending_provision = Some(Uuid::new_v4().to_string());
+        let stale = connect(Some(&helper), &request, Some((*offer).clone()), None, &progress, &access).await.err().unwrap();
+        assert_eq!(stale.code, "target_changed");
+        assert!(!root.join("wrote").exists(), "changed operation consent must not install or connect");
+        request.replace_pending_provision = Some(old_id);
         probe["peerRevision"] = json!("d".repeat(64));
         write("probe-v2.json", probe);
         let stale = connect(Some(&helper), &request, Some(*offer), None, &progress, &access).await.err().unwrap();

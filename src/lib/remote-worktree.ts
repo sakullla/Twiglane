@@ -64,6 +64,7 @@ export interface RemoteOpenRequest extends RemoteWorktreeLocation {
   /** 与审查来源一致的基线；没有来源或来源没有基线时缺省。 */
   baseline?: string | null;
   provision?: RemoteProvision;
+  replacePendingProvision?: string;
   projectHostId?: string;
 }
 
@@ -85,6 +86,7 @@ export type RemoteOpenResult =
     preferencesWarning?: string | null;
     projectHostId?: string;
   }
+  | { kind: "provision_pending"; operationId: string; message: string }
   | { kind: "install_required"; version: string; size: number; confirmationId?: string };
 
 export type RemoteDiffView = "staged" | "unstaged" | "task";

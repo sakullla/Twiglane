@@ -659,6 +659,7 @@ export interface RemoteOpenOptions {
   installConfirmation?: string | null;
   onProgress?: (value: RemoteConnectionProgress) => void;
   provision?: RemoteProvision;
+  replacePendingProvision?: string;
   projectHostId?: string;
   keepBackground?: () => boolean;
 }
@@ -684,6 +685,7 @@ export type RemoteOpenOutcome =
       credentialNote?: string | null;
       preferencesWarning?: string | null;
     }
+  | { kind: "provision_pending"; operationId: string; message: string }
   | { kind: "install_required"; version: string; size: number; confirmationId: string | null };
 
 /** 远端仓库的当前状态：只给展示层用，不含任何秘密。 */
@@ -719,12 +721,17 @@ async function openRemote(
         // 基线一起带着走：后端按 baseline 相等判定这次打开是不是那条审查。
         ...(options.baseline ? { baseline: options.baseline } : {}),
         ...(options.provision ? { provision: options.provision } : {}),
+        ...(options.replacePendingProvision ? { replacePendingProvision: options.replacePendingProvision } : {}),
         ...(options.projectHostId ? { projectHostId: options.projectHostId } : {}),
       } as RemoteOpenRequest,
       options.onProgress ?? (() => {}),
     );
   } catch (error) {
     throw normalizeError(error);
+  }
+  if (opened.kind === "provision_pending") {
+    if (epoch !== remoteOpenEpoch) throw remoteError("cancelled", "已取消这次远端连接。");
+    return opened;
   }
   if (opened.kind === "install_required") {
     if (epoch !== remoteOpenEpoch) throw remoteError("cancelled", "已取消这次远端连接。");

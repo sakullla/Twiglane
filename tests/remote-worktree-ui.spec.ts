@@ -114,6 +114,20 @@ async function openHost(target = hostA, key = keyA, sessionId = "session-a", sna
   return api.openRepository(key, 1);
 }
 
+it("uses the old provisioning request on reconnect and sends replacement only when explicit", async () => {
+  const id = "90246be1-b60b-4a6b-8069-bab76060e3f1";
+  const pending = { kind: "provision_pending", operationId: id, message: "上次操作待核对" };
+  const location = { kind: "ssh" as const, hostId: hostA.targetId, hostRevision: hostA.targetRevision, path: "/srv/new" };
+  port.open.mockResolvedValueOnce(pending).mockResolvedValueOnce(pending)
+    .mockResolvedValueOnce({ kind: "install_required", version: "0.3.40", size: 1, confirmationId: "offer" });
+  const provision = { kind: "create" as const };
+  expect(await api.openRemoteRepository(location, { provision })).toEqual(pending);
+  expect(await api.openRemoteRepository(location, { provision })).toEqual(pending);
+  for (const [request] of port.open.mock.calls) expect(request).not.toHaveProperty("replacePendingProvision");
+  expect(await api.openRemoteRepository(location, { provision, replacePendingProvision: id })).toMatchObject({ kind: "install_required" });
+  expect(port.open.mock.lastCall?.[0]).toMatchObject({ path: location.path, provision, replacePendingProvision: id });
+});
+
 it("keeps PR credentials in desktop IPC and binds the prepared source to the active SSH connection", async () => {
   const repository = await openHost();
   const generation = repository.generation;

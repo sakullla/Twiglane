@@ -45,6 +45,7 @@ async fn open(
     match result {
         Opened::Worktree(session, snapshot) => (session, snapshot),
         Opened::NeedsInstall(_) => panic!("confirmed installation did not open the repository"),
+        Opened::ProvisionPending { .. } => panic!("fixture only opens existing repositories"),
     }
 }
 
@@ -105,6 +106,7 @@ async fn real_v2_opens_native_and_cliora_task() {
         install_confirmation: None,
         review_id,
         provision: None,
+        replace_pending_provision: None,
         project_host_id: None,
     };
     let (session, snapshot) = open(None, &access, request(&Target::native(&native), None, None), None).await;
@@ -190,6 +192,7 @@ async fn real_v2_opens_native_and_cliora_task() {
             install_confirmation: None,
             review_id: None,
             provision: None,
+            replace_pending_provision: None,
             project_host_id: None,
         };
         let (mut native_session, _) = open(None, &access, legacy_request.clone(), None).await;

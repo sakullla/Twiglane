@@ -2970,6 +2970,41 @@ describe("应用外壳", () => {
       expect(mocks.closeRemoteRepository).not.toHaveBeenCalled();
     });
 
+    it("SSH 创建待确认时只核对旧操作，明确开始后保留确认至安装完成", async () => {
+      await openRemoteRepo();
+      const id = "90246be1-b60b-4a6b-8069-bab76060e3f1";
+      const pending = { kind: "provision_pending", operationId: id, message: "上次操作待核对" };
+      mocks.openRemoteRepository.mockClear().mockResolvedValueOnce(pending).mockResolvedValueOnce(pending)
+        .mockResolvedValueOnce({ kind: "install_required", version: "0.3.40", size: 120, confirmationId: "offer" })
+        .mockResolvedValueOnce(pending);
+      const palette = await openPalette();
+      await fireEvent.click(within(palette).getByRole("option", { name: /^打开远端仓库/ }));
+      const dialog = within(await screen.findByRole("dialog", { name: "打开远端仓库" }));
+      await dialog.findByRole("option", { name: /构建主机 A/ });
+      const mode = dialog.getByLabelText<HTMLSelectElement>("远端仓库操作");
+      mode.value = "create";
+      await fireEvent.change(mode);
+      const path = dialog.getByLabelText("远端路径");
+      await fireEvent.input(path, { target: { value: "/srv/pending" } });
+      await fireEvent.click(await dialog.findByRole("button", { name: "创建并打开" }));
+      await dialog.findByText("上次操作待核对");
+      await fireEvent.input(path, { target: { value: "/srv/different" } });
+      expect(dialog.queryByRole("button", { name: "已核对，开始新操作" })).toBeNull();
+      await fireEvent.input(path, { target: { value: "/srv/pending" } });
+      await fireEvent.click(await dialog.findByRole("button", { name: "重连核对上次操作" }));
+      await waitFor(() => expect(mocks.openRemoteRepository).toHaveBeenCalledTimes(2));
+      expect(mocks.openRemoteRepository.mock.lastCall?.[1]).not.toHaveProperty("replacePendingProvision");
+      const replace = await dialog.findByRole("button", { name: "已核对，开始新操作" });
+      await waitFor(() => expect(replace.hasAttribute("disabled")).toBe(false));
+      await fireEvent.click(replace);
+      const install = await dialog.findByRole("button", { name: "确认安装" });
+      expect(mocks.openRemoteRepository.mock.lastCall?.[1]).toMatchObject({ replacePendingProvision: id, allowInstall: false });
+      await fireEvent.click(install);
+      await waitFor(() => expect(mocks.openRemoteRepository.mock.lastCall?.[1]).toMatchObject({
+        replacePendingProvision: id, allowInstall: true, installConfirmation: "offer",
+      }));
+    });
+
     it("窗口还开着时完成：确认切换才结束远端会话", async () => {
       await openRemoteRepo();
       const clone = await startClone();

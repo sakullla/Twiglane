@@ -543,7 +543,8 @@
   let remoteCloneRemember = $state(false);
   let remoteCloneCanDetach = $state(false);
   let remoteOpenAttempt: { background: boolean } | null = null;
-  let remoteInstall = $state<{ version: string; size: number; confirmationId: string | null } | null>(null);
+  let remoteInstall = $state<{ version: string; size: number; confirmationId: string | null; replacePendingProvision?: string } | null>(null);
+  let remoteProvisionPending = $state<{ key: string; operationId: string } | null>(null);
   let remoteProgress = $state<string | null>(null);
   let remoteReviewSource = $state<RemoteReviewSource | null>(null);
   let remoteReturning = $state(false);
@@ -3594,6 +3595,19 @@
     };
   }
 
+  function provisionSelection(hostId: string, revision: string, path: string, operation: RemoteProvision): string {
+    return JSON.stringify([hostId, revision, path, operation.kind, ...(operation.kind === "clone" ? [operation.url, operation.name] : [])]);
+  }
+
+  const currentProvisionPending = $derived.by(() => {
+    const operation = remoteProvision();
+    const target = remoteTarget;
+    const path = remoteOpenPath;
+    if (!remoteProvisionPending || !operation || !target || path === null) return null;
+    return remoteProvisionPending.key === provisionSelection(target.targetId, target.targetRevision, path, operation)
+      ? remoteProvisionPending.operationId : null;
+  });
+
   async function openRemotePicker(prefill?: { hostId: string; path: string; projectHostId: string }) {
     closeSwitcher(false);
     remoteReviewSource = null;
@@ -3601,6 +3615,7 @@
     remotePickerError = null;
     remoteProgress = null;
     remoteInstall = null;
+    remoteProvisionPending = null;
     remoteTargetId = prefill?.hostId ?? "";
     remotePath = prefill?.path ?? "";
     remotePickerAction = "open";
@@ -3642,6 +3657,7 @@
     reviewId: string | null;
     source: RemoteReviewSource | null;
     provision?: RemoteProvision;
+    replacePendingProvision?: string;
     projectHostId?: string;
   }
 
@@ -3664,6 +3680,7 @@
           // 审查来源带基线时一起发送：后端按 baseline 相等判定这次打开是不是那条审查。
           ...(spec.source?.baseline ? { baseline: spec.source.baseline } : {}),
           ...(spec.provision ? { provision: spec.provision } : {}),
+          ...(spec.replacePendingProvision ? { replacePendingProvision: spec.replacePendingProvision } : {}),
           ...(spec.provision?.kind === "clone" ? {
             keepBackground: () => {
               if (remoteOpenAttempt === attempt) remoteCloneCanDetach = false;
@@ -3682,8 +3699,24 @@
         },
       );
       if (outcome.kind === "install_required") {
-        remoteInstall = { version: outcome.version, size: outcome.size, confirmationId: outcome.confirmationId };
+        remoteInstall = {
+          version: outcome.version, size: outcome.size, confirmationId: outcome.confirmationId,
+          replacePendingProvision: spec.replacePendingProvision,
+        };
         remoteProgress = null;
+        return false;
+      }
+      if (outcome.kind === "provision_pending") {
+        if (attempt.background) notice(outcome.message, "warn");
+        else if (remoteOpenAttempt === attempt && spec.provision) {
+          remoteInstall = null;
+          remoteProgress = null;
+          remotePickerError = outcome.message;
+          remoteProvisionPending = {
+            key: provisionSelection(spec.hostId, spec.hostRevision, spec.path, spec.provision),
+            operationId: outcome.operationId,
+          };
+        }
         return false;
       }
       if (outcome.kind === "background") {
@@ -3704,6 +3737,7 @@
         return true;
       }
       remoteInstall = null;
+      remoteProvisionPending = null;
       remoteProgress = null;
       remotePickerOpen = false;
       remotePickerError = null;
@@ -3736,10 +3770,12 @@
   }
 
   /** 从选择层打开：先处理未保存草稿与在途写入，再建立远端连接。 */
-  async function openRemoteFromPicker() {
+  async function openRemoteFromPicker(replacePendingProvision?: string) {
     const target = remoteTarget;
     const path = remoteOpenPath;
     if (!target || path === null || remoteOpenReason) return;
+    if (replacePendingProvision && replacePendingProvision !== currentProvisionPending) return;
+    const provision = remoteProvision();
     if (!(await confirmEditorLeave("打开远端仓库"))) return;
     if ((await flushDraft(drafts.path)) === false) return;
     if (switchBlocked(commandState)) {
@@ -3758,7 +3794,7 @@
       path: source?.worktreePath ?? path,
       reviewId: source?.reviewId ?? null,
       source,
-      ...(source ? {} : { provision: remoteProvision(), projectHostId: remotePickerProjectHostId ?? undefined }),
+      ...(source ? {} : { provision, replacePendingProvision, projectHostId: remotePickerProjectHostId ?? undefined }),
     });
   }
 
@@ -3787,6 +3823,7 @@
       {
         hostId: target.targetId, hostRevision: target.targetRevision, path, reviewId: null, source: null,
         provision: remoteProvision(), projectHostId: remotePickerProjectHostId ?? undefined,
+        replacePendingProvision: offer.replacePendingProvision,
       },
       { allowInstall: true, installConfirmation: offer.confirmationId },
     );
@@ -3798,6 +3835,7 @@
     remotePickerOpen = false;
     remotePickerError = null;
     remoteInstall = null;
+    remoteProvisionPending = null;
     remoteProgress = null;
     clearRemoteCloneFields();
     const source = remoteReviewSource;
@@ -6248,6 +6286,9 @@
       {#if remotePickerError}
         <p class="hint" role="alert" data-remote-error>{remotePickerError}</p>
       {/if}
+      {#if currentProvisionPending && !remoteInstall}
+        <p class="hint">请先检查远端目标。已有仓库可用「打开已有仓库」进入。确认可以再次创建或克隆后，再开始新操作。</p>
+      {/if}
       {#if remoteOpenReason}
         <p class="hint">{remoteOpenReason}</p>
       {/if}
@@ -6278,6 +6319,9 @@
             onclick={() => void confirmRemoteInstall()}
           >确认安装</button>
         {:else}
+          {#if currentProvisionPending}
+            <button type="button" class="btn btn-secondary" disabled={remoteOpenReason !== ""} title={remoteOpenReason || "以新操作开始，保留上一次的回执"} onclick={() => void openRemoteFromPicker(currentProvisionPending ?? undefined)}>已核对，开始新操作</button>
+          {/if}
           <button
             type="button"
             class="btn btn-primary"
@@ -6285,7 +6329,7 @@
             title={remoteOpenReason !== "" ? remoteOpenReason : remotePickerBusy ? "正在连接远端" : undefined}
             disabled={remotePickerBusy || remoteOpenReason !== ""}
             onclick={() => void openRemoteFromPicker()}
-          >{remotePickerAction === "create" ? "创建并打开" : remotePickerAction === "clone" ? "克隆并打开" : "打开仓库"}</button>
+          >{currentProvisionPending ? "重连核对上次操作" : remotePickerAction === "create" ? "创建并打开" : remotePickerAction === "clone" ? "克隆并打开" : "打开仓库"}</button>
         {/if}
       {/if}
     {/snippet}

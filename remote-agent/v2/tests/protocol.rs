@@ -294,6 +294,42 @@ fn ignore_rules_write_to_the_selected_repository_target_and_replay_once() {
     assert!(files.iter().all(|file| file["path"] != "shared.tmp" && file["path"] != "local.tmp"));
 }
 
+#[cfg(unix)]
+#[test]
+fn remote_file_copy_accepts_only_links_to_ordinary_repository_files() {
+    use base64::Engine;
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::new("file-copy-links");
+    fixture.init();
+    fixture.write("docs/note.txt", "remote bytes\n");
+    fixture.commit_all("init");
+    let outside = fixture.repo.with_file_name("outside.txt");
+    std::fs::write(&outside, "outside\n").unwrap();
+    for (target, name) in [
+        (Path::new("docs/note.txt"), "note-link.txt"),
+        (Path::new("docs"), "directory-link"),
+        (outside.as_path(), "outside-link.txt"),
+        (Path::new(".git/config"), "metadata-link.txt"),
+        (Path::new("missing.txt"), "broken-link.txt"),
+    ] {
+        symlink(target, fixture.repo.join(name)).unwrap();
+    }
+    let mut agent = fixture.agent();
+    let repo = fixture.repo_str();
+    let opened = open(&mut agent, &repo);
+    let fields = |relative| json!({ "repo":repo, "relative":relative, "generation":opened["generation"] });
+    for relative in ["note-link.txt", "directory-link/note.txt"] {
+        let result = agent.ok("copy-internal-link", "fileCopy", fields(relative));
+        let data = base64::engine::general_purpose::STANDARD.decode(result["data"].as_str().unwrap()).unwrap();
+        assert_eq!(data, b"remote bytes\n");
+    }
+    for relative in ["outside-link.txt", "metadata-link.txt"] {
+        assert_eq!(agent.error_code("copy-disallowed-link", "fileCopy", fields(relative)), "invalid_path");
+    }
+    assert_eq!(agent.error_code("copy-broken-link", "fileCopy", fields("broken-link.txt")), "path_missing");
+}
+
 #[test]
 fn project_discovery_finds_real_worktrees_and_reuses_member_identity() {
     let fixture = Fixture::new("project-discovery");
@@ -330,8 +366,8 @@ fn pre_open_create_and_clone_recover_through_the_same_worktree_identity() {
     fixture.commit_all("seed");
     let source_head = git(&fixture.repo, &fixture.config, &["rev-parse", "HEAD"]);
     let create_path = base.join("新建 repo");
-    let create = json!({"path": create_path, "operation": {"kind":"create"}});
-    let clone = json!({"path":base,"operation":{"kind":"clone","url":fixture.repo,"name":"克隆 repo"}});
+    let create = json!({"operationId":provision_id(),"path":create_path,"operation":{"kind":"create"}});
+    let clone = json!({"operationId":provision_id(),"path":base,"operation":{"kind":"clone","url":fixture.repo,"name":"克隆 repo"}});
 
     for (request, name) in [(create, "新建 repo"), (clone, "克隆 repo")] {
         let proof = {
@@ -339,6 +375,8 @@ fn pre_open_create_and_clone_recover_through_the_same_worktree_identity() {
             first.ok("write-before-open", "provisionRepository", request.clone())
         };
         let target = base.join(name);
+        assert_eq!(proof["operationId"], request["operationId"]);
+        assert_eq!(proof["state"], "completed");
         assert!(target.join(".git").is_dir());
         let mut reconnected = fixture.agent();
         let recovered = reconnected.ok("reconcile-provision", "provisionRepository", request.clone());
@@ -363,7 +401,7 @@ fn pre_open_provision_refuses_to_reopen_a_replacement_as_its_result() {
     let fixture = Fixture::new("provision-replacement");
     let root = base_of(&fixture);
     let target = root.join("target");
-    let request = json!({"path":target,"operation":{"kind":"create"}});
+    let request = json!({"operationId":provision_id(),"path":target,"operation":{"kind":"create"}});
     {
         let mut agent = fixture.agent();
         agent.ok("initial-create", "provisionRepository", request.clone());
@@ -372,8 +410,125 @@ fn pre_open_provision_refuses_to_reopen_a_replacement_as_its_result() {
     std::fs::create_dir(&target).unwrap();
     git(&target, &fixture.config, &["init", "-b", "other"]);
     let mut agent = fixture.agent();
-    assert_eq!(agent.error_code("changed-provision-result", "provisionRepository", request), "target_changed");
+    let failure = agent.ok("changed-provision-result", "provisionRepository", request);
+    assert_eq!(failure["state"], "failed");
+    assert_eq!(failure["code"], "target_changed");
     assert_eq!(git(&target, &fixture.config, &["symbolic-ref", "--short", "HEAD"]).trim(), "other");
+}
+
+fn provision_id() -> String {
+    let mut random = [0; 16];
+    getrandom::fill(&mut random).unwrap();
+    format!("{:032x}", u128::from_le_bytes(random))
+}
+
+#[test]
+fn pre_open_old_operations_never_replay_but_new_intents_can_reuse_vacated_paths() {
+    let fixture = Fixture::new("provision-vacant");
+    let base = base_of(&fixture);
+    fixture.init();
+    fixture.write("readme.txt", "seed\n");
+    fixture.commit_all("seed");
+    for (name, operation, path) in [
+        ("created", json!({"kind":"create"}), base.join("created")),
+        ("cloned", json!({"kind":"clone","url":fixture.repo,"name":"cloned"}), base.clone()),
+    ] {
+        let target = base.join(name);
+        let request = json!({"operationId":provision_id(),"path":path,"operation":operation});
+        let proof = fixture.agent().ok("initial", "provisionRepository", request.clone());
+        assert_eq!(proof["state"], "completed");
+        let mut changed_request = request.clone();
+        changed_request["path"] = json!(base.join("different-target"));
+        assert_eq!(
+            fixture.agent().error_code("changed-request", "provisionRepository", changed_request),
+            "target_changed",
+        );
+        assert!(!base.join("different-target").exists());
+        std::fs::rename(&target, base.join(format!("{name}-moved"))).unwrap();
+
+        let mut reconnect = fixture.agent();
+        let old = reconnect.ok("retry", "provisionRepository", request.clone());
+        assert_eq!(old["state"], "failed");
+        assert_eq!(old["code"], "target_changed");
+        assert!(!target.exists(), "recovery must never recreate the old result");
+
+        let mut deliberate = request.clone();
+        deliberate["operationId"] = json!(provision_id());
+        let new = reconnect.ok("new-operation", "provisionRepository", deliberate);
+        assert_eq!(new["state"], "completed");
+        assert_ne!(new["worktreeIdentity"], proof["worktreeIdentity"]);
+        assert!(target.join(".git").is_dir());
+        let old = reconnect.ok("retry-after-new", "provisionRepository", request);
+        assert_eq!(old["code"], "target_changed");
+        assert!(base.join(format!("{name}-moved")).join(".git").is_dir());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn pre_open_provision_never_writes_a_directory_replaced_during_git_provisioning() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new("provision-race");
+    let base = base_of(&fixture);
+    fixture.init();
+    fixture.write("readme.txt", "seed\n");
+    fixture.commit_all("seed");
+    let wrapper_dir = base.join("bin");
+    std::fs::create_dir(&wrapper_dir).unwrap();
+    let git_path = std::env::var_os("PATH").unwrap();
+    let real_git = std::env::split_paths(&git_path)
+        .map(|path| path.join("git"))
+        .find(|path| path.is_file())
+        .unwrap();
+    let path = std::env::join_paths(std::iter::once(wrapper_dir.clone()).chain(std::env::split_paths(&git_path))).unwrap();
+    let wrapper = wrapper_dir.join("git");
+    std::fs::write(&wrapper, r#"#!/bin/sh
+set -u
+replace_target() {
+    mv "$RACE_TARGET" "$RACE_TARGET-moved" || exit 80
+    mkdir "$RACE_TARGET" || exit 81
+    printf 'replacement contents\n' > "$RACE_TARGET/keep"
+}
+case "$RACE_PHASE $*" in
+    preflight*--show-toplevel*)
+        "$REAL_GIT" "$@"
+        result=$?
+        replace_target
+        exit "$result"
+        ;;
+    spawn*" init")
+        replace_target
+        ;;
+    clone*"clone -- "*)
+        replace_target
+        ;;
+esac
+exec "$REAL_GIT" "$@"
+"#).unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    for phase in ["preflight", "spawn", "clone"] {
+        let target = base.join(phase);
+        std::fs::create_dir(&target).unwrap();
+        let mut agent = Agent::start_with(&fixture.state, &fixture.config, &[
+            ("PATH", path.to_str().unwrap()),
+            ("REAL_GIT", real_git.to_str().unwrap()),
+            ("RACE_TARGET", target.to_str().unwrap()),
+            ("RACE_PHASE", phase),
+        ]);
+        let request = if phase == "clone" {
+            json!({"operationId":provision_id(),"path":base,"operation":{"kind":"clone","url":fixture.repo,"name":"clone"}})
+        } else {
+            json!({"operationId":provision_id(),"path":target,"operation":{"kind":"create"}})
+        };
+        assert_eq!(agent.error_code("selected-create", "provisionRepository", request.clone()), "operation_pending", "{phase}");
+        assert_eq!(std::fs::read_to_string(target.join("keep")).unwrap(), "replacement contents\n", "{phase}");
+        assert!(!target.join(".git").exists(), "{phase}: the replacement must not be initialized");
+        let mut reconnect = fixture.agent();
+        assert_eq!(reconnect.error_code("same-operation", "provisionRepository", request), "operation_pending", "{phase}");
+        assert!(!target.join(".git").exists(), "{phase}: the original request must not be repeated");
+    }
 }
 
 fn pty_fixture_profile(response: &Value) -> String {

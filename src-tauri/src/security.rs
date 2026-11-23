@@ -479,6 +479,7 @@ fn command_signature<'a>(source: &'a str, name: &str) -> &'a str {
     let marker = format!("fn {name}(");
     let start = source
         .find(&marker)
+        .or_else(|| source.find(&format!("fn {name}<")))
         .unwrap_or_else(|| panic!("缺少命令 {name}"));
     let rest = &source[start..];
     let end = rest

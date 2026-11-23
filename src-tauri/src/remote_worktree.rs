@@ -975,6 +975,46 @@ fn uuid(value: &str) -> bool {
     Uuid::parse_str(value).is_ok_and(|parsed| parsed.to_string() == value)
 }
 
+struct ProvisionIntent {
+    file: PathBuf,
+    id: String,
+}
+
+fn provision_journal_error() -> AppError {
+    AppError::new("provision_journal", "无法保存或核对创建或克隆操作的本机记录。")
+}
+
+impl ProvisionIntent {
+    fn begin(store: &AppStore, account: &str, request: &str) -> Result<Self> {
+        let directory = store.path().with_extension("provision");
+        std::fs::create_dir_all(&directory).map_err(|_| provision_journal_error())?;
+        let _lock = crate::git::gate::RepoWriteLock::acquire(&directory, Duration::from_secs(1))?;
+        let key = Sha256::digest(json!([account, request]).to_string().as_bytes());
+        let file = directory.join(format!("{key:x}.txt"));
+        let id = match std::fs::read_to_string(&file) {
+            Ok(id) if uuid(&id) => id,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let id = Uuid::new_v4().to_string();
+                crate::atomic::atomic_write(&file, id.as_bytes()).map_err(|_| provision_journal_error())?;
+                id
+            }
+            _ => return Err(provision_journal_error()),
+        };
+        Ok(Self { file, id })
+    }
+
+    fn finish(self) -> Result<()> {
+        let directory = self.file.parent().ok_or_else(provision_journal_error)?;
+        let _lock = crate::git::gate::RepoWriteLock::acquire(directory, Duration::from_secs(1))?;
+        match std::fs::read_to_string(&self.file) {
+            Ok(id) if id == self.id => std::fs::remove_file(&self.file).map_err(|_| provision_journal_error()),
+            Ok(id) if uuid(&id) => Ok(()), // Another open has already settled this ID.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            _ => Err(provision_journal_error()),
+        }
+    }
+}
+
 /// 接收 POSIX 根路径或平台中立的 Windows 盘符路径。Git 相对路径不允许伪装成绝对路径。
 fn valid_path(value: &str, absolute: bool) -> bool {
     if value.is_empty() || value.len() > 4096 || value.chars().any(char::is_control) {
@@ -1243,23 +1283,42 @@ async fn connect_planned(
     }
 
     let provisioned = if let Some(operation) = &request.provision {
-        if !capabilities.iter().any(|capability| capability.as_str() == Some("provisionRepository")) {
+        if hello["provisionReceiptVersion"].as_u64() != Some(crate::remote_provision::PROVISION_RECEIPT_VERSION)
+            || !capabilities.iter().any(|capability| capability.as_str() == Some("provisionRepository"))
+        {
             return Err(protocol_mismatch());
         }
+        let intent = ProvisionIntent::begin(access.store, &journal_identity, &operation.fingerprint(&request.path))?;
         publish(progress, "provisioning", None, None);
         let proof = tokio::time::timeout(
             Duration::from_secs(600),
-            agent.rpc("provisionRepository", json!({"path":request.path, "operation":operation})),
+            agent.rpc("provisionRepository", json!({
+                "path":request.path, "operationId":intent.id, "operation":operation,
+            })),
         ).await.map_err(|_| remote_error("operation_pending"))??;
+        if proof["operationId"].as_str() != Some(intent.id.as_str()) {
+            return Err(protocol_mismatch());
+        }
+        if proof["state"] == "failed" {
+            let code = proof["code"].as_str().filter(|value| {
+                !value.is_empty() && value.len() <= 80 && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            }).ok_or_else(protocol_mismatch)?;
+            let message = proof["message"].as_str().ok_or_else(protocol_mismatch)?;
+            intent.finish()?;
+            return Err(AppError::new(code, crate::redact::redact_error_text(message)));
+        }
+        if proof["state"] != "completed" {
+            return Err(protocol_mismatch());
+        }
         let path = proof["path"].as_str().filter(|path| valid_path(path, true)).ok_or_else(protocol_mismatch)?.to_owned();
         let identity = probe_identity(&proof["worktreeIdentity"]).map_err(|_| protocol_mismatch())?.to_owned();
-        Some((path, identity, proof["credentialNote"].clone()))
+        Some((path, identity, proof["credentialNote"].clone(), intent))
     } else {
         None
     };
     publish(progress, "opening", None, None);
-    let mut fields = json!({"path":provisioned.as_ref().map_or(request.path.as_str(), |(path, _, _)| path.as_str())});
-    if let Some((_, identity, _)) = &provisioned {
+    let mut fields = json!({"path":provisioned.as_ref().map_or(request.path.as_str(), |(path, _, _, _)| path.as_str())});
+    if let Some((_, identity, _, _)) = &provisioned {
         fields["worktreeIdentity"] = json!(identity);
     }
     if let Some(baseline) = &request.baseline {
@@ -1276,7 +1335,7 @@ async fn connect_planned(
     let root = snapshot["worktreePath"].as_str().filter(|value| valid_path(value, true))
         .ok_or_else(protocol_mismatch)?.to_owned();
     let worktree_identity = probe_identity(&snapshot["worktreeIdentity"]).map_err(|_| protocol_mismatch())?.to_owned();
-    if provisioned.as_ref().is_some_and(|(path, identity, _)| path != &root || identity != &worktree_identity) {
+    if provisioned.as_ref().is_some_and(|(path, identity, _, _)| path != &root || identity != &worktree_identity) {
         return Err(remote_error("target_changed"));
     }
     if snapshot["journalIdentity"].as_str() != Some(&journal_identity) {
@@ -1316,7 +1375,8 @@ async fn connect_planned(
     };
     session.remember_state(&snapshot, None)?;
     let mut view = flatten_v2(&snapshot)?;
-    if let Some((_, _, note)) = provisioned {
+    if let Some((_, _, note, intent)) = provisioned {
+        intent.finish()?;
         view["credentialNote"] = note;
     }
     Ok(Opened::Worktree(Box::new(session), view))
@@ -2846,6 +2906,31 @@ async fn legacy_receipt(base: &Path, session: &Session, file: &PendingFile) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provision_intent_survives_restart_until_its_verified_result_is_settled() {
+        let root = tempfile::tempdir().unwrap();
+        let state_path = root.path().join("state.json");
+        let store = AppStore::open(state_path.clone());
+        let request = crate::remote_provision::RepositoryProvision::Create.fingerprint("/srv/repo");
+        let first = ProvisionIntent::begin(&store, "account", &request).unwrap();
+        let saved = first.id.clone();
+        drop(first);
+        drop(store);
+
+        let store = AppStore::open(state_path);
+        let retry = ProvisionIntent::begin(&store, "account", &request).unwrap();
+        assert_eq!(retry.id, saved);
+        let distinct_account = ProvisionIntent::begin(&store, "other-account", &request).unwrap();
+        assert_ne!(distinct_account.id, saved);
+        let concurrent = ProvisionIntent::begin(&store, "account", &request).unwrap();
+        retry.finish().unwrap();
+        let next = ProvisionIntent::begin(&store, "account", &request).unwrap();
+        assert_ne!(next.id, saved);
+        concurrent.finish().unwrap();
+        assert_eq!(ProvisionIntent::begin(&store, "account", &request).unwrap().id, next.id);
+        assert_eq!(std::fs::read_to_string(next.file).unwrap(), next.id);
+    }
 
     #[test]
     fn connector_errors_keep_authentication_and_trust_diagnostics() {

@@ -196,4 +196,3 @@ pub fn discover_paths(
     }
     Ok((paths, issues, partial))
 }
-

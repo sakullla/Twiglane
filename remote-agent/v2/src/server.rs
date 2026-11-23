@@ -566,9 +566,10 @@ impl Context {
                 }
                 self.journal_identity()?;
                 let path = string_field(&request.fields, "path")?;
+                let operation_id = string_field(&request.fields, "operationId")?;
                 let operation = deserialize_field(&request.fields, "operation")?;
                 check_cancel(cancel)?;
-                crate::provision::run(&self.backend, &path, operation).await
+                crate::provision::run(&self.backend, &path, &operation_id, operation).await
             }
             "status" => self.status(&request.fields, cancel).await,
             "diff" => self.diff(&request.fields, cancel).await,
@@ -656,6 +657,7 @@ impl Context {
             "client": client,
             "capabilities": CAPABILITIES,
             "receipts": "git-common-dir",
+            "provisionReceiptVersion": crate::remote_provision::PROVISION_RECEIPT_VERSION,
             "journalIdentity": self.journal_identity()?,
             "generation": "numeric",
             "stateToken": "opaque",

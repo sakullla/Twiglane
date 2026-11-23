@@ -1818,10 +1818,24 @@ pub(crate) async fn repository_file_copy(
     let key = repo_key(&root);
     let boundary = read_edit_boundary(backend, &key, generation, request_id, &root).await?;
     backend.scheduler.execute_blocking_read(&key, request_id, generation, move |cancel| {
+        check_cancel(&cancel)?;
+        let resolved = dunce::canonicalize(boundary.root.join(relative)).map_err(|error| {
+            if error.kind() == ErrorKind::NotFound {
+                AppError::new("path_missing", "远端文件已不在工作区。")
+            } else {
+                AppError::new("path_unreadable", "无法解析远端文件路径。")
+            }
+        })?;
+        // Open the resolved location through the descriptor/handle boundary. This
+        // accepts in-repository aliases and keeps a later link change out of the read.
+        let relative = resolved.strip_prefix(&boundary.root).map_err(|_| {
+            AppError::new("invalid_path", "只能复制当前仓库内的文件。")
+        })?;
+        ensure_editable_location(&boundary, &resolved)?;
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        let mut file = secure_entry_ops::open_file_copy(&boundary, &relative)?;
+        let mut file = secure_entry_ops::open_file_copy(&boundary, relative)?;
         #[cfg(windows)]
-        let mut file = windows_entry::open_file_copy(&boundary, &relative)?;
+        let mut file = windows_entry::open_file_copy(&boundary, relative)?;
         let unreadable = |_| AppError::new("path_unreadable", "无法读取远端文件的副本。");
         let changed = || AppError::new("file_changed", "远端文件在复制期间变化，请重新打开。");
         let info = file.metadata().map_err(unreadable)?;

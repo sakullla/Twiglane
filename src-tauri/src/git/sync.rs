@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
@@ -28,7 +29,7 @@ use crate::git::ops::{
     canonical_existing, ensure_directory, git_failure, open_repository, repo_key, require_git,
     run_git, run_remote_git, status_from_output, validate_input_path, Backend,
 };
-use crate::git::runner::ProcessOutput;
+use crate::git::runner::{PinnedDirectory, ProcessOutput};
 use crate::git::schedule::{internal_request_id, GitJob, JobKind, ScheduledOutput};
 use crate::model::{
     BranchRecord, BranchState, CloneResult, CommitPushReport, RemoteInfo, RemoteState,
@@ -48,6 +49,18 @@ pub async fn clone_repository(
     name: &str,
     credential: Option<&HttpCredential>,
     request_id: u64,
+) -> Result<CloneResult, AppError> {
+    clone_repository_in(backend, url, parent, name, credential, request_id, None).await
+}
+
+pub(crate) async fn clone_repository_in(
+    backend: &Backend,
+    url: &str,
+    parent: &str,
+    name: &str,
+    credential: Option<&HttpCredential>,
+    request_id: u64,
+    pinned: Option<Arc<PinnedDirectory>>,
 ) -> Result<CloneResult, AppError> {
     validate_remote_url(url)?;
     let auth = match credential {
@@ -71,11 +84,12 @@ pub async fn clone_repository(
         .actions
         .enter(action_key("clone", &destination.to_string_lossy()))?;
     let git = require_git(backend).await?;
-    let (program, args) = clone_command(&git.path, url, &destination);
+    let working_path = if pinned.is_some() { Path::new(".") } else { &destination };
+    let (program, args) = clone_command(&git.path, url, working_path);
     let key = destination.to_string_lossy().into_owned();
     let scheduled = match backend
         .scheduler
-        .execute(GitJob {
+        .execute_in(GitJob {
             repo_key: key.clone(),
             kind: JobKind::Write,
             request_id,
@@ -86,7 +100,7 @@ pub async fn clone_repository(
             truncate_stdout: false,
             output_limit: None,
             env: auth,
-        })
+        }, pinned.clone())
         .await
     {
         Err(error) => return Err(clone_failure(&destination, remote_timeout(error))),
@@ -123,7 +137,7 @@ pub async fn clone_repository(
     })?;
     let credential_note = match credential {
         Some(credential) if credential.remember => {
-            Some(remember_credential(backend, &git.path, &destination, url, credential).await)
+            Some(remember_credential(backend, &git.path, &destination, url, credential, pinned).await)
         }
         Some(_) => Some(
             "这次输入的凭据没有保存；之后拉取或推送时如需认证，会再次提示。".to_string(),
@@ -144,10 +158,26 @@ async fn remember_credential(
     root: &Path,
     url: &str,
     credential: &HttpCredential,
+    pinned: Option<Arc<PinnedDirectory>>,
 ) -> String {
     let key = repo_key(root);
-    let (program, args) = credential_helper_command(git, root);
-    let helper = run_git(backend, &key, JobKind::Read, internal_request_id(), program, args, None).await;
+    let working_path = if pinned.is_some() { Path::new(".") } else { root };
+    let (program, args) = credential_helper_command(git, working_path);
+    let helper = match &pinned {
+        Some(directory) => backend.scheduler.execute_in(GitJob {
+            generation: backend.scheduler.current_generation(&key),
+            repo_key: key.clone(),
+            kind: JobKind::Read,
+            request_id: internal_request_id(),
+            program,
+            args,
+            stdin: None,
+            truncate_stdout: false,
+            output_limit: None,
+            env: Vec::new(),
+        }, Some(Arc::clone(directory))).await,
+        None => run_git(backend, &key, JobKind::Read, internal_request_id(), program, args, None).await,
+    };
     let configured = matches!(&helper, Ok(found) if found.output.exit_code == 0 && !String::from_utf8_lossy(&found.output.stdout).trim().is_empty());
     if !configured {
         return "没有检测到 Git 凭据助手（credential.helper），凭据未保存；之后拉取或推送时需要再次输入。可在 Git 中配置凭据助手后再克隆或推送。".to_string();
@@ -155,10 +185,10 @@ async fn remember_credential(
     let Some(stdin) = approve_input(url, credential) else {
         return "凭据格式不支持保存，未保存。".to_string();
     };
-    let (program, args) = credential_approve_command(git, root);
+    let (program, args) = credential_approve_command(git, working_path);
     let result = backend
         .scheduler
-        .execute(GitJob {
+        .execute_in(GitJob {
             repo_key: key.clone(),
             kind: JobKind::Read,
             request_id: internal_request_id(),
@@ -169,7 +199,7 @@ async fn remember_credential(
             truncate_stdout: false,
             output_limit: None,
             env: Vec::new(),
-        })
+        }, pinned)
         .await;
     match result {
         Ok(done) if done.output.exit_code == 0 => {
@@ -2414,7 +2444,7 @@ fn validate_remote_name(name: &str) -> Result<(), AppError> {
     }
 }
 
-fn validate_remote_url(url: &str) -> Result<(), AppError> {
+pub(crate) fn validate_remote_url(url: &str) -> Result<(), AppError> {
     if url.is_empty()
         || url
             .chars()

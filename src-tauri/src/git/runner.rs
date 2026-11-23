@@ -1,4 +1,6 @@
-use std::path::PathBuf;
+use std::fs::{File, OpenOptions};
+use std::io;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,6 +33,7 @@ pub enum RunnerError {
 pub struct RunRequest {
     pub program: PathBuf,
     pub args: Vec<std::ffi::OsString>,
+    pub directory: Option<Arc<PinnedDirectory>>,
     pub extra_env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     pub timeout: Duration,
     pub output_limit: usize,
@@ -39,6 +42,106 @@ pub struct RunRequest {
     pub stdin: Option<Vec<u8>>,
     /// When set, stdout stops at `output_limit` and the process is killed instead of failing.
     pub truncate_stdout: bool,
+}
+
+/// Keeps Git's working directory bound to the selected directory during provisioning.
+pub struct PinnedDirectory {
+    path: PathBuf,
+    #[cfg(unix)]
+    handle: Arc<File>,
+    #[cfg(windows)]
+    _handles: Vec<File>,
+}
+
+impl PinnedDirectory {
+    #[cfg(unix)]
+    #[allow(dead_code)] // Opened by the Agent.
+    pub fn open(path: &Path) -> io::Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let handle = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(path)?;
+        Ok(Self { path: path.to_owned(), handle: Arc::new(handle) })
+    }
+
+    #[cfg(windows)]
+    #[allow(dead_code)] // Opened by the Agent.
+    pub fn open(path: &Path) -> io::Result<Self> {
+        use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+        use windows::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
+        };
+
+        // Pin the ancestors too so that the absolute path used by CreateProcess
+        // remains bound even while the Git child is starting.
+        let mut ancestors: Vec<_> = path.ancestors().collect();
+        ancestors.reverse();
+        let mut handles = Vec::with_capacity(ancestors.len());
+        for ancestor in ancestors {
+            let access = if ancestor == path { FILE_LIST_DIRECTORY } else { FILE_TRAVERSE };
+            let file = OpenOptions::new()
+                // Listing or traversal access participates in Windows sharing checks.
+                .access_mode(access.0 | FILE_READ_ATTRIBUTES.0)
+                .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0 | FILE_FLAG_OPEN_REPARSE_POINT.0)
+                .open(ancestor)?;
+            let attributes = file.metadata()?.file_attributes();
+            if attributes & (FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_REPARSE_POINT.0) != FILE_ATTRIBUTE_DIRECTORY.0 {
+                return Err(io::Error::other("working directory must not be a reparse point"));
+            }
+            handles.push(file);
+        }
+        Ok(Self { path: path.to_owned(), _handles: handles })
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn check(&self) -> io::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+
+        let current = std::fs::symlink_metadata(&self.path)?;
+        let pinned = self.handle.metadata()?;
+        if !current.is_dir() || (current.dev(), current.ino()) != (pinned.dev(), pinned.ino()) {
+            return Err(io::Error::other("working directory changed"));
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[allow(dead_code)] // The Agent uses the same check on both platforms.
+    pub(crate) fn check(&self) -> io::Result<()> {
+        // The directory and every ancestor were opened without FILE_SHARE_DELETE.
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn apply(&self, command: &mut Command) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+
+        self.check()?;
+        let handle = Arc::clone(&self.handle);
+        // The Arc keeps the descriptor open until the child calls fchdir. The
+        // child only performs fchdir and reads errno before exec.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::fchdir(handle.as_raw_fd()) == -1 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn apply(&self, command: &mut Command) -> io::Result<()> {
+        command.current_dir(&self.path);
+        Ok(())
+    }
 }
 
 pub trait ProcessRunner: Send + Sync {
@@ -75,6 +178,7 @@ impl RealRunner {
         RunRequest {
             program,
             args,
+            directory: None,
             extra_env: self.extra_env.clone(),
             timeout: self.timeout,
             output_limit: self.output_limit,
@@ -121,6 +225,9 @@ pub async fn run_process(request: RunRequest) -> Result<ProcessOutput, RunnerErr
         return Err(RunnerError::Cancelled);
     }
     let mut command = Command::new(&request.program);
+    if let Some(directory) = &request.directory {
+        directory.apply(&mut command).map_err(|error| RunnerError::Spawn(error.to_string()))?;
+    }
     // Git runs behind the desktop UI. Piped output alone does not prevent
     // Windows from creating a console for every status/diff/refresh process.
     #[cfg(windows)]
@@ -290,6 +397,21 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn pinned_directory_blocks_target_and_ancestor_renames() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("parent");
+        let target = parent.join("selected");
+        let moved = parent.join("moved");
+        std::fs::create_dir_all(&target).unwrap();
+        let pinned = PinnedDirectory::open(&target).unwrap();
+        assert!(std::fs::rename(&target, &moved).is_err());
+        assert!(std::fs::rename(&parent, root.path().join("other")).is_err());
+        drop(pinned);
+        std::fs::rename(&target, &moved).unwrap();
+    }
     use std::time::Instant;
 
     #[tokio::test]
@@ -448,6 +570,7 @@ mod tests {
                 "-c".into(),
                 "import sys; sys.stdout.buffer.write(b'a'*2000000)".into(),
             ],
+            directory: None,
             extra_env: Vec::new(),
             timeout: Duration::from_secs(10),
             output_limit: 1024,
@@ -477,6 +600,7 @@ mod tests {
         let error = run_process(RunRequest {
             program,
             args: vec!["-c".into(), "import time; time.sleep(30)".into()],
+            directory: None,
             extra_env: Vec::new(),
             timeout: Duration::from_secs(10),
             output_limit: 1024,

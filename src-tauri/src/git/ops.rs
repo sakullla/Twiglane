@@ -16,7 +16,7 @@ use crate::git::gate::{remote_check_is_stale, ActionGate, RemoteChecks};
 use crate::git::locate::{detect_git_binary, validate_git, GitLocator, ResolvedGit};
 use crate::git::parse::parse_status;
 use crate::git::patch::{assign_worktree_numstat, numstat_map, parse_numstat_list};
-use crate::git::runner::{ProcessOutput, RealRunner};
+use crate::git::runner::{PinnedDirectory, ProcessOutput, RealRunner};
 use crate::git::schedule::{
     internal_request_id, CommandSpec, GitJob, GitScheduler, JobKind, ScheduledOutput, WriteGuard,
 };
@@ -234,6 +234,15 @@ pub async fn create_repository(
     path: &str,
     request_id: u64,
 ) -> Result<OpenedRepository, AppError> {
+    create_repository_in(backend, path, request_id, None).await
+}
+
+pub(crate) async fn create_repository_in(
+    backend: &Backend,
+    path: &str,
+    request_id: u64,
+    directory: Option<Arc<PinnedDirectory>>,
+) -> Result<OpenedRepository, AppError> {
     let input = validate_input_path(path)?;
     ensure_directory(&input)?;
     let root = canonical_existing(&input)?;
@@ -261,8 +270,9 @@ pub async fn create_repository(
         Err(Probe::NotRepo) => {}
         Err(Probe::Failed(error)) => return Err(error),
     }
-    let (program, args) = init_command(&git.path, &root);
-    let scheduled = run_git(
+    let working_path = if directory.is_some() { Path::new(".") } else { &root };
+    let (program, args) = init_command(&git.path, working_path);
+    let scheduled = run_git_job(
         backend,
         &repo_key(&root),
         JobKind::Write,
@@ -270,6 +280,8 @@ pub async fn create_repository(
         program,
         args,
         None,
+        false,
+        directory,
     )
     .await?;
     if scheduled.output.exit_code != 0 {
@@ -979,7 +991,7 @@ pub(crate) async fn run_git(
     args: Vec<std::ffi::OsString>,
     generation: Option<u64>,
 ) -> Result<ScheduledOutput, AppError> {
-    run_git_job(backend, repo_key, kind, request_id, program, args, generation, false).await
+    run_git_job(backend, repo_key, kind, request_id, program, args, generation, false, None).await
 }
 
 /// 访问远程的命令：用户可以通过 cancel_remote 中途取消。
@@ -992,7 +1004,7 @@ pub(crate) async fn run_remote_git(
     args: Vec<std::ffi::OsString>,
     generation: Option<u64>,
 ) -> Result<ScheduledOutput, AppError> {
-    run_git_job(backend, repo_key, kind, request_id, program, args, generation, true).await
+    run_git_job(backend, repo_key, kind, request_id, program, args, generation, true, None).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1005,6 +1017,7 @@ async fn run_git_job(
     args: Vec<std::ffi::OsString>,
     generation: Option<u64>,
     remote: bool,
+    directory: Option<Arc<PinnedDirectory>>,
 ) -> Result<ScheduledOutput, AppError> {
     let mut attempt = 0_u64;
     let mut current = generation.unwrap_or_else(|| backend.scheduler.current_generation(repo_key));
@@ -1024,7 +1037,7 @@ async fn run_git_job(
         let result = if remote {
             backend.scheduler.execute_remote(job).await
         } else {
-            backend.scheduler.execute(job).await
+            backend.scheduler.execute_in(job, directory.clone()).await
         };
         match result {
             Err(error) if error.code == "stale" && generation.is_none() && attempt < 2 => {

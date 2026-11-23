@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::sync::{Mutex, OwnedMutexGuard, Semaphore};
 
 use crate::error::AppError;
-use crate::git::runner::{ProcessOutput, ProcessRunner, RunRequest, RunnerError};
+use crate::git::runner::{PinnedDirectory, ProcessOutput, ProcessRunner, RunRequest, RunnerError};
 use crate::shutdown::Shutdown;
 
 pub const MAX_CONCURRENT_READS: usize = 2;
@@ -143,7 +143,13 @@ impl<R: ProcessRunner> GitScheduler<R> {
     }
 
     pub async fn execute(&self, job: GitJob) -> Result<ScheduledOutput, AppError> {
-        self.run_job(job, false).await
+        self.execute_in(job, None).await
+    }
+
+    pub async fn execute_in(
+        &self, job: GitJob, directory: Option<Arc<PinnedDirectory>>,
+    ) -> Result<ScheduledOutput, AppError> {
+        self.run_job(job, false, directory).await
     }
 
     /// Keep one cancellation epoch across a multi-repository read. Inner steps
@@ -200,7 +206,7 @@ impl<R: ProcessRunner> GitScheduler<R> {
 
     /// 与 execute 相同，但这条命令会访问远程：可由 cancel_remote 中途停止（排队中或运行中）。
     pub async fn execute_remote(&self, job: GitJob) -> Result<ScheduledOutput, AppError> {
-        self.run_job(job, true).await
+        self.run_job(job, true, None).await
     }
 
     /// Bounded streaming consumers share the same permits, cancellation and timeout.
@@ -277,7 +283,9 @@ impl<R: ProcessRunner> GitScheduler<R> {
         Ok(result)
     }
 
-    async fn run_job(&self, job: GitJob, remote: bool) -> Result<ScheduledOutput, AppError> {
+    async fn run_job(
+        &self, job: GitJob, remote: bool, directory: Option<Arc<PinnedDirectory>>,
+    ) -> Result<ScheduledOutput, AppError> {
         if self.shutdown.is_cancelled() {
             return Err(AppError::new("cancelled", "操作已取消。"));
         }
@@ -332,6 +340,7 @@ impl<R: ProcessRunner> GitScheduler<R> {
             .run(RunRequest {
                 program: job.program,
                 args: job.args,
+                directory,
                 extra_env: self.extra_env.iter().cloned().chain(job.env).collect(),
                 timeout: self.timeout,
                 output_limit: job.output_limit.unwrap_or(self.output_limit),
@@ -395,6 +404,7 @@ impl<'a, R: ProcessRunner> WriteGuard<'a, R> {
             .run(RunRequest {
                 program: spec.program,
                 args: spec.args,
+                directory: None,
                 extra_env: self.scheduler.extra_env.clone(),
                 timeout: self.scheduler.timeout,
                 output_limit: spec.output_limit.unwrap_or(self.scheduler.output_limit),

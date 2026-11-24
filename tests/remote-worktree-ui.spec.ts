@@ -174,6 +174,56 @@ it("closes a late native open result without replacing the newer SSH worktree", 
   expect(remoteRepositoryState(keyB)).toMatchObject({ connected: true });
 });
 
+it.each(["recent", "project", "linked"])("forwards SSH progress and cancels the exact %s shortcut without replacing its anchor", async (route) => {
+  await openHost();
+  const path = "/srv/other";
+  const key = remoteRepositoryKey(hostA.targetId, path);
+  port.call.mockResolvedValueOnce({ repo: "repo-a", worktrees: { items: [{ path, missing: false }] } });
+  port.cancelOpen.mockResolvedValue(undefined);
+  const started = deferred<void>();
+  const reply = deferred<ReturnType<typeof opened>>();
+  const progress = { phase: "installing", sentBytes: 1, totalBytes: 10 };
+  let lateProgress!: () => void;
+  port.open.mockImplementationOnce((_request, notify) => {
+    notify(progress);
+    lateProgress = () => notify({ phase: "opening" });
+    started.resolve();
+    return reply.promise;
+  });
+  const controller = new AbortController();
+  const feedback = { signal: controller.signal, onProgress: vi.fn(), onAdopting: vi.fn() };
+  const opening = route === "recent" ? api.openRepository(key, 2, feedback)
+    : route === "project" ? api.openRemoteProjectRepository(key, "project-host", feedback)
+    : api.openLinkedWorktree(keyA, path, feedback);
+  await started.promise;
+  const request = port.open.mock.lastCall![0];
+  expect(request).toMatchObject({ path, targetId: hostA.targetId, targetRevision: hostA.targetRevision, allowInstall: false });
+  if (route === "project") expect(request.projectHostId).toBe("project-host");
+  expect(feedback.onProgress).toHaveBeenCalledExactlyOnceWith(progress);
+  controller.abort();
+  lateProgress();
+  expect(port.cancelOpen).toHaveBeenCalledExactlyOnceWith(request.requestId);
+  expect(feedback.onProgress).toHaveBeenCalledTimes(1);
+  reply.resolve(opened("late-session", snapshot({ repo: "late", root: path })));
+  await expect(opening).rejects.toMatchObject({ code: "cancelled" });
+  expect(port.close).toHaveBeenCalledWith("late-session");
+  expect(feedback.onAdopting).not.toHaveBeenCalled();
+  expect(remoteRepositoryState(keyA)).toMatchObject({ connected: true, connectionId: "session-a" });
+});
+
+it("cancelling during SSH host lookup keeps a newer shortcut selected", async () => {
+  const preflight = deferred<typeof hostA[]>();
+  const controller = new AbortController();
+  port.targets.mockReturnValueOnce(preflight.promise);
+  const first = api.openRepository(keyA, 1, { signal: controller.signal });
+  controller.abort();
+  await openHost(hostB, keyB, "selected", snapshot({ repo: "repo-b" }));
+  preflight.resolve([hostA, hostB]);
+  await expect(first).rejects.toMatchObject({ code: "cancelled" });
+  expect(port.open).toHaveBeenCalledTimes(1);
+  expect(remoteRepositoryState(keyB)).toMatchObject({ connected: true, connectionId: "selected" });
+});
+
 it("finishes an SSH clone in the background without replacing a newer worktree", async () => {
   await openHost();
   const clone = deferred<ReturnType<typeof opened>>();

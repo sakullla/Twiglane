@@ -1203,7 +1203,10 @@ describe("远端仓库在主窗口：最近记录与草稿", () => {
     await switchRepo("worktree", /demo/);
     await waitFor(() => expect(mocks.api.openRepository).toHaveBeenCalledWith("C:/work/demo", expect.any(Number)));
     await switchRepo("demo", /worktree/);
-    await waitFor(() => expect(mocks.api.openRepository).toHaveBeenCalledWith(REMOTE_KEY, expect.any(Number)));
+    await waitFor(() => expect(mocks.api.openRepository).toHaveBeenCalledWith(
+      REMOTE_KEY, expect.any(Number),
+      expect.objectContaining({ onProgress: expect.any(Function), signal: expect.any(AbortSignal) }),
+    ));
     await screen.findByRole("button", { name: "当前仓库 worktree" });
 
     await fireEvent.click(screen.getByRole("button", { name: "当前仓库 worktree" }));
@@ -1232,7 +1235,10 @@ describe("远端仓库在主窗口：最近记录与草稿", () => {
     await switchRepo("worktree", /demo/);
     await waitFor(() => expect(mocks.api.openRepository).toHaveBeenCalledWith("C:/work/demo", expect.any(Number)));
     await switchRepo("demo", /worktree/);
-    await waitFor(() => expect(mocks.api.openRepository).toHaveBeenCalledWith(REMOTE_KEY, expect.any(Number)));
+    await waitFor(() => expect(mocks.api.openRepository).toHaveBeenCalledWith(
+      REMOTE_KEY, expect.any(Number),
+      expect.objectContaining({ onProgress: expect.any(Function), signal: expect.any(AbortSignal) }),
+    ));
 
     await waitFor(() => {
       const back = screen.getByRole("textbox", { name: "提交说明草稿" }) as HTMLTextAreaElement;

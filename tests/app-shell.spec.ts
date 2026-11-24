@@ -10,6 +10,8 @@ import {
 } from "../src/lib/cliora-review.svelte";
 import { CHANGES_SCOPE, markReviewedIn, resetReviewProgress } from "../src/lib/review-progress.svelte";
 import type { DiffLine, DiffResponse, FileChange, HistoryCommit, StatusSnapshot, WorktreeItem } from "../src/lib/types";
+import type { RemoteConnectionProgress } from "../src/lib/remote-worktree";
+import type { RemoteOpenFeedback } from "../src/lib/api";
 
 /* ------------------------------------------------------------------ *
  * App 级夹具：真实 api 由 vi.mock 顶替，界面走完整外壳。
@@ -2998,6 +3000,49 @@ describe("应用外壳", () => {
       expect(mocks.closeRemoteRepository).not.toHaveBeenCalled();
     });
 
+    it("SSH 连接在首个回执前显示耗时，区分上传与安装确认，失败后丢弃旧进度", async () => {
+      await openRemoteRepo();
+      let progress!: (value: RemoteConnectionProgress) => void;
+      let fail!: (reason: unknown) => void;
+      mocks.openRemoteRepository.mockImplementationOnce((_location, options) => new Promise((_resolve, reject) => {
+        progress = options.onProgress;
+        fail = reject;
+      }));
+      const palette = await openPalette();
+      await fireEvent.click(within(palette).getByRole("option", { name: /^打开远端仓库/ }));
+      const dialog = within(await screen.findByRole("dialog", { name: "打开远端仓库" }));
+      await dialog.findByRole("option", { name: /构建主机 A/ });
+      const open = dialog.getByRole("button", { name: "打开仓库" });
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "performance"] });
+      try {
+        let ready!: () => void;
+        mocks.cancelReads.mockReturnValueOnce(new Promise<void>((resolve) => { ready = resolve; }));
+        await fireEvent.click(open);
+        expect(dialog.getByText("正在准备连接…")).toBeTruthy();
+        expect(dialog.getByRole("button", { name: "关闭对话框" }).title).toContain("连接完成后才能关闭");
+        ready();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(dialog.getByText("正在连接主机…")).toBeTruthy();
+        await vi.advanceTimersByTimeAsync(3000);
+        expect(dialog.getByRole("timer").textContent).toContain("已等待 3 秒");
+        progress({ phase: "installing", sentBytes: 1024, totalBytes: 2048 });
+        await tick();
+        expect(dialog.getByText(/50% · 已发送 1 KB \/ 2 KB/)).toBeTruthy();
+        progress({ phase: "installing", sentBytes: 2048, totalBytes: 2048 });
+        await tick();
+        expect(dialog.getByText(/已发送 2 KB \/ 2 KB，等待远端确认安装/)).toBeTruthy();
+        fail({ code: "ssh_failed", message: "远端安装失败" });
+        await dialog.findByRole("alert");
+        expect(dialog.queryByRole("timer")).toBeNull();
+        progress({ phase: "opening" });
+        await tick();
+        expect(dialog.queryByText("正在打开远端工作树…")).toBeNull();
+        expect(dialog.queryByText(/等待远端确认安装/)).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("SSH 创建待确认时只核对旧操作，明确开始后保留确认至安装完成", async () => {
       await openRemoteRepo();
       const id = "90246be1-b60b-4a6b-8069-bab76060e3f1";
@@ -3210,6 +3255,53 @@ describe("应用外壳", () => {
     expect(document.querySelector("[data-welcome-count]")).toBeNull();
     await fireEvent.click(screen.getByRole("button", { name: /repo-1/ }));
     await waitFor(() => expect(mocks.openRepository).toHaveBeenCalledWith("C:/work/repo-1", expect.any(Number)));
+  });
+
+  it("最近 SSH 仓库显示传输阶段和耗时，切换或取消后忽略迟到进度", async () => {
+    const first = "ssh://host-a/srv/first";
+    const second = "ssh://host-b/srv/second";
+    useRecent([{ name: "first", path: first, openedAtMs: 2 }, { name: "second", path: second, openedAtMs: 1 }]);
+    const requests: RemoteOpenFeedback[] = [];
+    mocks.openRepository.mockImplementation((_path, _id, feedback: RemoteOpenFeedback) => {
+      requests.push(feedback);
+      return new Promise(() => {});
+    });
+    render(App);
+    const firstButton = await screen.findByRole("button", { name: /first/ });
+    const secondButton = await screen.findByRole("button", { name: /second/ });
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "performance"] });
+    try {
+      await fireEvent.click(firstButton);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(screen.getByRole("timer").textContent).toContain("已等待 2 秒");
+      requests[0].onProgress?.({ phase: "installing", sentBytes: 64, totalBytes: 256 });
+      await tick();
+      expect(screen.getByText(/已发送 64 B \/ 256 B/)).toBeTruthy();
+      await fireEvent.click(secondButton);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(requests[0].signal?.aborted).toBe(true);
+      requests[0].onProgress?.({ phase: "opening" });
+      requests[1].onProgress?.({ phase: "installing", sentBytes: 32, totalBytes: 32 });
+      await tick();
+      expect(screen.getByText(/32 B \/ 32 B，等待远端确认安装/)).toBeTruthy();
+      expect(screen.queryByText("正在打开远端工作树…")).toBeNull();
+      await fireEvent.click(screen.getByRole("button", { name: "取消读取" }));
+      expect(requests[1].signal?.aborted).toBe(true);
+      requests[1].onProgress?.({ phase: "opening" });
+      await tick();
+      expect(screen.queryByRole("timer")).toBeNull();
+      expect(screen.queryByText("正在打开远端工作树…")).toBeNull();
+      await fireEvent.click(secondButton);
+      await vi.advanceTimersByTimeAsync(0);
+      requests[2].onAdopting?.();
+      await tick();
+      expect(screen.getByRole("button", { name: "取消读取" }).hasAttribute("disabled")).toBe(true);
+      await fireEvent.click(firstButton);
+      expect(requests[2].signal?.aborted).toBe(false);
+      expect(requests).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("起始页数百个最近仓库默认显示前五个，搜索能发现列表外项目并区分同名路径", async () => {

@@ -175,7 +175,8 @@
   let replayTruncated = $state(false);
   let ptyWindows = IS_WINDOWS;
   const inputEncoder = new TextEncoder();
-  let inputTail = Promise.resolve();
+  let inputQueue: { data: string; bytes: number }[] = [];
+  let writingInput = false;
   let inputBytes = 0;
   const IO_BUFFER_LIMIT = 1024 * 1024;
   let lastSize = "";
@@ -191,6 +192,7 @@
   let writeError = $state<string | null>(null);
   $effect(() => {
     if (!connectionLost) return;
+    inputQueue = [];
     running = false;
     starting = false;
     writeError = "SSH 连接已断开，终端已失效。";
@@ -363,6 +365,7 @@
     return () => {
       disposed = true;
       attached = false;
+      inputQueue = [];
       pending = [];
       stopEvents();
       observer?.disconnect();
@@ -500,12 +503,13 @@
     if (remote && event.seq !== lastSeq + 1) return needReplay();
     lastSeq = event.seq;
     running = false;
+    inputQueue = [];
     exitCode = event.exitCode;
     signalName = event.signal;
   }
 
-  async function sendInput(data: string) {
-    if (!attached || connectionLost) return;
+  function sendInput(data: string) {
+    if (!attached || connectionLost || disposed) return;
     if (!running) {
       writeError = "终端已退出，无法继续输入；请重新启动这个会话。";
       return;
@@ -518,20 +522,45 @@
       return;
     }
     inputBytes += size;
-    inputTail = inputTail.then(async () => {
-      try {
-        if (!running || disposed || connectionLost) return;
-        await api.terminalWrite(sessionId, payload);
-        if (!connectionLost) writeError = null;
-      } catch (error) {
-        const failure = normalizeError(error);
-        writeError = failure.message;
-        if (failure.code === "terminal_closed") running = false;
-      } finally {
-        inputBytes -= size;
+    const waiting = remote && inputQueue.at(-1);
+    if (waiting) {
+      waiting.data += payload;
+      waiting.bytes += size;
+    } else {
+      inputQueue.push({ data: payload, bytes: size });
+    }
+    if (!writingInput) void flushInput(sessionId);
+  }
+
+  async function flushInput(id: string) {
+    writingInput = true;
+    try {
+      while (inputQueue.length) {
+        const batch = inputQueue;
+        inputQueue = [];
+        for (const entry of batch) {
+          if (id !== sessionId || !running || disposed || connectionLost) return;
+          try {
+            await api.terminalWrite(id, entry.data);
+            if (!connectionLost) writeError = null;
+          } catch (error) {
+            if (disposed || connectionLost || id !== sessionId) return;
+            const failure = normalizeError(error);
+            writeError = failure.message;
+            if (failure.code === "terminal_closed") running = false;
+            if (remote) {
+              if (inputQueue.length) writeError += " 排队的后续输入未发送。";
+              return;
+            }
+          }
+          inputBytes -= entry.bytes;
+        }
       }
-    });
-    await inputTail;
+    } finally {
+      inputQueue = [];
+      inputBytes = 0;
+      writingInput = false;
+    }
   }
 
   /** 行列变化才发给后端；失败只影响尺寸，不改变会话状态，下一次变化还会再同步。 */

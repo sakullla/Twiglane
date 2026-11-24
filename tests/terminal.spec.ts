@@ -283,7 +283,7 @@ function emit(name: string, payload: unknown) {
   for (const handler of [...(mocks.handlers.get(name) ?? [])]) handler(payload);
 }
 
-async function renderPanel(props: Partial<{ path: string; open: boolean; theme: "light" | "dark"; fontSize: number }> = {}) {
+async function renderPanel(props: Partial<{ path: string; open: boolean; theme: "light" | "dark"; fontSize: number; remoteConnectionId: string }> = {}) {
   const onClose = vi.fn();
   const onFontSize = vi.fn();
   const view = render(TerminalPanel, {
@@ -691,6 +691,54 @@ describe("终端面板", () => {
     await waitFor(() => expect(mocks.api.terminalWrite).toHaveBeenCalledWith("s1", "npm test\r"));
     term.resizeHandlers[0]({ rows: 32, cols: 110 });
     await waitFor(() => expect(mocks.api.terminalResize).toHaveBeenCalledWith("s1", 32, 110));
+  });
+
+  it("SSH 输入首键立即发，1 秒回执延迟下连续 20 个字符只写两批", async () => {
+    await renderPanel({ path: "ssh://host/srv/demo", remoteConnectionId: "ssh-1" });
+    const term = await waitForTerminal();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    mocks.api.terminalWrite.mockImplementationOnce(() => new Promise<void>((resolve) => setTimeout(resolve, 1000)));
+    const inputs = Array.from("a0123456789中文🎉\x1b[A\x03x\r");
+    expect(inputs).toHaveLength(20);
+    for (const input of inputs) term.dataHandlers[0](input);
+    expect(mocks.api.terminalWrite.mock.calls).toEqual([["s1", "a"]]);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(mocks.api.terminalWrite).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mocks.api.terminalWrite.mock.calls).toEqual([["s1", "a"], ["s1", inputs.slice(1).join("")]]);
+  });
+
+  it("SSH 输入按 UTF-8 字节限制积压，写入结果不明时丢弃后续输入", async () => {
+    await renderPanel({ path: "ssh://host/srv/demo", remoteConnectionId: "ssh-1" });
+    const term = await waitForTerminal();
+    let fail!: (reason: unknown) => void;
+    mocks.api.terminalWrite.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
+    term.dataHandlers[0]("a");
+    term.dataHandlers[0]("中文");
+    term.dataHandlers[0]("🎉".repeat(256 * 1024));
+    await screen.findByText(/终端输入队列已满/);
+    fail({ code: "terminal_write", message: "写入回执中断。" });
+    await screen.findByText(/写入回执中断。 排队的后续输入未发送/);
+    expect(mocks.api.terminalWrite.mock.calls).toEqual([["s1", "a"]]);
+    term.dataHandlers[0]("新输入");
+    expect(mocks.api.terminalWrite.mock.calls[1]).toEqual(["s1", "新输入"]);
+  });
+
+  it("SSH 终端退出并重新启动后，旧回执不能把积压输入送入新会话", async () => {
+    await renderPanel({ path: "ssh://host/srv/demo", remoteConnectionId: "ssh-1" });
+    const term = await waitForTerminal();
+    let finish!: () => void;
+    mocks.api.terminalWrite.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    term.dataHandlers[0]("a");
+    term.dataHandlers[0]("\r");
+    emit(TERMINAL_EXIT_EVENT, { sessionId: "s1", seq: 2, exitCode: 0, signal: null });
+    await waitFor(() => expect(document.querySelector("[data-terminal-restart]")).toBeTruthy());
+    await fireEvent.click(document.querySelector<HTMLButtonElement>("[data-terminal-restart]")!);
+    const fresh = await waitForTerminal(1);
+    fresh.dataHandlers[0]("b");
+    finish();
+    await tick();
+    expect(mocks.api.terminalWrite.mock.calls).toEqual([["s1", "a"], ["s2", "b"]]);
   });
 
   it("尺寸请求串行并合并到最新值，失败后同一尺寸仍可重试", async () => {

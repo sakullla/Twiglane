@@ -111,6 +111,7 @@
     batchSummary,
     batchTargets,
     fileNavState,
+    formatBytes,
     hasCommitSummary,
     hueOf,
     orderedRows,
@@ -121,6 +122,8 @@
     type ReviewQueueState,
   } from "./lib/ui";
   import BranchDialog from "./lib/components/BranchDialog.svelte";
+  import RemoteOpenStatus from "./lib/components/RemoteOpenStatus.svelte";
+  import type { RemoteOpenFeedback } from "./lib/api";
   import type { MergeMode } from "./lib/components/MergeSetup.svelte";
   import BranchSwitcher from "./lib/components/BranchSwitcher.svelte";
   import ChangeRequestModal from "./lib/components/ChangeRequestModal.svelte";
@@ -160,6 +163,7 @@
   import {
     isRemoteRepositoryKey,
     parseRemoteRepositoryKey,
+    remoteRepositoryKey,
     normalizeRemotePath,
     remoteReviewPort,
     repositoryBaseName,
@@ -442,6 +446,10 @@
   let pending = $state<string | null>(null);
   let reading = $state(false);
   let readSerial = 0;
+  let remoteRead = $state.raw<{ controller: AbortController; started: number } | null>(null);
+  let remoteReadLabel = $state("");
+  let adoptingRemoteRead = $state(false);
+  onDestroy(() => remoteRead?.controller.abort());
   let dependencyOpen = $state(false);
   let historyPanel = $state<Promise<typeof import("./lib/components/HistoryPanel.svelte")> | null>(null);
   /**
@@ -542,7 +550,7 @@
   let remoteClonePassword = $state("");
   let remoteCloneRemember = $state(false);
   let remoteCloneCanDetach = $state(false);
-  let remoteOpenAttempt: { background: boolean } | null = null;
+  let remoteOpenAttempt = $state.raw<{ background: boolean; started: number } | null>(null);
   let remoteInstall = $state<{ version: string; size: number; confirmationId: string | null; replacePendingProvision?: string } | null>(null);
   let remoteProvisionPending = $state<{ key: string; operationId: string } | null>(null);
   let remoteProgress = $state<string | null>(null);
@@ -926,7 +934,7 @@
     reading: reading || pending === "diff",
     // 与 openRecent 的执行 guard 同源：本地写入与差异续读期间不切换仓库（R11）；
     // 远程操作只是在等网络，切换时先停下它，不挡切换。
-    switchingBlocked: pending !== null && !SWITCH_INTERRUPTIBLE.has(pending),
+    switchingBlocked: adoptingRemoteRead || (pending !== null && !SWITCH_INTERRUPTIBLE.has(pending)),
     upstreamMissing,
     upstreamEditable: opened ? Boolean(opened.snapshot.branch.name) && !opened.snapshot.branch.detached && !opened.snapshot.branch.unborn : false,
     mergeAbortable,
@@ -2183,12 +2191,24 @@
     return confirmEditorLeave("打开另一个工作区");
   }
 
+  async function branchWorktreeGate(path: string): Promise<boolean> {
+    const anchor = opened?.summary.path;
+    const endpoint = anchor && parseRemoteRepositoryKey(anchor);
+    if (!endpoint) return worktreeLeaveGate(path);
+    const target = remoteRepositoryKey(endpoint.hostId, path);
+    if (await worktreeLeaveGate(target) && opened?.summary.path === anchor) {
+      closeTask();
+      void tick().then(() => openRecent(target, undefined, anchor));
+    }
+    return false;
+  }
+
   /**
    * 分支弹层「打开此工作区」：弹层挡不住叠在上面的确认框（点确认框就算点在外面，弹层会收起），
    * 所以有草稿时先收起弹层，交给切换仓库同一条带关卡的打开路径；没有草稿照常由弹层自己打开。
    */
   function switcherWorktreeGate(path: string, anchor?: string): Promise<boolean> {
-    if (!hasLeaveDrafts() || (opened && samePath(opened.summary.path, path))) return Promise.resolve(true);
+    if (!anchor && (!hasLeaveDrafts() || (opened && samePath(opened.summary.path, path)))) return Promise.resolve(true);
     closeSwitcher();
     void tick().then(() => openRecent(path, undefined, anchor));
     return Promise.resolve(false);
@@ -3556,8 +3576,10 @@
     if (value.phase === "provisioning") return remotePickerAction === "clone" ? "正在 SSH 主机上克隆仓库…" : "正在 SSH 主机上创建仓库…";
     if (value.phase === "opening") return "正在打开远端工作树…";
     if (value.totalBytes && value.sentBytes !== undefined) {
-      const percent = Math.round((value.sentBytes / value.totalBytes) * 100);
-      return "正在传输远端组件 " + String(percent) + "%";
+      const size = `${formatBytes(value.sentBytes)} / ${formatBytes(value.totalBytes)}`;
+      return value.sentBytes >= value.totalBytes
+        ? `已发送 ${size}，等待远端确认安装…`
+        : `正在传输远端组件 ${Math.floor(100 * value.sentBytes / value.totalBytes)}% · 已发送 ${size}`;
     }
     return "正在传输并安装远端组件…";
   }
@@ -3678,15 +3700,24 @@
   /** 打开远端仓库并把结果交给主窗口；安装待确认时停在选择层，不假装已打开。 */
   async function attemptRemoteOpen(
     spec: RemoteOpenSpec,
-    options: { allowInstall?: boolean; installConfirmation?: string | null } = {},
+    options: { allowInstall?: boolean; installConfirmation?: string | null; prepare?: () => Promise<boolean> } = {},
   ): Promise<boolean> {
-    const attempt = { background: false };
+    if (adoptingRemoteRead) return false;
+    if (remoteRead) {
+      readSerial += 1;
+      remoteRead.controller.abort();
+      remoteRead = null;
+      reading = false;
+    }
+    const attempt = { background: false, started: performance.now() };
     remoteOpenAttempt = attempt;
     remotePickerBusy = true;
     remotePickerError = null;
-    remoteProgress = null;
+    remoteProgress = options.prepare ? "正在准备连接…" : "正在连接主机…";
     remoteCloneCanDetach = false;
     try {
+      if (options.prepare && !(await options.prepare())) return false;
+      remoteProgress = "正在连接主机…";
       const outcome = await api.openRemoteRepository(
         { kind: "ssh", hostId: spec.hostId, hostRevision: spec.hostRevision, path: spec.path },
         {
@@ -3717,14 +3748,12 @@
           version: outcome.version, size: outcome.size, confirmationId: outcome.confirmationId,
           replacePendingProvision: spec.replacePendingProvision,
         };
-        remoteProgress = null;
         return false;
       }
       if (outcome.kind === "provision_pending") {
         if (attempt.background) notice(outcome.message, "warn");
         else if (remoteOpenAttempt === attempt && spec.provision) {
           remoteInstall = null;
-          remoteProgress = null;
           remotePickerError = outcome.message;
           remoteProvisionPending = {
             key: provisionSelection(spec.hostId, spec.hostRevision, spec.path, spec.provision),
@@ -3752,7 +3781,6 @@
       }
       remoteInstall = null;
       remoteProvisionPending = null;
-      remoteProgress = null;
       remotePickerOpen = false;
       remotePickerError = null;
       clearRemoteCloneFields();
@@ -3776,6 +3804,7 @@
       return false;
     } finally {
       if (remoteOpenAttempt === attempt) {
+        remoteProgress = null;
         remoteOpenAttempt = null;
         remotePickerBusy = false;
         remoteCloneCanDetach = false;
@@ -3791,16 +3820,7 @@
     if (replacePendingProvision && replacePendingProvision !== currentProvisionPending) return;
     const provision = remoteProvision();
     if (!(await confirmEditorLeave("打开远端仓库"))) return;
-    if ((await flushDraft(drafts.path)) === false) return;
-    if (switchBlocked(commandState)) {
-      notice(switchBlockedReason(commandState));
-      return;
-    }
-    try {
-      await api.cancelReads();
-    } catch {
-      // 取消失败不影响打开：远端打开自己不排队本机只读请求。
-    }
+    if (remotePickerBusy || !remotePickerOpen) return;
     const source = remoteReviewSource;
     await attemptRemoteOpen({
       hostId: target.targetId,
@@ -3809,6 +3829,20 @@
       reviewId: source?.reviewId ?? null,
       source,
       ...(source ? {} : { provision, replacePendingProvision, projectHostId: remotePickerProjectHostId ?? undefined }),
+    }, {
+      prepare: async () => {
+        if ((await flushDraft(drafts.path)) === false) return false;
+        if (switchBlocked(commandState)) {
+          notice(switchBlockedReason(commandState));
+          return false;
+        }
+        try {
+          await api.cancelReads();
+        } catch {
+          // 取消失败不影响打开：远端打开自己不排队本机只读请求。
+        }
+        return true;
+      },
     });
   }
 
@@ -4247,6 +4281,9 @@
       if (!(await stopRemoteForSwitch(opened.summary.path))) return;
     }
     const serial = ++readSerial;
+    remoteRead?.controller.abort();
+    remoteRead = isRemoteRepositoryKey(path) ? { controller: new AbortController(), started: performance.now() } : null;
+    remoteReadLabel = "正在准备连接…";
     reading = true;
     stopRefreshIndicator();
     live = "正在读取仓库状态";
@@ -4256,11 +4293,23 @@
       await api.cancelReads();
       if (serial !== readSerial) return;
       const target = anchor ? parseRemoteRepositoryKey(path) : null;
+      const feedback: RemoteOpenFeedback | undefined = remoteRead ? {
+        signal: remoteRead.controller.signal,
+        onProgress: (value) => {
+          if (serial === readSerial && !adoptingRemoteRead) remoteReadLabel = remoteProgressLabel(value);
+        },
+        onAdopting: () => {
+          if (serial !== readSerial) return;
+          adoptingRemoteRead = true;
+          remoteReadLabel = "正在切换到远端工作树…";
+        },
+      } : undefined;
+      remoteReadLabel = "正在连接主机…";
       const request = anchor && target
-        ? api.openLinkedWorktree(anchor, target.path)
+        ? api.openLinkedWorktree(anchor, target.path, feedback)
         : expectedProjectHost
-          ? api.openRemoteProjectRepository(path, expectedProjectHost)
-          : api.openRepository(path, nextId());
+          ? api.openRemoteProjectRepository(path, expectedProjectHost, feedback)
+          : feedback ? api.openRepository(path, nextId(), feedback) : api.openRepository(path, nextId());
       onRequest?.(serial, request);
       const openedRepo = await request;
       if (serial !== readSerial) return;
@@ -4284,14 +4333,18 @@
       showError(error);
     } finally {
       if (serial === readSerial) {
+        remoteRead = null;
+        adoptingRemoteRead = false;
         reading = false;
       }
     }
   }
 
   async function cancelReading() {
-    if (!reading) return;
+    if (!reading || adoptingRemoteRead) return;
     readSerial += 1;
+    remoteRead?.controller.abort();
+    remoteRead = null;
     reading = false;
     live = "已取消读取，没有写入仓库。";
     try {
@@ -5773,10 +5826,16 @@
 
   {#if reading}
     <div class="progress-line" aria-hidden="true"></div>
-    <div class="infobar info" role="status">
+    <div class="infobar info">
       <span class="spinner"></span>
-      <span class="infobar-text">正在读取仓库…</span>
-      <button type="button" class="btn btn-secondary btn-sm" onclick={cancelReading}>取消读取</button>
+      <span class="infobar-text">
+        {#if remoteRead}
+          <RemoteOpenStatus label={remoteReadLabel} started={remoteRead.started} />
+        {:else}
+          <span role="status">正在读取仓库…</span>
+        {/if}
+      </span>
+      <button type="button" class="btn btn-secondary btn-sm" disabled={adoptingRemoteRead} title={adoptingRemoteRead ? "正在完成远端会话切换" : undefined} onclick={cancelReading}>取消读取</button>
     </div>
   {/if}
   {#if gitDiagnostic && !gitDismissed && opened}
@@ -6232,6 +6291,7 @@
     width="min(560px, 100%)"
     description="选择 SSH 主机及其文件系统中的路径。"
     locked={remotePickerBusy}
+    lockedAction={remoteOpenAttempt ? "连接" : "读取主机"}
     onClose={() => void closeRemotePicker()}
   >
     <div class="confirm-body" data-modal-impact="remote-open">
@@ -6336,10 +6396,12 @@
       {#if remoteReviewSource}
         <p class="hint">这条审查绑定原主机与远端工作树；任一项已变化时请从 Cliora 重新发起。</p>
       {/if}
-      {#if remoteProgress}
-        <p class="hint" role="status">{remoteProgress}</p>
+      {#if remoteProgress && remoteOpenAttempt}
+        <p class="hint">
+          <RemoteOpenStatus label={remoteProgress} started={remoteOpenAttempt.started} />
+        </p>
       {/if}
-      {#if remoteInstall}
+      {#if remoteInstall && !remoteProgress}
         <p class="hint" role="status">
           这台主机还没有可用的 Twiglane 远端组件（{remoteInstall.version}，{remoteInstall.size} 字节）。传输需要你确认。
         </p>
@@ -6350,7 +6412,7 @@
       {#if currentProvisionPending && !remoteInstall}
         <p class="hint">请先检查远端目标。已有仓库可用「打开已有仓库」进入。确认可以再次创建或克隆后，再开始新操作。</p>
       {/if}
-      {#if remoteOpenReason}
+      {#if remoteOpenReason && !remoteProgress}
         <p class="hint">{remoteOpenReason}</p>
       {/if}
     </div>
@@ -6615,7 +6677,7 @@
     {branchGroups}
     blockedReason={writeLocked ? switchBlockedReason(commandState) : null}
     onOpened={rememberOpened}
-    beforeOpen={worktreeLeaveGate}
+    beforeOpen={branchWorktreeGate}
     onRecent={replaceLocalRecents}
     {nextId}
   />

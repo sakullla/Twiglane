@@ -939,39 +939,34 @@ async fn upload(
 ) -> Result<()> {
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = ScopedChild::spawn(&mut command).map_err(|_| remote_error("ssh_failed"))?;
-    let mut stdin = child.take_stdin().ok_or_else(|| remote_error("ssh_failed"))?;
+    let stdin = child.take_stdin().ok_or_else(|| remote_error("ssh_failed"))?;
     let stdout = child.take_stdout().ok_or_else(|| remote_error("ssh_failed"))?;
     let stderr = child.take_stderr().ok_or_else(|| remote_error("ssh_failed"))?;
-    let total = artifact.bytes.len() as u64;
-    publish(progress, "installing", Some(0), Some(total));
-    let write = async move {
-        let mut sent = 0;
-        for chunk in artifact.bytes.chunks(64 * 1024) {
-            stdin.write_all(chunk).await.map_err(|_| remote_error("ssh_failed"))?;
-            sent += chunk.len() as u64;
-            publish(progress, "installing", Some(sent), Some(total));
+    let receipt = async {
+        let wait = async { child.wait().await.map_err(|_| remote_error("ssh_failed")) };
+        let (stdout, stderr, status) = tokio::try_join!(
+            bounded_output(stdout, 128 * 1024),
+            bounded_output(stderr, 64 * 1024),
+            wait
+        )?;
+        if !status.success() {
+            return Err(output_error(&stderr));
         }
-        Ok::<_, AppError>(())
+        let receipt: Value = serde_json::from_slice(&stdout)
+            .map_err(|_| AppError::new("remote_protocol", "远端安装回执格式无效。"))?;
+        if receipt["installed"].as_bool() == Some(true)
+            && receipt["agentSha256"].as_str() == Some(&artifact.sha256)
+        {
+            return Ok(());
+        }
+        Err(AppError::new("remote_protocol", "远端安装尚未产生可核实的回执。"))
     };
-    let (written, stdout, stderr, status) = tokio::join!(
-        write,
-        bounded_output(stdout, 128 * 1024),
-        bounded_output(stderr, 64 * 1024),
-        child.wait()
-    );
-    let status = status.map_err(|_| remote_error("ssh_failed"))?;
-    if !status.success() {
-        return Err(output_error(&stderr?));
-    }
-    written?;
-    let receipt: Value = serde_json::from_slice(&stdout?)
-        .map_err(|_| AppError::new("remote_protocol", "远端安装回执格式无效。"))?;
-    if receipt["installed"].as_bool() == Some(true)
-        && receipt["agentSha256"].as_str() == Some(&artifact.sha256)
-    {
-        return Ok(());
-    }
-    Err(AppError::new("remote_protocol", "远端安装尚未产生可核实的回执。"))
+    remote_ssh::upload::transfer(
+        stdin,
+        &artifact.bytes,
+        &|sent, total| publish(progress, "installing", Some(sent), Some(total)),
+        receipt,
+    ).await
 }
 
 fn uuid(value: &str) -> bool {
@@ -1240,24 +1235,19 @@ async fn connect_planned(
         return Ok(Opened::NeedsInstall(Box::new(selected)));
     }
     if needs_install {
-        let install = async {
-            match &plan.route {
-                V2Route::Native(native) => {
-                    let (host, probe) = native.as_ref();
-                    remote_ssh::install_verified_artifact(
-                        access.store, access.ssh, host, &plan.artifact, probe,
-                        &|sent, total| publish(progress, "installing", Some(sent), Some(total)),
-                    ).await
-                }
-                V2Route::Cliora(path) => {
-                    let command = component_command(path, "install-v2", &plan.target.target_id, &plan.peer_revision, &plan.artifact)?;
-                    upload(command, &plan.artifact, progress).await
-                }
+        match &plan.route {
+            V2Route::Native(native) => {
+                let (host, probe) = native.as_ref();
+                remote_ssh::install_verified_artifact(
+                    access.store, access.ssh, host, &plan.artifact, probe,
+                    &|sent, total| publish(progress, "installing", Some(sent), Some(total)),
+                ).await?;
             }
-        };
-        tokio::time::timeout(Duration::from_secs(600), install)
-            .await
-            .map_err(|_| AppError::new("remote_timeout", "远端组件传输超时，可以重试。"))??;
+            V2Route::Cliora(path) => {
+                let command = component_command(path, "install-v2", &plan.target.target_id, &plan.peer_revision, &plan.artifact)?;
+                upload(command, &plan.artifact, progress).await?;
+            }
+        }
     }
     let (agent, session_dir) = match &plan.route {
         V2Route::Native(native) => {

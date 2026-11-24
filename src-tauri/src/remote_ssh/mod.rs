@@ -14,6 +14,7 @@ mod artifact;
 mod config;
 mod password;
 mod transport;
+pub(crate) mod upload;
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -45,7 +46,6 @@ type Managed<'a> = State<'a, Arc<RemoteSsh>>;
 type BackendState<'a> = State<'a, Arc<Backend>>;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(120);
-const INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
 /// 单次命令的诊断输出上限；超限即视为协议异常。
 const DIAGNOSTIC_BYTES: u64 = 256 * 1024;
 const HOST_KEY_FLAG: &str = "--twiglane-ssh-host-key";
@@ -785,48 +785,30 @@ async fn upload_bytes(
 ) -> Result<()> {
     let AgentConnection {
         mut child,
-        mut stdin,
+        stdin,
         stdout,
         stderr,
         folder: _folder,
     } = connection;
-    let total = bytes.len() as u64;
-    progress(0, total);
-    let write = async {
-        let mut sent = 0u64;
-        for chunk in bytes.chunks(64 * 1024) {
-            stdin.write_all(chunk).await.map_err(|_| ssh_failed())?;
-            sent += chunk.len() as u64;
-            progress(sent, total);
-        }
-        // 关闭标准输入等于告诉远端"上传结束"，安装脚本据此开始核对。
-        // 必须显式 drop：try_join 会一直持有已完成的 future，句柄不释放就永远没有 EOF。
-        stdin.shutdown().await.map_err(|_| ssh_failed())?;
-        drop(stdin);
-        Ok::<_, AppError>(())
-    };
-    let joined = async {
+    let receipt = async {
         let read_out = read_bounded(stdout, DIAGNOSTIC_BYTES);
         let read_err = read_bounded(stderr, DIAGNOSTIC_BYTES);
         let wait = async { child.wait().await.map_err(|_| ssh_failed()) };
         let (stdout, stderr, status) = tokio::try_join!(read_out, read_err, wait)?;
-        Ok::<_, AppError>((stdout, stderr, status))
+        verify_install_receipt(&stdout, &stderr, status, digest)
     };
-    let (written, (stdout, stderr, status)) = tokio::time::timeout(INSTALL_TIMEOUT, async {
-        let (written, result) = tokio::join!(write, joined);
-        Ok::<_, AppError>((written, result?))
-    })
-    .await
-    .map_err(|_| timed_out("传输"))??;
-    let stderr = stdout_text(&stderr);
+    upload::transfer(stdin, bytes, progress, receipt).await
+}
+
+fn verify_install_receipt(stdout: &[u8], stderr: &[u8], status: ExitStatus, digest: &str) -> Result<()> {
+    let stderr = stdout_text(stderr);
     if !status.success() {
         return Err(ssh_error(
-            &format!("{stderr}\n{}", stdout_text(&stdout)),
+            &format!("{stderr}\n{}", stdout_text(stdout)),
             status.code(),
         ));
     }
-    written?;
-    let receipt: Value = serde_json::from_slice(&stdout).map_err(|_| {
+    let receipt: Value = serde_json::from_slice(stdout).map_err(|_| {
         AppError::new(
             "remote_protocol",
             "远端安装没有返回可核实的回执，请重新安装。",

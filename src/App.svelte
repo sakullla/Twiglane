@@ -111,6 +111,7 @@
     batchSummary,
     batchTargets,
     fileNavState,
+    formatBytes,
     hasCommitSummary,
     hueOf,
     orderedRows,
@@ -542,10 +543,20 @@
   let remoteClonePassword = $state("");
   let remoteCloneRemember = $state(false);
   let remoteCloneCanDetach = $state(false);
-  let remoteOpenAttempt: { background: boolean } | null = null;
+  let remoteOpenAttempt = $state.raw<{ background: boolean; started: number } | null>(null);
   let remoteInstall = $state<{ version: string; size: number; confirmationId: string | null; replacePendingProvision?: string } | null>(null);
   let remoteProvisionPending = $state<{ key: string; operationId: string } | null>(null);
   let remoteProgress = $state<string | null>(null);
+  let remoteElapsed = $state(0);
+  $effect(() => {
+    const attempt = remoteOpenAttempt;
+    remoteElapsed = 0;
+    if (!attempt) return;
+    const timer = window.setInterval(() => {
+      remoteElapsed = Math.floor((performance.now() - attempt.started) / 1000);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  });
   let remoteReviewSource = $state<RemoteReviewSource | null>(null);
   let remoteReturning = $state(false);
   /** 当前打开的远端仓库键；本机仓库为 null。 */
@@ -3545,8 +3556,10 @@
     if (value.phase === "provisioning") return remotePickerAction === "clone" ? "正在 SSH 主机上克隆仓库…" : "正在 SSH 主机上创建仓库…";
     if (value.phase === "opening") return "正在打开远端工作树…";
     if (value.totalBytes && value.sentBytes !== undefined) {
-      const percent = Math.round((value.sentBytes / value.totalBytes) * 100);
-      return "正在传输远端组件 " + String(percent) + "%";
+      const size = `${formatBytes(value.sentBytes)} / ${formatBytes(value.totalBytes)}`;
+      return value.sentBytes >= value.totalBytes
+        ? `已发送 ${size}，等待远端确认安装…`
+        : `正在传输远端组件 ${Math.floor(100 * value.sentBytes / value.totalBytes)}% · 已发送 ${size}`;
     }
     return "正在传输并安装远端组件…";
   }
@@ -3667,15 +3680,17 @@
   /** 打开远端仓库并把结果交给主窗口；安装待确认时停在选择层，不假装已打开。 */
   async function attemptRemoteOpen(
     spec: RemoteOpenSpec,
-    options: { allowInstall?: boolean; installConfirmation?: string | null } = {},
+    options: { allowInstall?: boolean; installConfirmation?: string | null; prepare?: () => Promise<boolean> } = {},
   ): Promise<boolean> {
-    const attempt = { background: false };
+    const attempt = { background: false, started: performance.now() };
     remoteOpenAttempt = attempt;
     remotePickerBusy = true;
     remotePickerError = null;
-    remoteProgress = null;
+    remoteProgress = options.prepare ? "正在准备连接…" : "正在连接主机…";
     remoteCloneCanDetach = false;
     try {
+      if (options.prepare && !(await options.prepare())) return false;
+      remoteProgress = "正在连接主机…";
       const outcome = await api.openRemoteRepository(
         { kind: "ssh", hostId: spec.hostId, hostRevision: spec.hostRevision, path: spec.path },
         {
@@ -3706,14 +3721,12 @@
           version: outcome.version, size: outcome.size, confirmationId: outcome.confirmationId,
           replacePendingProvision: spec.replacePendingProvision,
         };
-        remoteProgress = null;
         return false;
       }
       if (outcome.kind === "provision_pending") {
         if (attempt.background) notice(outcome.message, "warn");
         else if (remoteOpenAttempt === attempt && spec.provision) {
           remoteInstall = null;
-          remoteProgress = null;
           remotePickerError = outcome.message;
           remoteProvisionPending = {
             key: provisionSelection(spec.hostId, spec.hostRevision, spec.path, spec.provision),
@@ -3741,7 +3754,6 @@
       }
       remoteInstall = null;
       remoteProvisionPending = null;
-      remoteProgress = null;
       remotePickerOpen = false;
       remotePickerError = null;
       clearRemoteCloneFields();
@@ -3765,6 +3777,7 @@
       return false;
     } finally {
       if (remoteOpenAttempt === attempt) {
+        remoteProgress = null;
         remoteOpenAttempt = null;
         remotePickerBusy = false;
         remoteCloneCanDetach = false;
@@ -3780,16 +3793,7 @@
     if (replacePendingProvision && replacePendingProvision !== currentProvisionPending) return;
     const provision = remoteProvision();
     if (!(await confirmEditorLeave("打开远端仓库"))) return;
-    if ((await flushDraft(drafts.path)) === false) return;
-    if (switchBlocked(commandState)) {
-      notice(switchBlockedReason(commandState));
-      return;
-    }
-    try {
-      await api.cancelReads();
-    } catch {
-      // 取消失败不影响打开：远端打开自己不排队本机只读请求。
-    }
+    if (remotePickerBusy || !remotePickerOpen) return;
     const source = remoteReviewSource;
     await attemptRemoteOpen({
       hostId: target.targetId,
@@ -3798,6 +3802,20 @@
       reviewId: source?.reviewId ?? null,
       source,
       ...(source ? {} : { provision, replacePendingProvision, projectHostId: remotePickerProjectHostId ?? undefined }),
+    }, {
+      prepare: async () => {
+        if ((await flushDraft(drafts.path)) === false) return false;
+        if (switchBlocked(commandState)) {
+          notice(switchBlockedReason(commandState));
+          return false;
+        }
+        try {
+          await api.cancelReads();
+        } catch {
+          // 取消失败不影响打开：远端打开自己不排队本机只读请求。
+        }
+        return true;
+      },
     });
   }
 
@@ -6219,6 +6237,7 @@
     width="min(560px, 100%)"
     description="选择 SSH 主机及其文件系统中的路径。"
     locked={remotePickerBusy}
+    lockedAction={remoteOpenAttempt ? "连接" : "读取主机"}
     onClose={() => void closeRemotePicker()}
   >
     <div class="confirm-body" data-modal-impact="remote-open">
@@ -6324,9 +6343,12 @@
         <p class="hint">这条审查绑定原主机与远端工作树；任一项已变化时请从 Cliora 重新发起。</p>
       {/if}
       {#if remoteProgress}
-        <p class="hint" role="status">{remoteProgress}</p>
+        <p class="hint">
+          <span role="status">{remoteProgress}</span>
+          {#if remoteElapsed > 0}<span role="timer"> · 已等待 {remoteElapsed} 秒</span>{/if}
+        </p>
       {/if}
-      {#if remoteInstall}
+      {#if remoteInstall && !remoteProgress}
         <p class="hint" role="status">
           这台主机还没有可用的 Twiglane 远端组件（{remoteInstall.version}，{remoteInstall.size} 字节）。传输需要你确认。
         </p>
@@ -6337,7 +6359,7 @@
       {#if currentProvisionPending && !remoteInstall}
         <p class="hint">请先检查远端目标。已有仓库可用「打开已有仓库」进入。确认可以再次创建或克隆后，再开始新操作。</p>
       {/if}
-      {#if remoteOpenReason}
+      {#if remoteOpenReason && !remoteProgress}
         <p class="hint">{remoteOpenReason}</p>
       {/if}
     </div>

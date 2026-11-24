@@ -10,6 +10,7 @@ import {
 } from "../src/lib/cliora-review.svelte";
 import { CHANGES_SCOPE, markReviewedIn, resetReviewProgress } from "../src/lib/review-progress.svelte";
 import type { DiffLine, DiffResponse, FileChange, HistoryCommit, StatusSnapshot, WorktreeItem } from "../src/lib/types";
+import type { RemoteConnectionProgress } from "../src/lib/remote-worktree";
 
 /* ------------------------------------------------------------------ *
  * App 级夹具：真实 api 由 vi.mock 顶替，界面走完整外壳。
@@ -2968,6 +2969,49 @@ describe("应用外壳", () => {
       expect(screen.queryByRole("dialog", { name: "打开远端仓库" })).toBeNull();
       expect(screen.getByRole("button", { name: /^当前仓库 repo/ })).toBeTruthy();
       expect(mocks.closeRemoteRepository).not.toHaveBeenCalled();
+    });
+
+    it("SSH 连接在首个回执前显示耗时，区分上传与安装确认，失败后丢弃旧进度", async () => {
+      await openRemoteRepo();
+      let progress!: (value: RemoteConnectionProgress) => void;
+      let fail!: (reason: unknown) => void;
+      mocks.openRemoteRepository.mockImplementationOnce((_location, options) => new Promise((_resolve, reject) => {
+        progress = options.onProgress;
+        fail = reject;
+      }));
+      const palette = await openPalette();
+      await fireEvent.click(within(palette).getByRole("option", { name: /^打开远端仓库/ }));
+      const dialog = within(await screen.findByRole("dialog", { name: "打开远端仓库" }));
+      await dialog.findByRole("option", { name: /构建主机 A/ });
+      const open = dialog.getByRole("button", { name: "打开仓库" });
+      vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "performance"] });
+      try {
+        let ready!: () => void;
+        mocks.cancelReads.mockReturnValueOnce(new Promise<void>((resolve) => { ready = resolve; }));
+        await fireEvent.click(open);
+        expect(dialog.getByText("正在准备连接…")).toBeTruthy();
+        expect(dialog.getByRole("button", { name: "关闭对话框" }).title).toContain("连接完成后才能关闭");
+        ready();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(dialog.getByText("正在连接主机…")).toBeTruthy();
+        await vi.advanceTimersByTimeAsync(3000);
+        expect(dialog.getByRole("timer").textContent).toContain("已等待 3 秒");
+        progress({ phase: "installing", sentBytes: 1024, totalBytes: 2048 });
+        await tick();
+        expect(dialog.getByText(/50% · 已发送 1 KB \/ 2 KB/)).toBeTruthy();
+        progress({ phase: "installing", sentBytes: 2048, totalBytes: 2048 });
+        await tick();
+        expect(dialog.getByText(/已发送 2 KB \/ 2 KB，等待远端确认安装/)).toBeTruthy();
+        fail({ code: "ssh_failed", message: "远端安装失败" });
+        await dialog.findByRole("alert");
+        expect(dialog.queryByRole("timer")).toBeNull();
+        progress({ phase: "opening" });
+        await tick();
+        expect(dialog.queryByText("正在打开远端工作树…")).toBeNull();
+        expect(dialog.queryByText(/等待远端确认安装/)).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it("SSH 创建待确认时只核对旧操作，明确开始后保留确认至安装完成", async () => {

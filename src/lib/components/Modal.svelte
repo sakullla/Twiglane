@@ -59,6 +59,7 @@
      * 为真时 Esc、点背板和右上角关闭都不生效，写入结束后恢复。
      */
     locked?: boolean;
+    lockedAction?: string;
     /**
      * 关闭后焦点去处：调用方在打开前记下的有效触发点。
      *
@@ -86,6 +87,7 @@
     task,
     description = "",
     locked = false,
+    lockedAction = "写入",
     returnFocus = null,
     onClose,
     children,
@@ -265,15 +267,15 @@
       </div>
       {#if headExtra}{@render headExtra()}{/if}
       {#if locked}
-        <span class="modal-lock" id={`${titleId}-lock`} role="status" title="写入进行中，完成后才能关闭">
-          <span class="spinner" aria-hidden="true"></span>写入中<span class="sr-only">，完成后才能关闭</span>
+        <span class="modal-lock" id={`${titleId}-lock`} role="status" title={`${lockedAction}进行中，完成后才能关闭`}>
+          <span class="spinner" aria-hidden="true"></span>{lockedAction}中<span class="sr-only">，完成后才能关闭</span>
         </span>
       {/if}
       <button
         type="button"
         class="icon-btn"
         aria-label="关闭对话框"
-        title={locked ? "写入完成后才能关闭" : "关闭（Esc）"}
+        title={locked ? `${lockedAction}完成后才能关闭` : "关闭（Esc）"}
         disabled={locked}
         onclick={close}
       >

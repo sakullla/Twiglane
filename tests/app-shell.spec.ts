@@ -11,6 +11,7 @@ import {
 import { CHANGES_SCOPE, markReviewedIn, resetReviewProgress } from "../src/lib/review-progress.svelte";
 import type { DiffLine, DiffResponse, FileChange, HistoryCommit, StatusSnapshot, WorktreeItem } from "../src/lib/types";
 import type { RemoteConnectionProgress } from "../src/lib/remote-worktree";
+import type { RemoteOpenFeedback } from "../src/lib/api";
 
 /* ------------------------------------------------------------------ *
  * App 级夹具：真实 api 由 vi.mock 顶替，界面走完整外壳。
@@ -3226,6 +3227,53 @@ describe("应用外壳", () => {
     expect(document.querySelector("[data-welcome-count]")).toBeNull();
     await fireEvent.click(screen.getByRole("button", { name: /repo-1/ }));
     await waitFor(() => expect(mocks.openRepository).toHaveBeenCalledWith("C:/work/repo-1", expect.any(Number)));
+  });
+
+  it("最近 SSH 仓库显示传输阶段和耗时，切换或取消后忽略迟到进度", async () => {
+    const first = "ssh://host-a/srv/first";
+    const second = "ssh://host-b/srv/second";
+    useRecent([{ name: "first", path: first, openedAtMs: 2 }, { name: "second", path: second, openedAtMs: 1 }]);
+    const requests: RemoteOpenFeedback[] = [];
+    mocks.openRepository.mockImplementation((_path, _id, feedback: RemoteOpenFeedback) => {
+      requests.push(feedback);
+      return new Promise(() => {});
+    });
+    render(App);
+    const firstButton = await screen.findByRole("button", { name: /first/ });
+    const secondButton = await screen.findByRole("button", { name: /second/ });
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "performance"] });
+    try {
+      await fireEvent.click(firstButton);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(screen.getByRole("timer").textContent).toContain("已等待 2 秒");
+      requests[0].onProgress?.({ phase: "installing", sentBytes: 64, totalBytes: 256 });
+      await tick();
+      expect(screen.getByText(/已发送 64 B \/ 256 B/)).toBeTruthy();
+      await fireEvent.click(secondButton);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(requests[0].signal?.aborted).toBe(true);
+      requests[0].onProgress?.({ phase: "opening" });
+      requests[1].onProgress?.({ phase: "installing", sentBytes: 32, totalBytes: 32 });
+      await tick();
+      expect(screen.getByText(/32 B \/ 32 B，等待远端确认安装/)).toBeTruthy();
+      expect(screen.queryByText("正在打开远端工作树…")).toBeNull();
+      await fireEvent.click(screen.getByRole("button", { name: "取消读取" }));
+      expect(requests[1].signal?.aborted).toBe(true);
+      requests[1].onProgress?.({ phase: "opening" });
+      await tick();
+      expect(screen.queryByRole("timer")).toBeNull();
+      expect(screen.queryByText("正在打开远端工作树…")).toBeNull();
+      await fireEvent.click(secondButton);
+      await vi.advanceTimersByTimeAsync(0);
+      requests[2].onAdopting?.();
+      await tick();
+      expect(screen.getByRole("button", { name: "取消读取" }).hasAttribute("disabled")).toBe(true);
+      await fireEvent.click(firstButton);
+      expect(requests[2].signal?.aborted).toBe(false);
+      expect(requests).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("起始页数百个最近仓库默认显示前五个，搜索能发现列表外项目并区分同名路径", async () => {

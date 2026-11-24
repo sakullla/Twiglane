@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { tick } from "svelte";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import CommandPalette from "../src/lib/components/CommandPalette.svelte";
 import MergeBanner from "../src/lib/components/MergeBanner.svelte";
 import RepoSwitcher from "../src/lib/components/RepoSwitcher.svelte";
@@ -20,6 +20,10 @@ const repos: RecentRepo[] = [
 ];
 
 const repo: RepoSummary = { name: "demo", path: "/work/alpha/demo" };
+
+
+// 命令面板把执行过的命令记进「最近使用」：每个用例从空记录开始，不受上一个用例的执行顺序影响。
+beforeEach(() => globalThis.localStorage?.removeItem("twiglane.paletteRecent"));
 
 describe("仓库弹层", () => {
   function repoProps(overrides: Record<string, unknown> = {}) {
@@ -939,6 +943,35 @@ describe("命令面板", () => {
     expect(document.activeElement, "关闭后焦点回到打开面板前的触发元素").toBe(trigger);
 
     trigger.remove();
+  });
+
+  it("最近使用：执行过且仍可用的命令在空关键词时置顶、不重复，回车再做一次；搜索时按原分组", async () => {
+    const run = vi.fn();
+    const list = [
+      { id: "view.changes", group: "视图", title: "切换到改动", run: vi.fn() },
+      { id: "view.history", group: "视图", title: "切换到提交历史", run },
+      { id: "commit", group: "提交", title: "提交到本地", enabled: false, reason: "暂存区为空", run: vi.fn() },
+    ];
+    globalThis.localStorage?.setItem("twiglane.paletteRecent", JSON.stringify(["commit", "gone", "view.history"]));
+    const view = render(CommandPalette, { props: { open: true, onClose: () => {}, commands: list } as never });
+    const groups = screen.getAllByRole("group").map((group) => group.getAttribute("aria-label"));
+    expect(groups[0]).toBe("最近使用");
+    const recent = within(screen.getByRole("group", { name: "最近使用" })).getAllByRole("option");
+    // 不可用的、已不存在的不置顶；置顶的不在原分组里重复出现。
+    expect(recent.map((option) => option.textContent)).toEqual([expect.stringContaining("切换到提交历史")]);
+    expect(screen.getAllByRole("option").filter((option) => option.textContent?.includes("切换到提交历史"))).toHaveLength(1);
+    expect(recent[0].getAttribute("aria-selected")).toBe("true");
+    await fireEvent.keyDown(screen.getByRole("combobox", { name: "搜索命令" }), { key: "Enter" });
+    expect(run).toHaveBeenCalledTimes(1);
+
+    await fireEvent.input(screen.getByRole("combobox", { name: "搜索命令" }), { target: { value: "切换" } });
+    expect(screen.queryByRole("group", { name: "最近使用" })).toBeNull();
+    view.unmount();
+
+    // 执行过的命令排到最前，旧记录去重。
+    render(CommandPalette, { props: { open: true, onClose: () => {}, commands: list } as never });
+    await fireEvent.click(screen.getByRole("option", { name: "切换到改动" }));
+    expect(JSON.parse(globalThis.localStorage?.getItem("twiglane.paletteRecent") ?? "[]")).toEqual(["view.changes", "view.history", "commit", "gone"]);
   });
 
   it("焦点在选项上时方向键仍移动游标，回车执行当前项", async () => {

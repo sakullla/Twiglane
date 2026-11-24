@@ -568,6 +568,7 @@ const ADDED_COMMAND_IDS = [
   "task.abortMerge",
   "branch.switch",
   "branch.create",
+  "branch.worktree",
   "project.manage",
   "terminal.toggle",
   "terminal.new",
@@ -593,6 +594,7 @@ const ADDED_COMMAND_TITLES = [
   "中止当前操作",
   "切换分支",
   "新建分支",
+  "新建工作区",
   "业务项目",
   "终端",
   "新建终端",
@@ -730,6 +732,8 @@ const appSettings = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // 命令面板的「最近使用」存在 localStorage：每个用例从空记录开始。
+  globalThis.localStorage?.removeItem("twiglane.paletteRecent");
   // cliora 来源是模块级会话状态：上一个用例的跳转不能把「返回 cliora」带进下一个用例。
   resetClioraReview();
   deepLink.handler = null;
@@ -1981,14 +1985,18 @@ describe("应用外壳", () => {
     await fireEvent.keyDown(add, { key: "ArrowDown" });
     await fireEvent.keyDown(document.activeElement!, { key: "ArrowDown" });
     expect(document.activeElement).toBe(create);
-    await fireEvent.keyDown(create, { key: "Tab" });
+    // 本机仓库多一个「新建工作区」，排在最后。
+    const worktree = within(popover).getByRole("button", { name: "新建工作区" });
+    await fireEvent.keyDown(create, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(worktree);
+    await fireEvent.keyDown(worktree, { key: "Tab" });
     expect(document.activeElement, "到底后回到搜索框").toBe(search);
     await fireEvent.keyDown(search, { key: "Tab", shiftKey: true });
-    expect(document.activeElement).toBe(create);
+    expect(document.activeElement).toBe(worktree);
 
     let finish!: (value: StatusSnapshot) => void;
     mocks.fetchRemote.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
-    await fireEvent.keyDown(create, { key: "Escape" });
+    await fireEvent.keyDown(worktree, { key: "Escape" });
     await fireEvent.click(screen.getByRole("button", { name: /^同步/ }));
     await fireEvent.click(screen.getByRole("menuitem", { name: /获取更新/ }));
     await fireEvent.click(screen.getByRole("button", { name: "当前仓库 demo" }));
@@ -1996,8 +2004,28 @@ describe("应用外壳", () => {
     const blocked = within(busy).getByRole("button", { name: "打开本地仓库" }) as HTMLButtonElement;
     expect(blocked.disabled).toBe(true);
     expect(blocked.title).toBe("正在写入，稍后再试");
+    expect((within(busy).getByRole("button", { name: "新建工作区" }) as HTMLButtonElement).disabled).toBe(true);
     finish(snapshot);
     await waitFor(() => expect(blocked.disabled).toBe(false));
+  });
+
+  it("新建工作区：仓库弹层与命令面板都直接打开新建表单并选中「放到新工作区」", async () => {
+    mocks.branchState.mockResolvedValue(branchFixture());
+    render(App);
+    await openRepo();
+    await fireEvent.click(screen.getByRole("button", { name: "当前仓库 demo" }));
+    const popover = await screen.findByRole("dialog", { name: "切换仓库" });
+    await fireEvent.click(within(popover).getByRole("button", { name: "新建工作区" }));
+    const toggle = (await screen.findByRole("checkbox", { name: "放到新工作区" })) as HTMLInputElement;
+    expect(toggle.checked).toBe(true);
+    expect(screen.getByLabelText("工作区位置")).toBeTruthy();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("新建分支")));
+
+    // 普通「新建分支」仍然默认不放进新工作区。
+    await fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("checkbox", { name: "放到新工作区" })).toBeNull());
+    await fireEvent.click(await screen.findByRole("button", { name: "新建分支" }));
+    expect((screen.getByRole("checkbox", { name: "放到新工作区" }) as HTMLInputElement).checked).toBe(false);
   });
 
   it("分支弹层：搜索后切换，只调一次切换并用返回的状态刷新标题栏", async () => {

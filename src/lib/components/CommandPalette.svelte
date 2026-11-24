@@ -1,3 +1,34 @@
+<script module lang="ts">
+  /** 最近从面板执行过的命令 id，新的在前。只存 id：标题、可用性每次都按当前注册表重新判断。 */
+  const RECENT_KEY = "twiglane.paletteRecent";
+  const RECENT_STORED = 20;
+  /** 空关键词时置顶的条数：够覆盖常用的几条，又不把整张命令表往下推太多。 */
+  export const RECENT_SHOWN = 5;
+  export const RECENT_GROUP = "最近使用";
+  /** 不进「最近使用」的条目：随关键词生成的搜索、打开面板本身。 */
+  const RECENT_SKIP = new Set(["palette.searchText", "palette.open"]);
+
+  export function readPaletteRecent(): string[] {
+    try {
+      const parsed: unknown = JSON.parse(globalThis.localStorage?.getItem(RECENT_KEY) ?? "[]");
+      return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function rememberPaletteRecent(id: string): string[] {
+    if (RECENT_SKIP.has(id)) return readPaletteRecent();
+    const next = [id, ...readPaletteRecent().filter((item) => item !== id)].slice(0, RECENT_STORED);
+    try {
+      globalThis.localStorage?.setItem(RECENT_KEY, JSON.stringify(next));
+    } catch {
+      // 存不进去只是下次不置顶，不影响这次执行。
+    }
+    return next;
+  }
+</script>
+
 <script lang="ts">
   import { untrack } from "svelte";
   import { MODIFIER_LABEL } from "../brand";
@@ -54,6 +85,7 @@
   });
 
   let query = $state("");
+  let recentIds = $state<string[]>(readPaletteRecent());
   let active = $state(0);
   let inputEl = $state<HTMLInputElement | null>(null);
   let card = $state<HTMLDivElement | null>(null);
@@ -68,12 +100,31 @@
    * 关键词只参与匹配、不进 DOM 文案：切换仓库的路径因此可搜，但选项上仍只显示仓库名。
    */
   let ranked = $derived.by(() => {
-    if (query.trim() === "") return commands;
+    if (query.trim() === "") return withRecent(commands);
     const hits = rankPalette(commands, query);
     // 搜索时把可用的排在前面（各自按匹配质量排序）：回车执行的第一条不会是一条点不动的命令。
     const ordered = [...hits.filter((item) => enabled(item)), ...hits.filter((item) => !enabled(item))];
     return textSearch ? [...ordered, textSearch] : ordered;
   });
+
+  /**
+   * 空关键词时把最近执行过、现在可用的几条置顶成「最近使用」组，并从原分组里拿掉，不重复出现。
+   * 打开面板后游标落在第一条可用命令上，所以回车就是「再做一次上次的操作」。
+   * 不可用的最近命令不置顶：顶上那条按回车必须能执行。
+   */
+  function withRecent(list: PaletteCommand[]): PaletteCommand[] {
+    if (recentIds.length === 0) return list;
+    const byId = new Map(list.map((item) => [item.id, item]));
+    const recent: PaletteCommand[] = [];
+    for (const id of recentIds) {
+      const item = byId.get(id);
+      if (item && enabled(item)) recent.push(item);
+      if (recent.length === RECENT_SHOWN) break;
+    }
+    if (recent.length === 0) return list;
+    const picked = new Set(recent.map((item) => item.id));
+    return [...recent.map((item) => ({ ...item, group: RECENT_GROUP })), ...list.filter((item) => !picked.has(item.id))];
+  }
 
   /** 分组按首次出现排序，组内保持排序后的先后。 */
   let groups = $derived.by(() => {
@@ -115,6 +166,7 @@
   $effect(() => {
     if (open) {
       query = "";
+      recentIds = readPaletteRecent();
       active = untrack(firstEnabled);
       previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       inputEl?.focus();
@@ -135,6 +187,7 @@
 
   function runCommand(item: PaletteCommand) {
     if (!enabled(item)) return;
+    recentIds = rememberPaletteRecent(item.id);
     item.run();
     onClose();
   }

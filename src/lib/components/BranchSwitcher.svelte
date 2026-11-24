@@ -35,6 +35,8 @@
     onCommand: (id: string) => void;
     /** 「新建分支」：打开分支 modal 并直接展开新建表单；base 是预选起点，name 是带入的分支名。 */
     onCreateBranch: (base?: string, name?: string) => void;
+    /** 搜索无结果时「在新工作区新建」：只有本机仓库才传，远端仓库不给这个入口。 */
+    onCreateWorktree?: (name: string) => void;
     /** 删除分支：走分支管理里统一的删除确认（未合入再确认、同名远程、占用的工作区）。 */
     onDeleteBranch?: (branch: BranchRecord) => void;
     /** 把所点分支合并到当前分支：打开分支合并并预选来源。 */
@@ -73,6 +75,7 @@
     onNotice,
     onCommand,
     onCreateBranch,
+    onCreateWorktree,
     onDeleteBranch,
     onMergeBranch,
     onMergeInto,
@@ -743,6 +746,20 @@
             <Icon name="plus" size={13} />
             <span class="truncate">以「{candidate}」新建分支</span>
           </button>
+          {#if onCreateWorktree}
+            {@const createWorktree = onCreateWorktree}
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm branch-create-match"
+              disabled={blockedReason !== null}
+              title={blockedReason ?? `在新目录里检出新分支「${candidate}」（git worktree），当前工作区不动`}
+              onmousedown={(event) => event.stopPropagation()}
+              onclick={() => createWorktree(candidate)}
+            >
+              <Icon name="layers" size={13} />
+              <span class="truncate">在新工作区新建</span>
+            </button>
+          {/if}
         {/if}
       </div>
     {/if}

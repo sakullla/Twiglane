@@ -1,8 +1,18 @@
 <script lang="ts">
   import { BUSY_REASON } from "../ui";
   import { tick, untrack } from "svelte";
-  import { api, type LinkedWorktreeRemoval } from "../api";
+  import { api, pickDirectory, type LinkedWorktreeRemoval } from "../api";
   import { isRemoteRepositoryKey } from "../remote-worktree";
+  import {
+    joinPath,
+    rememberWorktreeParent,
+    rememberedWorktreeParent,
+    repoParentOf,
+    sameDirectory,
+    splitWorktreeDir,
+    worktreeDirIssue,
+    worktreeFolderName,
+  } from "../worktree-path";
   import { bucketBranches, filterBranches, groupIsOpen, isDefaultBranch, mainBranchNames, trackNameFor } from "../branches";
   import { normalizeError } from "../errors";
   import type { BranchRecord, BranchState, OpenedRepository, RecentRepo, RepoHead, StatusSnapshot } from "../types";
@@ -36,6 +46,8 @@
     startBase?: string;
     /** 和 startCreating 一起给出的新分支名称（例如从分支搜索无结果直接新建时带入）。 */
     startName?: string;
+    /** 和 startCreating 一起给出：表单打开时就选中「放到新工作区」（「新建工作区」入口）。远端仓库忽略。 */
+    startInWorktree?: boolean;
     /** 打开后直接对这个分支弹出删除确认（分支弹层右键「删除」）；列表读完才执行，只执行一次。 */
     startDelete?: { name: string; remote: boolean } | null;
     /** 写锁来自后台克隆：它不碰当前仓库，读取照常，写入仍被拦住。 */
@@ -80,6 +92,7 @@
     startCreating = false,
     startBase = "",
     startName = "",
+    startInWorktree = false,
     startDelete = null,
     backgroundClone = false,
     branchGroups = true,
@@ -115,11 +128,28 @@
   let createBase = $state(untrack(() => (startCreating ? startBase : "")));
   let createCheckout = $state(true);
   /** 新分支放进新的附属工作区（git worktree）：当前工作区不切换、不动未提交改动。只支持本机仓库。 */
-  let createInWorktree = $state(false);
-  /** 新工作区的完整路径；用户没改过时随分支名自动生成。 */
+  let createInWorktree = $state(untrack(() => startCreating && startInWorktree && !isRemoteRepositoryKey(opened.summary.path)));
+  /** 新工作区的完整路径；用户没手改过时 = 父目录 + 随分支名生成的文件夹名。 */
   let worktreeDir = $state("");
   let worktreeDirTouched = $state(false);
+  /** 用「选择目录」挑的父目录，绑定所属仓库；没挑过就用这个仓库上次用的目录，再没有就放在仓库旁边。 */
+  let worktreeParentPick = $state<{ repo: string; path: string } | null>(null);
+  let pickingWorktreeParent = $state(false);
+  let worktreeDirInput = $state<HTMLInputElement | null>(null);
   let worktreeSupported = $derived(!isRemoteRepositoryKey(opened.summary.path));
+  let siblingParent = $derived(repoParentOf(opened.summary.path));
+  let worktreeParent = $derived(
+    worktreeParentPick?.repo === opened.summary.path
+      ? worktreeParentPick.path
+      : (rememberedWorktreeParent(opened.summary.path) ?? siblingParent),
+  );
+  let worktreeTarget = $derived(splitWorktreeDir(worktreeDir));
+  let worktreeIssue = $derived(worktreeDirIssue(worktreeDir, opened.summary.path));
+  /** 位置已经不在仓库旁边（挑过目录、沿用上次的目录或手改过）：给出一键放回。 */
+  let worktreeCustomized = $derived(
+    worktreeDirTouched || !sameDirectory(worktreeParent, siblingParent),
+  );
+  let worktreeBlockReason = $derived(createInWorktree && worktreeSupported ? worktreeIssue : null);
   let renaming = $state<{ name: string; value: string } | null>(null);
   let menu = $state<ContextMenuRequest | null>(null);
   let nameInput = $state<HTMLInputElement | null>(null);
@@ -498,35 +528,45 @@
     return createBase || current.name || current.headOid || "HEAD";
   }
 
-  /** 路径里实际用的分隔符：Windows 路径可能是反斜杠，其余用正斜杠。 */
-  function separatorOf(path: string): string {
-    return path.lastIndexOf("\\") > path.lastIndexOf("/") ? "\\" : "/";
-  }
-
-  /** 默认放在仓库旁边：<仓库所在目录>/<仓库名>-<分支名>，分支名里的 / 换成 -。 */
-  function defaultWorktreeDir(name: string): string {
-    const root = opened.summary.path.replace(/[\\/]+$/, "");
-    const sep = separatorOf(root);
-    const cut = root.lastIndexOf(sep);
-    const parent = cut > 0 ? root.slice(0, cut) : root;
-    const repoName = cut >= 0 ? root.slice(cut + 1) : root;
-    const slug = name.trim().replace(/[\\/:*?"<>|\s]+/g, "-").replace(/^-+|-+$/g, "");
-    return `${parent}${sep}${repoName}-${slug || "worktree"}`;
-  }
-
+  /** 没手改过位置时：父目录 + <仓库名>-<分支名>，随分支名和所选父目录实时更新。 */
   $effect(() => {
-    const name = branchName;
-    if (!worktreeDirTouched) worktreeDir = defaultWorktreeDir(name);
+    const next = joinPath(worktreeParent, worktreeFolderName(opened.summary.path, branchName));
+    if (!worktreeDirTouched) worktreeDir = next;
   });
 
-  /** 把完整路径拆成已存在的父目录与新目录名：后端只在父目录下新建这一层。 */
-  function splitWorktreeDir(path: string): { parent: string; directory: string } | null {
-    const trimmed = path.trim().replace(/[\\/]+$/, "");
-    const cut = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
-    if (cut <= 0 || cut === trimmed.length - 1) return null;
-    const parent = trimmed.slice(0, cut);
-    // 「C:」本身不是目录（是该盘的当前目录）：补上分隔符才是盘符根。
-    return { parent: /^[A-Za-z]:$/.test(parent) ? `${parent}/` : parent, directory: trimmed.slice(cut + 1) };
+  /**
+   * 选择新工作区的父目录：新文件夹建在所选目录里面，所以选的是「放在哪」而不是工作区本身。
+   * 手改过文件夹名时保留那个名字，只换父目录；否则名字继续跟随分支名。
+   */
+  async function chooseWorktreeParent() {
+    if (pickingWorktreeParent || writing) return;
+    const repo = opened.summary.path;
+    const target = splitWorktreeDir(worktreeDir);
+    pickingWorktreeParent = true;
+    let picked: string | null = null;
+    try {
+      picked = await pickDirectory("选择新工作区所在的目录", target?.parent ?? worktreeParent);
+    } catch (error) {
+      errorText = `没有打开文件夹选择器：${normalizeError(error).message}`;
+    } finally {
+      pickingWorktreeParent = false;
+    }
+    if (!picked || opened.summary.path !== repo || !creating || !createInWorktree) return;
+    if (worktreeDirTouched) {
+      worktreeDir = joinPath(picked, target?.directory || worktreeFolderName(repo, branchName));
+    } else {
+      worktreeParentPick = { repo, path: picked };
+    }
+    await tick();
+    worktreeDirInput?.focus();
+  }
+
+  /** 放回仓库旁边，文件夹名重新跟随分支名。 */
+  function resetWorktreeDir() {
+    worktreeParentPick = { repo: opened.summary.path, path: siblingParent };
+    worktreeDirTouched = false;
+    worktreeDir = joinPath(siblingParent, worktreeFolderName(opened.summary.path, branchName));
+    worktreeDirInput?.focus();
   }
 
   async function createBranchInWorktree() {
@@ -534,8 +574,10 @@
     const name = branchName.trim();
     if (!name) return;
     const target = splitWorktreeDir(worktreeDir);
-    if (!target) {
-      errorText = "工作区位置需要是一个完整路径，例如 /Users/me/work/app-feature。未创建工作区。";
+    const issue = worktreeDirIssue(worktreeDir, currentRepo.summary.path);
+    if (issue || !target) {
+      errorText = `${issue ?? "工作区位置无效"}。未创建工作区。`;
+      worktreeDirInput?.focus();
       return;
     }
     const start = startPoint();
@@ -545,6 +587,7 @@
     );
     if (opened.summary.path !== currentRepo.summary.path) return;
     if (!created) return;
+    rememberWorktreeParent(currentRepo.summary.path, target.parent);
     resetCreate();
     onNotice(`已从 ${start} 创建分支 ${name}，并放进新工作区 ${created.path}。当前工作区没有切换。`);
     // 原仓库多了一个分支：先重读列表（打开新工作区失败时对话框仍显示最新状态），再打开新工作区。
@@ -596,6 +639,7 @@
     createBase = "";
     createInWorktree = false;
     worktreeDirTouched = false;
+    worktreeParentPick = null;
   }
 
   /** 创建或取消后收起并清空；表单节点随之消失，焦点交还给「新建分支」按钮。 */
@@ -1277,22 +1321,59 @@
           </div>
         </div>
         {#if createInWorktree && worktreeSupported}
-          <div class="branch-worktree-dir">
-            <label class="label" for="branch-worktree-dir">工作区位置</label>
-            <input
-              id="branch-worktree-dir"
-              class="input"
-              readonly={writing}
-              value={worktreeDir}
-              oninput={(event) => {
-                worktreeDir = (event.currentTarget as HTMLInputElement).value;
-                worktreeDirTouched = true;
-              }}
-              autocomplete="off"
-              spellcheck="false"
-            />
+          <div class="branch-worktree-dir" data-worktree-dir>
+            <div class="branch-worktree-head">
+              <label class="label" for="branch-worktree-dir">工作区位置</label>
+              {#if worktreeCustomized}
+                <button
+                  type="button"
+                  class="btn btn-ghost btn-sm branch-worktree-reset"
+                  title={`放回仓库所在目录 ${siblingParent}，文件夹名重新跟随分支名`}
+                  disabled={writing}
+                  onclick={resetWorktreeDir}
+                >
+                  <Icon name="undo" size={12} />放回仓库旁边
+                </button>
+              {/if}
+            </div>
+            <div class="branch-worktree-input">
+              <input
+                id="branch-worktree-dir"
+                class="input code"
+                readonly={writing}
+                bind:this={worktreeDirInput}
+                value={worktreeDir}
+                aria-invalid={worktreeDirTouched && worktreeIssue ? "true" : undefined}
+                aria-describedby="branch-worktree-preview"
+                oninput={(event) => {
+                  worktreeDir = (event.currentTarget as HTMLInputElement).value;
+                  worktreeDirTouched = true;
+                }}
+                placeholder="新工作区的完整路径"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <button
+                type="button"
+                class="btn btn-secondary"
+                title={writing ? BUSY_REASON : "选一个已有目录，新工作区会建在它里面"}
+                disabled={writing || pickingWorktreeParent}
+                aria-busy={pickingWorktreeParent ? "true" : undefined}
+                onclick={chooseWorktreeParent}
+              >
+                {#if pickingWorktreeParent}<span class="spinner"></span>{:else}<Icon name="folder-open" size={14} />{/if}选择目录…
+              </button>
+            </div>
+            <p id="branch-worktree-preview" class="branch-worktree-preview" class:invalid={worktreeDirTouched && !!worktreeIssue} aria-live="polite">
+              {#if worktreeIssue || !worktreeTarget}
+                <Icon name="alert-circle" size={12} /><span>{worktreeIssue ?? "需要一个完整路径"}</span>
+              {:else}
+                <Icon name="folder-plus" size={12} />
+                <span>在 <code title={worktreeTarget.parent}>{worktreeTarget.parent}</code> 里新建 <code>{worktreeTarget.directory}</code></span>
+              {/if}
+            </p>
           </div>
-          <p class="hint">在这个新目录里检出新分支并打开它；当前工作区、当前分支和未提交改动都保持原样。目录必须还不存在。</p>
+          <p class="hint">新分支检出到这个新文件夹并自动打开；当前工作区、当前分支和未提交改动都保持原样。文件夹必须还不存在。</p>
         {:else}
           <p class="hint">{createCheckout ? "切换沿用分支切换的保护：会覆盖未提交修改时停下，工作区保持原样。" : "只创建分支，当前分支和工作区都不变。"}</p>
         {/if}
@@ -1301,8 +1382,8 @@
           <button
             type="submit"
             class="btn btn-primary"
-            title={blocked ? BUSY_REASON : branchName.trim().length === 0 ? "先填写分支名称" : createInWorktree && worktreeSupported && !worktreeDir.trim() ? "先填写工作区位置" : undefined}
-            disabled={blocked || branchName.trim().length === 0 || (createInWorktree && worktreeSupported && !worktreeDir.trim())}
+            title={blocked ? BUSY_REASON : branchName.trim().length === 0 ? "先填写分支名称" : (worktreeBlockReason ?? undefined)}
+            disabled={blocked || pickingWorktreeParent || branchName.trim().length === 0 || !!worktreeBlockReason}
           >
             <Icon name="plus" size={14} />{createInWorktree && worktreeSupported ? "创建并打开工作区" : createCheckout ? "创建并切换" : "创建分支"}
           </button>

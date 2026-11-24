@@ -1,4 +1,5 @@
 import { hasCommitSummary } from "./ui";
+import { isRemoteRepositoryKey } from "./remote-worktree";
 import type { IconName } from "./icons";
 import { MODIFIER_LABEL } from "./brand";
 import type { CommandView, RecentRepo, TaskModal, Theme } from "./types";
@@ -111,6 +112,8 @@ export interface CommandSpec {
 }
 
 const hasRepo = (state: CommandState) => state.hasRepo;
+/** 新建附属工作区只支持本机仓库：与分支对话框里「放到新工作区」开关的可见条件同源。 */
+export const REMOTE_WORKTREE_REASON = "远端仓库暂不支持新建工作区";
 const hasRepoReason = () => "先打开一个仓库";
 /** 文件视图的入口：要有仓库，并且没在设置里关闭文件视图。 */
 export const FILES_VIEW_OFF = "文件视图已在设置里关闭";
@@ -512,6 +515,14 @@ const TASK_COMMANDS: CommandSpec[] = [
     reason: hasRepoReason,
   },
   {
+    id: "branch.worktree",
+    group: "任务",
+    title: "新建工作区",
+    hint: "在新目录里检出新分支（git worktree），当前工作区不动",
+    available: (state) => state.hasRepo && !isRemoteRepositoryKey(state.currentRepoPath),
+    reason: (state) => (state.hasRepo ? REMOTE_WORKTREE_REASON : "先打开一个仓库"),
+  },
+  {
     id: "task.branch",
     group: "任务",
     title: "分支与标签",
@@ -790,6 +801,7 @@ const PALETTE_ALIASES: Record<string, string> = {
   "task.abortMerge": "abort 取消合并 中止合并 中止变基 中止拣选 中止还原 中止当前操作",
   "branch.switch": "checkout switch branch 检出分支",
   "branch.create": "create new branch 创建分支",
+  "branch.worktree": "worktree add 新工作区 创建工作区 并行开发 新目录",
   "task.branch": "branch tag 管理分支 删除分支 重命名分支 管理标签 新建标签",
   "task.remote": "remote origin url 远端 远程地址",
   "task.settings": "settings preferences 偏好 首选项 配置 应用更新",

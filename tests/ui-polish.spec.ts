@@ -110,6 +110,7 @@ describe("UI/UX 交互与视觉细节", () => {
     const anchor = document.createElement("button");
     document.body.appendChild(anchor);
     const onCreateBranch = vi.fn();
+    const onCreateWorktree = vi.fn();
 
     render(BranchSwitcher, {
       props: {
@@ -124,6 +125,7 @@ describe("UI/UX 交互与视觉细节", () => {
         onNotice: vi.fn(),
         onCommand: vi.fn(),
         onCreateBranch,
+        onCreateWorktree,
         onClose: vi.fn(),
       },
     });
@@ -138,6 +140,9 @@ describe("UI/UX 交互与视觉细节", () => {
     const createBtn = await screen.findByRole("button", { name: "以「feature/new-flow」新建分支" });
     await fireEvent.click(createBtn);
     expect(onCreateBranch).toHaveBeenCalledWith(undefined, "feature/new-flow");
+    // 同一个名字也可以直接放进新工作区（本机仓库才传这个回调）。
+    await fireEvent.click(screen.getByRole("button", { name: "在新工作区新建" }));
+    expect(onCreateWorktree).toHaveBeenCalledWith("feature/new-flow");
     anchor.remove();
   });
 

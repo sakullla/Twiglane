@@ -600,6 +600,8 @@
   let branchCreateBase = $state("");
   /** 从分支搜索无结果直接新建带来的预设名称。 */
   let branchCreateName = $state("");
+  /** 「新建工作区」入口：新建表单直接打开「放到新工作区」。 */
+  let branchCreateWorktree = $state(false);
   /** 指针悬停或焦点停在成功通知条上时暂停自动收起，读到一半不会突然消失。 */
   let toastPaused = $state(false);
   /** 分支弹层右键「删除」：打开分支管理并直接弹出统一的删除确认。 */
@@ -1213,6 +1215,13 @@
         openTask("branch");
         if (taskModal === "branch") branchCreateIntent = true;
         return;
+      case "branch.worktree":
+        openTask("branch");
+        if (taskModal === "branch") {
+          branchCreateIntent = true;
+          branchCreateWorktree = true;
+        }
+        return;
       case "task.abortMerge":
         abortMergeFromShell();
         return;
@@ -1346,12 +1355,13 @@
   }
 
   /** 分支弹层的「新建分支」：和其它入口走同一个命令，只多带一个打开意图。 */
-  function runBranchCreate(base?: string, name?: string) {
+  function runBranchCreate(base?: string, name?: string, inWorktree = false) {
     runFromSwitcher("task.branch");
     if (taskModal === "branch") {
       branchCreateIntent = true;
       branchCreateBase = base ?? "";
       branchCreateName = name ?? "";
+      branchCreateWorktree = inWorktree;
     }
   }
 
@@ -1421,6 +1431,7 @@
     branchCreateIntent = false;
     branchCreateBase = "";
     branchCreateName = "";
+    branchCreateWorktree = false;
     branchDeleteIntent = null;
     taskReturn = null;
     taskModal = task;
@@ -5709,6 +5720,7 @@
       blockedReason={switchBlocked(commandState) ? switchBlockedReason(commandState) : null}
       switchNote={pending !== null && SWITCH_INTERRUPTIBLE.has(pending) ? "正在进行远程操作；切到其他仓库会先停止它，本地提交不受影响。" : null}
       actionReason={writeLocked ? switchBlockedReason(commandState) : null}
+      worktreeReason={commandAvailable(commandById("branch.worktree")!, commandState) ? null : commandReason(commandById("branch.worktree")!, commandState)}
       reviews={reviewSessionSummary()}
       onSelect={(path, anchor) => {
         closeSwitcher();
@@ -5736,6 +5748,7 @@
       onNotice={notice}
       onCommand={runFromSwitcher}
       onCreateBranch={runBranchCreate}
+      onCreateWorktree={isRemoteRepositoryKey(opened.summary.path) ? undefined : (name) => runBranchCreate(undefined, name, true)}
       onDeleteBranch={runBranchDelete}
       onMergeBranch={(name) => {
         closeSwitcher();
@@ -6596,6 +6609,7 @@
     startCreating={branchCreateIntent}
     startBase={branchCreateBase}
     startName={branchCreateName}
+    startInWorktree={branchCreateWorktree}
     startDelete={branchDeleteIntent}
     backgroundClone={pending === "clone"}
     {branchGroups}

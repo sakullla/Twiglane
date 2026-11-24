@@ -110,6 +110,8 @@
     switchNote?: string | null;
     /** 打开、克隆、新建不可用的原因。 */
     actionReason: string | null;
+    /** 「新建工作区」不可用的原因；当前仓库是远端仓库或没有打开仓库时不显示这个入口。 */
+    worktreeReason?: string | null;
     /** 当前会话已有的跨 worktree 审阅进度；没有记录的工作区不虚构完成度。 */
     reviews?: WorktreeReviewSummary[];
     onSelect: (path: string, anchor?: string) => void;
@@ -130,6 +132,7 @@
     blockedReason,
     switchNote = null,
     actionReason,
+    worktreeReason = null,
     reviews = [],
     onSelect,
     onForget,
@@ -140,11 +143,23 @@
     onClose,
   }: Props = $props();
 
-  const ACTIONS: { id: string; label: string; icon: IconName }[] = [
-    { id: "repo.add", label: "打开本地仓库", icon: "folder-open" },
-    { id: "repo.clone", label: "克隆远程仓库", icon: "download" },
-    { id: "repo.create", label: "新建仓库", icon: "folder-plus" },
+  const ACTIONS: { id: string; label: string; icon: IconName; title: string }[] = [
+    { id: "repo.add", label: "打开本地仓库", icon: "folder-open", title: "打开本地仓库" },
+    { id: "repo.clone", label: "克隆远程仓库", icon: "download", title: "克隆远程仓库" },
+    { id: "repo.create", label: "新建仓库", icon: "folder-plus", title: "新建仓库" },
   ];
+  const WORKTREE_ACTION = {
+    id: "branch.worktree",
+    label: "新建工作区",
+    icon: "layers" as IconName,
+    title: "为当前仓库新建一个工作区：在新目录里检出新分支（git worktree），当前工作区不动",
+  };
+  /** 新建工作区跟着当前仓库走：只有打开的是本机仓库时才给这个入口。 */
+  let footActions = $derived(
+    currentPath && !isRemoteRepositoryKey(currentPath)
+      ? [...ACTIONS.map((action) => ({ ...action, reason: actionReason })), { ...WORKTREE_ACTION, reason: actionReason ?? worktreeReason }]
+      : ACTIONS.map((action) => ({ ...action, reason: actionReason })),
+  );
 
   const WIDTH = 540;
   /** 固定行高：工作区两行（名称 + 路径），分组头一行。 */
@@ -710,8 +725,8 @@
   {/snippet}
   {#snippet foot()}
     <div class="switcher-foot">
-      {#each ACTIONS as action (action.id)}
-        <button type="button" class="menu-item switcher-foot-action" disabled={actionReason !== null} title={actionReason ?? action.label} onclick={() => onCommand(action.id)}>
+      {#each footActions as action (action.id)}
+        <button type="button" class="menu-item switcher-foot-action" disabled={action.reason !== null} title={action.reason ?? action.title} onclick={() => onCommand(action.id)}>
           <Icon name={action.icon} size={14} />
           <span>{action.label}</span>
         </button>

@@ -19,8 +19,9 @@ const api = vi.hoisted(() => ({
   removeWorktree: vi.fn(),
   createWorktree: vi.fn(),
 }));
+const pickDirectory = vi.hoisted(() => vi.fn());
 
-vi.mock("../src/lib/api", () => ({ api }));
+vi.mock("../src/lib/api", () => ({ api, pickDirectory }));
 
 import BranchDialog from "../src/lib/components/BranchDialog.svelte";
 
@@ -82,6 +83,8 @@ function branchRecord(name: string, current = false, worktree: string | null = n
 
 beforeEach(() => {
   Object.values(api).forEach((fn) => fn.mockReset());
+  pickDirectory.mockReset();
+  globalThis.localStorage?.clear();
   api.branchState.mockResolvedValue(state);
   api.tagState.mockResolvedValue({ generation: 4, tags: [], snapshot });
   api.createBranchFrom.mockResolvedValue(state);
@@ -262,6 +265,83 @@ describe("分支右键菜单", () => {
     await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));
     await fireEvent.click(screen.getByRole("button", { name: "新建分支" }));
     expect(screen.queryByRole("checkbox", { name: "放到新工作区" })).toBeNull();
+  });
+
+  it("选择目录：新工作区建在所选目录里，文件夹名继续跟随分支名，下次沿用该目录", async () => {
+    api.createWorktree.mockResolvedValue({ path: "/mnt/trees/demo-spike", branch: "spike", generation: 5 });
+    api.openRepository.mockResolvedValue(opened);
+    pickDirectory.mockResolvedValue("/mnt/trees");
+    const repo = { ...opened, summary: { name: "demo", path: "/work/demo" } };
+    const props = { opened: repo, disabled: false, onBusy: vi.fn(), onSnapshot: vi.fn(), onFailure: vi.fn(), onClose: vi.fn(), onNotice: vi.fn(), nextId: () => 7 };
+    const view = render(BranchDialog, { props });
+    await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));
+    await fireEvent.click(screen.getByRole("button", { name: "新建分支" }));
+    await fireEvent.click(screen.getByRole("checkbox", { name: "放到新工作区" }));
+    expect(screen.queryByRole("button", { name: /放回仓库旁边/ })).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: /选择目录/ }));
+    // 对话框从当前位置的父目录打开。
+    expect(pickDirectory).toHaveBeenCalledWith(expect.any(String), "/work");
+    const location = screen.getByLabelText("工作区位置") as HTMLInputElement;
+    await waitFor(() => expect(location.value).toBe("/mnt/trees/demo-worktree"));
+    await fireEvent.input(screen.getByLabelText("新建分支"), { target: { value: "spike" } });
+    expect(location.value).toBe("/mnt/trees/demo-spike");
+    const preview = document.getElementById("branch-worktree-preview");
+    expect(preview?.textContent).toContain("/mnt/trees");
+    expect(preview?.textContent).toContain("demo-spike");
+    await fireEvent.click(screen.getByRole("button", { name: /创建并打开工作区/ }));
+    await waitFor(() => expect(api.createWorktree).toHaveBeenCalledWith("/work/demo", "spike", "feature/ui", "/mnt/trees", "demo-spike", 4, 7));
+    await waitFor(() => expect(api.openRepository).toHaveBeenCalled());
+    view.unmount();
+
+    // 再次新建：沿用上次的目录，并给出放回仓库旁边的入口。
+    render(BranchDialog, { props });
+    await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));
+    await fireEvent.click(screen.getByRole("button", { name: "新建分支" }));
+    await fireEvent.click(screen.getByRole("checkbox", { name: "放到新工作区" }));
+    await fireEvent.input(screen.getByLabelText("新建分支"), { target: { value: "next" } });
+    const again = screen.getByLabelText("工作区位置") as HTMLInputElement;
+    expect(again.value).toBe("/mnt/trees/demo-next");
+    await fireEvent.click(screen.getByRole("button", { name: /放回仓库旁边/ }));
+    expect(again.value).toBe("/work/demo-next");
+    expect(screen.queryByRole("button", { name: /放回仓库旁边/ })).toBeNull();
+  });
+
+  it("手改过文件夹名后选择目录只换父目录；取消选择不改位置", async () => {
+    setup();
+    await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));
+    await fireEvent.click(screen.getByRole("button", { name: "新建分支" }));
+    await fireEvent.input(screen.getByLabelText("新建分支"), { target: { value: "spike" } });
+    await fireEvent.click(screen.getByRole("checkbox", { name: "放到新工作区" }));
+    const location = screen.getByLabelText("工作区位置") as HTMLInputElement;
+    await fireEvent.input(location, { target: { value: "/old/my-tree" } });
+    pickDirectory.mockResolvedValueOnce(null);
+    await fireEvent.click(screen.getByRole("button", { name: /选择目录/ }));
+    await waitFor(() => expect(pickDirectory).toHaveBeenCalledWith(expect.any(String), "/old"));
+    expect(location.value).toBe("/old/my-tree");
+    pickDirectory.mockResolvedValueOnce("D:\\trees");
+    await fireEvent.click(screen.getByRole("button", { name: /选择目录/ }));
+    await waitFor(() => expect(location.value).toBe("D:\\trees\\my-tree"));
+  });
+
+  it("工作区位置不是完整路径时就地说明原因，创建按钮不可用", async () => {
+    setup();
+    await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));
+    await fireEvent.click(screen.getByRole("button", { name: "新建分支" }));
+    await fireEvent.input(screen.getByLabelText("新建分支"), { target: { value: "spike" } });
+    await fireEvent.click(screen.getByRole("checkbox", { name: "放到新工作区" }));
+    const location = screen.getByLabelText("工作区位置") as HTMLInputElement;
+    await fireEvent.input(location, { target: { value: "relative/tree" } });
+    expect(location.getAttribute("aria-invalid")).toBe("true");
+    expect(document.getElementById("branch-worktree-preview")?.textContent).toContain("需要一个完整路径");
+    const submit = screen.getByRole("button", { name: /创建并打开工作区/ }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    expect(submit.title).toContain("需要一个完整路径");
+    await fireEvent.input(location, { target: { value: "" } });
+    expect(submit.title).toBe("先填写工作区位置");
+    await fireEvent.input(location, { target: { value: "/elsewhere/tree" } });
+    expect(location.getAttribute("aria-invalid")).toBeNull();
+    expect(submit.disabled).toBe(false);
+    expect(api.createWorktree).not.toHaveBeenCalled();
   });
 
   it("从当前分支新建时起点落在「当前分支」选项上，不留空下拉", async () => {

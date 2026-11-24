@@ -168,9 +168,10 @@ export async function appVersion(): Promise<string | null> {
   return getVersion();
 }
 
-export async function pickDirectory(title: string): Promise<string | null> {
+/** 选择一个目录；`defaultPath` 是对话框打开时所在的目录（不存在时由系统退回默认位置）。 */
+export async function pickDirectory(title: string, defaultPath?: string): Promise<string | null> {
   const { open } = await import("@tauri-apps/plugin-dialog");
-  const selected = await open({ directory: true, multiple: false, title });
+  const selected = await open({ directory: true, multiple: false, title, ...(defaultPath ? { defaultPath } : {}) });
   return typeof selected === "string" ? selected : null;
 }
 

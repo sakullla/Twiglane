@@ -389,6 +389,7 @@
 /* 左栏搜索框：比 --surface-2 的左栏暗一档，边界继承 .field 的 --control-border。
    主行现在只有搜索、进度胶囊、审阅开关与排列切换，搜索可以安心吃到行内最小宽度。 */
 .file-tools .field { flex: 1; min-width: 0; background: var(--surface); }
+.file-tools > .icon-btn { flex: none; }
 /* 审阅辅助条：低频审阅动作的抽屉——未审阅跳转与隐藏已审阅收在这里，
    静止时收起为一枚 chevron；有审阅进度或正在隐藏已审阅时自动展开。 */
 .review-bar { display: flex; align-items: center; gap: var(--space-6); flex: none; margin: calc(var(--space-6) * -1) var(--space-8) var(--space-8); padding: var(--space-4) var(--space-6); border-radius: var(--radius-sm); background: var(--surface-3); }
@@ -2378,6 +2379,16 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 .file-tree-status { display: flex; align-items: center; gap: var(--space-6); flex: none; margin: 0; padding: 5px var(--space-12); border-bottom: 1px solid var(--border); background: var(--surface-2); color: var(--fg-muted); font-size: var(--text-xs); }
 .file-tree-status > span { min-width: 0; flex: 1; }
 .file-tree-status.danger { color: var(--danger-text); }
+/* 筛选框有词时的一行入口：同一个词改为搜索文件内容（回车同效）。 */
+.file-tree-content-search { display: flex; align-items: center; gap: var(--space-6); flex: none; width: 100%; margin: 0; padding: 5px var(--space-12); border: 0; border-bottom: 1px solid var(--border); background: var(--surface-2); color: var(--accent-text); font: inherit; font-size: var(--text-xs); text-align: left; cursor: pointer; }
+.file-tree-content-search > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-tree-content-search strong { font-weight: 600; }
+.file-tree-content-search kbd { flex: none; }
+.file-tree-content-search:hover { background: var(--accent-soft); }
+.file-tree-content-search:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+/* 文件树选项不是默认值（只看改动、显示忽略、名称降序）时，按钮右上角一个小点提示。 */
+.file-tree-options { position: relative; flex: none; }
+.file-tree-options.modified::after { content: ""; position: absolute; top: 3px; right: 3px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 /* 读取中的占位：比转圈更接近最终形状，读取完成时版面不跳。 */
 .file-tree-skeleton { display: flex; flex-direction: column; gap: 14px; padding: var(--space-12) var(--space-16); }
 .file-tree-skeleton > span, .file-skeleton .sk-code, .file-skeleton .sk-ln { display: block; height: 8px; border-radius: var(--radius-xs); background: var(--surface-3); animation: file-skeleton 1.4s var(--ease) infinite; }

@@ -12,9 +12,13 @@ export async function openSubmenu(menu: HTMLElement, name: string | RegExp): Pro
   return screen.findByRole("menu", { name });
 }
 
-/** 文件树菜单里树级动作的子菜单。 */
-export function openTreeSubmenu(menu: HTMLElement): Promise<HTMLElement> {
-  return openSubmenu(menu, "文件树");
+/**
+ * 文件树的显示选项（只看改动、显示忽略、名称降序、全部折叠、重新读取）：
+ * 点筛选框旁的「文件树选项」按钮，返回弹出的菜单。
+ */
+export async function openTreeOptions(): Promise<HTMLElement> {
+  await fireEvent.click(screen.getByRole("button", { name: "文件树选项" }));
+  return screen.findByRole("menu", { name: "文件树选项" });
 }
 
 /** 当前打开的根菜单（第一层）。 */

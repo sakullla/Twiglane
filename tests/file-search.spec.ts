@@ -1,6 +1,5 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { openTreeSubmenu } from "./helpers/menu";
 
 const repositoryDirectory = vi.hoisted(() => vi.fn());
 const repositoryFileContent = vi.hoisted(() => vi.fn());
@@ -97,13 +96,17 @@ function contentSearch(overrides: Partial<RepositoryContentSearch> = {}): Reposi
   };
 }
 
-/** 全仓库搜索在文件行右键菜单的「文件树」子菜单里；右键普通行会选中它。按路径打开走 Ctrl/⌘ P。 */
+/**
+ * 全仓库搜索的入口在筛选框旁的「搜索文件内容」按钮；先右键一行把它选中（「当前目录」范围据此取目录），
+ * 收起右键菜单后再点按钮。按路径打开走 Ctrl/⌘ P。
+ */
 async function openTreeAction(action: string, rowName: RegExp = /^README\.md$/) {
+  expect(action).toBe("全仓库搜索");
   const tree = await screen.findByRole("tree", { name: "仓库文件" });
   const row = await within(tree).findByRole("treeitem", { name: rowName });
   await fireEvent.contextMenu(row);
-  const sub = await openTreeSubmenu(await screen.findByRole("menu", { name: /的操作$/ }));
-  await fireEvent.click(within(sub).getByRole("menuitem", { name: action }));
+  await fireEvent.keyDown(await screen.findByRole("menu", { name: /的操作$/ }), { key: "Escape" });
+  await fireEvent.click(screen.getByRole("button", { name: "搜索文件内容" }));
 }
 
 type FilesHost = { focusSearch: (mode: "path" | "content") => Promise<void> };
@@ -395,6 +398,22 @@ describe("全仓库文本搜索", () => {
       expect(repositoryContentSearch).toHaveBeenLastCalledWith(repoPath, "panel", { kind: "directory", path: "src" }, false, 200, 4, expect.any(Number)),
     );
     expect(input).toBeTruthy();
+  });
+
+  it("目录右键「在此目录中搜索」直接按当前目录范围打开全文搜索", async () => {
+    treeDirs();
+    repositoryContentSearch.mockResolvedValue(contentSearch());
+    render(RepositoryFiles, { props: viewProps() as never });
+    const tree = await screen.findByRole("tree", { name: "仓库文件" });
+    await fireEvent.contextMenu(await within(tree).findByRole("treeitem", { name: /^src$/ }));
+    await fireEvent.click(within(await screen.findByRole("menu", { name: /的操作$/ })).getByRole("menuitem", { name: "在此目录中搜索…" }));
+    const input = await screen.findByRole("textbox", { name: "全仓库文本搜索" });
+    await waitFor(() => expect(document.activeElement).toBe(input));
+    expect(screen.getByRole("button", { name: "当前目录" }).getAttribute("aria-pressed")).toBe("true");
+    await fireEvent.input(input, { target: { value: "panel" } });
+    await waitFor(() =>
+      expect(repositoryContentSearch).toHaveBeenLastCalledWith(repoPath, "panel", { kind: "directory", path: "src" }, false, 200, 4, expect.any(Number)),
+    );
   });
 });
 

@@ -30,9 +30,28 @@
     commands: PaletteCommand[];
     onClose: () => void;
     placeholder?: string;
+    /**
+     * 搜索文件内容：输入了关键词时，列表末尾多一条「在文件内容中搜索 …」；
+     * 没有匹配的命令时它就是第一条，回车即搜。不传时（没有仓库）不出现。
+     */
+    onSearchText?: (text: string) => void;
   }
 
-  let { open, commands, onClose, placeholder = "输入命令名称，或直接选择" }: Props = $props();
+  let { open, commands, onClose, placeholder = "输入命令名称，或搜索文件内容", onSearchText }: Props = $props();
+
+  /** 搜索文件内容那一条：随关键词生成，不进命令注册表。 */
+  let textSearch = $derived.by((): PaletteCommand | null => {
+    const text = query.trim();
+    if (!text || !onSearchText) return null;
+    const run = onSearchText;
+    return {
+      id: "palette.searchText",
+      group: "搜索",
+      title: `在文件内容中搜索“${text}”`,
+      hint: "在工作区文本里查找，结果按文件分组",
+      run: () => run(text),
+    };
+  });
 
   let query = $state("");
   let active = $state(0);
@@ -52,7 +71,8 @@
     if (query.trim() === "") return commands;
     const hits = rankPalette(commands, query);
     // 搜索时把可用的排在前面（各自按匹配质量排序）：回车执行的第一条不会是一条点不动的命令。
-    return [...hits.filter((item) => enabled(item)), ...hits.filter((item) => !enabled(item))];
+    const ordered = [...hits.filter((item) => enabled(item)), ...hits.filter((item) => !enabled(item))];
+    return textSearch ? [...ordered, textSearch] : ordered;
   });
 
   /** 分组按首次出现排序，组内保持排序后的先后。 */

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { MODIFIER_LABEL } from "../brand";
   import { rememberScroll } from "../checkout-context";
   import { fileTone } from "../file-kind";
   import { FILTER_EXTRA_LIMIT, FILE_ROW_HEIGHT, rowIndex, type ChangeDecorations, type FileSelectionMode, type FileTreeRow, type NameDirection } from "../files.svelte";
@@ -12,8 +13,9 @@
    * 按需目录树：只渲染后端已读到的直接子项，长列表用固定行高虚拟化。
    * 行本身不发起请求，展开、拆分、选择都由文件视图的状态模块决定，组件只上报动作。
    *
-   * 工具条只常驻筛选框。全仓库搜索、只看改动、显示忽略、名称排序、全部折叠与重新读取
-   * 收在行右键菜单的「文件树」子菜单里，不另放常驻图标；按路径打开走 Ctrl/⌘ P。
+   * 工具条：筛选框（只筛路径；有筛选词时回车改为搜索文件内容）、「搜索文件内容」按钮，
+   * 以及「文件树选项」按钮（只看改动、显示忽略、名称排序、全部折叠与重新读取）。
+   * 行右键菜单只放和这一行有关的动作；按路径打开走 Ctrl/⌘ P。
    * 单击目录即展开/折叠（同时选中它，供「当前目录」搜索范围使用），单击文件即打开。
    * 行上不渲染选择框；多选仍用 Ctrl/Shift 与高亮，数量按点中的行。
    */
@@ -42,8 +44,11 @@
     onQuery: (value: string) => void;
     onIncludeIgnored: (next: boolean) => void;
     onChangedOnly?: (next: boolean) => void;
-    /** 打开按路径搜索或全仓库文本搜索：两种搜索各有自己的输入。 */
-    onSearch?: (mode: "path" | "content") => void;
+    /**
+     * 打开按路径搜索或全仓库文本搜索：两种搜索各有自己的输入。
+     * seed 把筛选词带进全文搜索；scope 为 directory 时只搜当前选中的目录。
+     */
+    onSearch?: (mode: "path" | "content", options?: { seed?: string; scope?: "directory" }) => void;
     /** 定位一个树过滤补齐出来的路径（它不在当前已加载的树里）。 */
     onLocate?: (path: string) => void;
     /** 补齐失败后的就地重试：同一个过滤词重发一次全仓库补齐。 */
@@ -266,6 +271,15 @@
       }
       return;
     }
+    if (event.key === "F2" && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+      const current = selectedPath ? rowIndex(rows, selectedPath) : -1;
+      const row = current >= 0 ? rows[current] : null;
+      if (row && onEntryAction && !disabled && selectedRows.length <= 1 && !entryBlockedReason(row)) {
+        event.preventDefault();
+        onEntryAction("move", row);
+      }
+      return;
+    }
     if (event.key === "Escape" && selectedPaths.size > 0) {
       event.preventDefault();
       event.stopPropagation();
@@ -318,41 +332,55 @@
     ? "在访达中显示"
     : "在资源管理器中显示";
 
+  /** 全文搜索的快捷键提示：与命令「全仓库搜索」同一组合键。 */
+  const contentSearchShortcut = `${MODIFIER_LABEL} ⇧ F`;
+
   /**
-   * 「路径」子菜单：复制相对路径、完整路径、名称（目录名或文件名），以及插入到终端；都经 App 的回调反馈。
-   * 这几项使用频率低、彼此相似，收进一个子菜单，不再在顶层平铺四行。
+   * 右键菜单的设计（单项）：
+   *   打开/查看（文件）或 新建与目录内搜索（目录）
+   *   ─ 复制相对路径 / 复制完整路径 / 系统定位
+   *   ─ 重命名或移动 / 复制到 / 删除
+   *   ─ 更多 ▸（复制名称、插入终端、拆成逐级目录、忽略规则）
+   * 常用动作一层直达，只留一个「更多」子菜单；与哪一行无关的树级开关不再塞进行菜单，
+   * 改由筛选框旁的「文件树选项」按钮和空白处右键提供。
    */
-  function pathEntry(row: FileTreeRow, nameLabel: string): ContextMenuEntry[] {
-    const items: ContextMenuEntry[] = [];
-    if (onCopyPath) {
-      const name = row.path.split("/").pop() ?? row.path;
-      items.push(
-        { id: "copy-rel", label: "复制相对路径", icon: "copy", run: () => onCopyPath?.(row.path, "相对路径") },
-        {
-          id: "copy-abs",
-          label: "复制完整路径",
-          icon: "copy",
-          run: () => onCopyPath?.(toAbsolute ? toAbsolute(row.path) : row.path, "完整路径"),
-        },
-        { id: "copy-name", label: nameLabel, icon: "copy", run: () => onCopyPath?.(name, nameLabel.replace("复制", "")) },
-      );
-    }
-    items.push(...terminalEntry([row.path], row.deleted));
-    return items.length > 0 ? [{ id: "path", label: "路径", icon: "link", submenu: items }] : [];
+  function copyPathEntries(row: FileTreeRow): ContextMenuEntry[] {
+    if (!onCopyPath) return [];
+    return [
+      { id: "copy-rel", label: "复制相对路径", icon: "copy", run: () => onCopyPath?.(row.path, "相对路径") },
+      {
+        id: "copy-abs",
+        label: "复制完整路径",
+        icon: "link",
+        run: () => onCopyPath?.(toAbsolute ? toAbsolute(row.path) : row.path, "完整路径"),
+      },
+    ];
+  }
+
+  /**
+   * 系统定位：本机仓库在资源管理器/访达里显示；远端仓库没有本机目录，
+   * 目录本身就在这棵树里，「定位」没有意义，只给文件留「在本机显示临时副本」。
+   */
+  function revealEntries(row: FileTreeRow): ContextMenuEntry[] {
+    if (!onReveal) return [];
+    if (remote && (row.expandable || row.deleted)) return [];
+    return [{
+      id: "reveal",
+      label: remote ? "在本机显示临时副本" : revealLabel,
+      icon: "folder-open",
+      run: () => onReveal?.(row.path, row.expandable),
+    }];
   }
 
   function terminalEntry(paths: string[], deleted = false): ContextMenuEntry[] {
     if (!onInsertToTerminal) return [];
-    return [
-      ...(onCopyPath ? [{ separator: true } as const] : []),
-      {
-        id: "insert-terminal",
-        label: paths.length > 1 ? "插入所选路径到终端" : "插入路径到终端",
-        icon: "terminal",
-        disabledReason: deleted ? "文件已删除，工作区里没有它" : undefined,
-        run: () => onInsertToTerminal?.(paths),
-      },
-    ];
+    return [{
+      id: "insert-terminal",
+      label: paths.length > 1 ? "插入所选路径到终端" : "插入路径到终端",
+      icon: "terminal",
+      disabledReason: deleted ? "文件已删除，工作区里没有它" : undefined,
+      run: () => onInsertToTerminal?.(paths),
+    }];
   }
 
   function copySelected(absolute = false): void {
@@ -380,31 +408,31 @@
     return null;
   }
 
-  /** 结构操作：新建收进子菜单，复制/移动/删除留在顶层。 */
+  /** 新建：目录行与空白处直接列出「新建文件」「新建目录」，不再套一层子菜单。 */
+  function createEntries(target: FileTreeRow): ContextMenuEntry[] {
+    if (!onEntryAction) return [];
+    const blocked = (disabled ? BUSY_REASON : entryBlockedReason(target)) ?? undefined;
+    return [
+      { id: "create-file", label: "新建文件…", icon: "file", disabledReason: blocked, run: () => onEntryAction?.("createFile", target) },
+      { id: "create-directory", label: "新建目录…", icon: "folder-plus", disabledReason: blocked, run: () => onEntryAction?.("createDirectory", target) },
+    ];
+  }
+
+  /** 结构操作：重命名最常用放第一，删除放最后并标红。 */
   function entryActionEntries(row: FileTreeRow): ContextMenuEntry[] {
     if (!onEntryAction) return [];
     const blocked = (disabled ? BUSY_REASON : entryBlockedReason(row)) ?? undefined;
     const run = (action: FileEntryAction) => () => onEntryAction?.(action, row);
     return [
-      {
-        id: "create",
-        label: "新建",
-        icon: "plus",
-        disabledReason: blocked,
-        submenu: [
-          { id: "create-file", label: "文件…", icon: "file", run: run("createFile") },
-          { id: "create-directory", label: "目录…", icon: "folder-plus", run: run("createDirectory") },
-        ],
-      },
+      { id: "move-entry", label: "重命名或移动…", icon: "pencil", shortcut: "F2", disabledReason: blocked, run: run("move") },
       { id: "copy-entry", label: "复制到…", icon: "copy", disabledReason: blocked, run: run("copy") },
-      { id: "move-entry", label: "移动或重命名…", icon: "pencil", disabledReason: blocked, run: run("move") },
       { id: "delete-entry", label: "删除…", icon: "trash", danger: true, shortcut: "Delete", disabledReason: blocked, run: run("delete") },
     ];
   }
 
   /**
-   * 忽略入口：与改动列表同一组两项，收进「忽略」子菜单，按右键目标的路径写规则（目录写入后整棵子树都不再列出）。
-   * 已在忽略范围内的条目不重复写规则，删除墓碑也不需要，整个子菜单灰显并说明原因。
+   * 忽略规则：与改动列表同一组两项，按右键目标的路径写规则（目录写入后整棵子树都不再列出）。
+   * 已在忽略范围内的条目不重复写规则，删除墓碑也不需要，两项灰显并说明原因。
    */
   function ignoreEntries(row: FileTreeRow): ContextMenuEntry[] {
     if (!onIgnore) return [];
@@ -417,16 +445,28 @@
           : row.ignored
             ? "已经处于忽略状态，不会重复写入规则"
             : undefined;
-    return [{
-      id: "ignore",
-      label: "忽略",
-      icon: "eye",
-      disabledReason: blocked,
-      submenu: [
-        { id: "ignore-git", label: "加入 .gitignore", run: () => onIgnore?.(row.path, false) },
-        { id: "ignore-local", label: "仅本地（.git/info/exclude）", run: () => onIgnore?.(row.path, true) },
-      ],
-    }];
+    return [
+      { id: "ignore-git", label: "加入 .gitignore", icon: "eye", disabledReason: blocked, run: () => onIgnore?.(row.path, false) },
+      { id: "ignore-local", label: "仅本地忽略（.git/info/exclude）", icon: "eye", disabledReason: blocked, run: () => onIgnore?.(row.path, true) },
+    ];
+  }
+
+  /** 低频动作收进唯一的「更多」子菜单：复制名称、插入终端、拆成逐级目录与忽略规则。 */
+  function moreEntries(row: FileTreeRow): ContextMenuEntry[] {
+    const items: ContextMenuEntry[] = [];
+    if (onCopyPath) {
+      const name = row.path.split("/").pop() ?? row.path;
+      const what = row.expandable ? "目录名" : "文件名";
+      items.push({ id: "copy-name", label: `复制${what}`, icon: "copy", run: () => onCopyPath?.(name, what) });
+    }
+    items.push(...terminalEntry([row.path], row.deleted));
+    if (row.splittable) items.push({ id: "split", label: "拆成逐级目录", icon: "list", run: () => onSplit(row) });
+    const ignore = ignoreEntries(row);
+    if (ignore.length > 0) {
+      if (items.length > 0) items.push({ separator: true });
+      items.push(...ignore);
+    }
+    return items.length > 0 ? [{ id: "more", label: "更多", icon: "more", submenu: items }] : [];
   }
 
   /** 菜单标题与复制/移动/删除的数量用收敛后的目标，不按未收敛的选中行数。 */
@@ -452,15 +492,10 @@
   }
 
   /**
-   * 树级动作（与右键的是哪一行无关）统一收进「文件树」子菜单：全仓库搜索、显示开关、排序、折叠与重新读取。
-   * 按路径打开有 Ctrl/⌘ P 与命令面板，不再占菜单位置。
+   * 文件树的显示选项（与右键的是哪一行无关）：筛选框旁的「文件树选项」按钮与空白处右键共用这一份。
    */
-  function treeActionEntries(): ContextMenuEntry[] {
+  function viewOptionEntries(): ContextMenuEntry[] {
     const items: ContextMenuEntry[] = [];
-    if (onSearch) {
-      items.push({ id: "content-search", label: "全仓库搜索", icon: "search", run: () => onSearch?.("content") });
-      items.push({ separator: true });
-    }
     if (onChangedOnly) {
       items.push({
         id: "changed-only",
@@ -500,7 +535,7 @@
       disabledReason: loading ? "正在读取目录" : undefined,
       run: onRefresh,
     });
-    return [{ id: "tree", label: "文件树", icon: "list", submenu: items }];
+    return items;
   }
 
   /** 按组拼接：空组跳过，组与组之间放一条分隔线。 */
@@ -524,67 +559,58 @@
     }
     actions.push(...blockedNotes());
 
-    const system: ContextMenuEntry[] = [];
-    if (onReveal) system.push({ id: "reveal-selected", label: remote ? "显示所选远端项目" : revealLabel, icon: "folder-open", run: revealSelected });
     const paths: ContextMenuEntry[] = [];
     if (onCopyPath) {
       paths.push({ id: "copy-selected-rel", label: "复制相对路径", icon: "copy", run: () => copySelected() });
-      paths.push({ id: "copy-selected-abs", label: "复制完整路径", icon: "copy", run: () => copySelected(true) });
+      paths.push({ id: "copy-selected-abs", label: "复制完整路径", icon: "link", run: () => copySelected(true) });
     }
+    if (onReveal && !remote) paths.push({ id: "reveal-selected", label: revealLabel, icon: "folder-open", run: revealSelected });
     paths.push(...terminalEntry(selectedRows.map((row) => row.path)));
-    if (paths.length > 0) system.push({ id: "path", label: "路径", icon: "link", submenu: paths });
 
     return groups(
       [{ heading: `已选 ${batchRows.length} 项` }, ...actions],
-      system,
+      paths,
       [{ id: "clear-selected", label: "取消多选", icon: "x", shortcut: "Esc", run: onClearSelection }],
-      treeActionEntries(),
     );
   }
 
-  /**
-   * 单项菜单只留常用动作，按组排列：
-   * 查看（文件：改动 / 历史）→ 结构操作（新建 ▸ / 复制 / 移动 / 删除）→ 系统与路径（定位 / 默认程序 / 路径 ▸ / 忽略 ▸）→ 文件树 ▸。
-   * 展开/折叠、打开由单击完成，不再重复列在菜单里。
-   */
-  function menuEntries(row: FileTreeRow): ContextMenuEntry[] {
-    if (selectedPaths.has(row.path) && selectedRows.length > 1) return batchMenuEntries();
-    const view: ContextMenuEntry[] = [];
-    if (!row.expandable) {
-      if (onViewDiff && hasChange?.(row.path)) {
-        view.push({ id: "diff", label: "查看改动", icon: "file-diff", run: () => onViewDiff?.(row.path) });
-      }
-      if (onHistory) {
-        view.push({ id: "history", label: "查看文件历史", icon: "history", run: () => onHistory?.(row.path) });
-      }
-    }
-    if (row.splittable) {
-      view.push({ id: "split", label: "拆成逐级目录", icon: "list", run: () => onSplit(row) });
-    }
-
-    const system: ContextMenuEntry[] = [];
-    if (onReveal) system.push({
-      id: "reveal",
-      label: remote ? row.expandable ? "在文件树中定位" : row.deleted ? "在文件树中显示所在目录" : "在本机显示临时副本" : revealLabel,
-      icon: "folder-open",
-      run: () => onReveal?.(row.path, row.expandable),
-    });
-    if (!row.expandable && onOpenDefault) {
-      system.push({
-        id: "open-default",
-        label: remote ? "用本机默认程序打开临时副本" : "用默认程序打开",
-        icon: "file",
-        disabledReason: row.deleted ? "文件已删除，工作区里没有它" : undefined,
-        run: () => onOpenDefault?.(row.path),
-      });
-    }
-    system.push(...pathEntry(row, row.expandable ? "复制目录名" : "复制文件名"));
-    system.push(...ignoreEntries(row));
-
-    return groups(view, entryActionEntries(row), system, treeActionEntries());
+  /** 在这个目录里做全文搜索：右键已经把目录选中，搜索范围用「当前目录」。 */
+  function directorySearchEntries(row: FileTreeRow): ContextMenuEntry[] {
+    if (!onSearch || !row.expandable || row.extra || row.segment) return [];
+    return [{ id: "search-directory", label: "在此目录中搜索…", icon: "search", run: () => onSearch?.("content", { scope: "directory" }) }];
   }
 
-  /** 空白区域右键：面向仓库根目录的新建、系统定位、路径与文件树视图开关，不额外给树顶加按钮。 */
+  function menuEntries(row: FileTreeRow): ContextMenuEntry[] {
+    if (selectedPaths.has(row.path) && selectedRows.length > 1) return batchMenuEntries();
+    const head: ContextMenuEntry[] = [];
+    if (row.expandable) {
+      head.push(...createEntries(row), ...directorySearchEntries(row));
+    } else {
+      if (onViewDiff && hasChange?.(row.path)) {
+        head.push({ id: "diff", label: "查看改动", icon: "file-diff", run: () => onViewDiff?.(row.path) });
+      }
+      if (onHistory) {
+        head.push({ id: "history", label: "查看文件历史", icon: "history", run: () => onHistory?.(row.path) });
+      }
+      if (onOpenDefault) {
+        head.push({
+          id: "open-default",
+          label: remote ? "用本机默认程序打开临时副本" : "用默认程序打开",
+          icon: "file",
+          disabledReason: row.deleted ? "文件已删除，工作区里没有它" : undefined,
+          run: () => onOpenDefault?.(row.path),
+        });
+      }
+    }
+    return groups(
+      head,
+      [...copyPathEntries(row), ...revealEntries(row)],
+      entryActionEntries(row),
+      moreEntries(row),
+    );
+  }
+
+  /** 空白区域右键：仓库根目录的新建与全文搜索、文件树显示选项，以及仓库路径。 */
   function rootMenuEntries(): ContextMenuEntry[] {
     const rootNode = {
       path: "",
@@ -617,32 +643,31 @@
       splittable: false,
       segment: false,
     };
-    const actions: ContextMenuEntry[] = [];
-    if (onEntryAction) {
-      const blocked = disabled ? BUSY_REASON : undefined;
-      actions.push({
-        id: "create",
-        label: "新建",
-        icon: "plus",
-        disabledReason: blocked,
-        submenu: [
-          { id: "create-file", label: "文件…", icon: "file", run: () => onEntryAction?.("createFile", rootRow) },
-          { id: "create-directory", label: "目录…", icon: "folder-plus", run: () => onEntryAction?.("createDirectory", rootRow) },
-        ],
-      });
+    const head = createEntries(rootRow);
+    if (onSearch) {
+      head.push({ id: "content-search", label: "搜索文件内容…", icon: "search", shortcut: contentSearchShortcut, run: () => onSearch?.("content") });
     }
-    const system: ContextMenuEntry[] = [];
-    if (onReveal) system.push({ id: "reveal-root", label: remote ? "在文件树中显示仓库" : revealLabel, icon: "folder-open", run: () => onReveal?.("", true) });
     const paths: ContextMenuEntry[] = [];
     if (onCopyPath && toAbsolute) {
-      paths.push({ id: "copy-root-abs", label: "复制完整路径", icon: "copy", run: () => onCopyPath?.(toAbsolute(""), "仓库路径") });
+      paths.push({ id: "copy-root-abs", label: "复制仓库路径", icon: "link", run: () => onCopyPath?.(toAbsolute(""), "仓库路径") });
     }
+    if (onReveal && !remote) paths.push({ id: "reveal-root", label: revealLabel, icon: "folder-open", run: () => onReveal?.("", true) });
     if (onInsertToTerminal) {
-      if (paths.length > 0) paths.push({ separator: true });
-      paths.push({ id: "insert-root-terminal", label: "插入路径到终端", icon: "terminal", run: () => onInsertToTerminal?.([""]) });
+      paths.push({ id: "insert-root-terminal", label: "插入仓库路径到终端", icon: "terminal", run: () => onInsertToTerminal?.([""]) });
     }
-    if (paths.length > 0) system.push({ id: "path", label: "路径", icon: "link", submenu: paths });
-    return groups(actions, system, treeActionEntries());
+    return groups(head, viewOptionEntries(), paths);
+  }
+
+  /** 筛选框旁的「文件树选项」：只放显示开关、折叠与重新读取。 */
+  function openOptionsMenu(event: MouseEvent): void {
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    menu = { x: rect.left, y: rect.bottom + 4, entries: viewOptionEntries(), label: "文件树选项" };
+  }
+
+  /** 把筛选词带进全文搜索：同一个词，从「筛路径」换成「搜内容」。 */
+  function searchContent(): void {
+    const seed = query.trim();
+    onSearch?.("content", seed ? { seed } : undefined);
   }
 
   function openSelectionMenu(event: MouseEvent): void {
@@ -705,12 +730,18 @@
       data-search-scope="tree"
       aria-label="过滤文件树"
       placeholder={changedOnly ? "筛选改动文件" : "筛选文件"}
-      title="只在已读取的目录树里按路径筛选，不读文件内容；全仓库正文查找在右侧搜索里"
+      title={onSearch ? "按路径筛选目录树，不读文件内容；按 Enter 改为搜索文件内容" : "按路径筛选目录树，不读文件内容"}
       autocomplete="off"
       spellcheck="false"
       value={query}
       oninput={(event) => onQuery((event.currentTarget as HTMLInputElement).value)}
       onkeydown={(event) => {
+        if (event.isComposing) return;
+        if (event.key === "Enter" && query.trim() && onSearch) {
+          event.preventDefault();
+          searchContent();
+          return;
+        }
         if (event.key === "Escape" && query) {
           event.preventDefault();
           onQuery("");
@@ -728,7 +759,34 @@
       </button>
     {/if}
   </div>
+  {#if onSearch}
+    <button
+      type="button"
+      class="icon-btn sm"
+      aria-label="搜索文件内容"
+      title={`搜索文件内容（${contentSearchShortcut}）`}
+      onclick={searchContent}
+    ><Icon name="search" size={14} /></button>
+  {/if}
+  <button
+    type="button"
+    class="icon-btn sm file-tree-options"
+    class:modified={changedOnly || includeIgnored || nameDirection === "desc"}
+    aria-label="文件树选项"
+    aria-haspopup="menu"
+    aria-expanded={menu?.label === "文件树选项"}
+    title="文件树选项：只看改动、显示忽略、排序、折叠与重新读取"
+    onclick={openOptionsMenu}
+  ><Icon name="more" size={14} /></button>
 </div>
+
+{#if query.trim() && onSearch}
+  <button type="button" class="file-tree-content-search" title="在工作区文本里查找这个词，结果按文件分组" onclick={searchContent}>
+    <Icon name="search" size={12} />
+    <span>在文件内容中搜索“<strong>{query.trim()}</strong>”</span>
+    <kbd>Enter</kbd>
+  </button>
+{/if}
 
 {#if selectedRows.length > 0}
   <div class="file-selection-bar">

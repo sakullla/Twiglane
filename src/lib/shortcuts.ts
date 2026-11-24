@@ -39,6 +39,8 @@ const KEY_COMMANDS: Record<string, string> = {
  * 新建终端按物理键 Backquote 识别：Shift 后 key 随键盘布局变成 ~ 或其它字符。
  */
 const SHIFT_KEY_COMMANDS: Record<string, string> = {
+  /** ⌘/Ctrl+Shift+F：与常见编辑器一致的「在文件中搜索」。 */
+  f: "files.search",
   arrowleft: "file.back",
   arrowright: "file.forward",
 };

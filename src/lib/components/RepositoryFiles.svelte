@@ -129,15 +129,23 @@
   }
 
   /** 聚焦某一种搜索的输入框；面板没展开时先展开它。 */
-  export async function focusSearch(mode: "path" | "content"): Promise<void> {
-    searchMode = mode;
+  export async function focusSearch(mode: "path" | "content", seed?: string): Promise<void> {
+    openSearch(mode, seed ? { seed } : undefined);
     // 面板要等这一轮渲染挂上 DOM，焦点才能落在它自己的输入框上。
     await tick();
     const id = mode === "path" ? "file-quick-open" : "file-content-search";
     document.getElementById(id)?.focus();
   }
 
-  function openSearch(mode: "path" | "content"): void {
+  /**
+   * 展开某一种搜索。全文搜索可以带入查询词（筛选框、命令面板），
+   * 也可以指定只搜当前选中的目录（目录右键「在此目录中搜索」）。
+   */
+  function openSearch(mode: "path" | "content", options?: { seed?: string; scope?: "directory" }): void {
+    if (mode === "content") {
+      if (options?.scope) store.setScopeKind(options.scope);
+      if (options?.seed !== undefined && options.seed !== store.contentQuery) store.setContentQuery(options.seed);
+    }
     searchMode = mode;
   }
 

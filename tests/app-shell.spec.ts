@@ -4422,12 +4422,18 @@ describe("文件操作接线（T3）", () => {
     return found;
   }
 
-  /** 「新建文件」在「新建」子菜单里，其余结构操作在顶层。 */
+  /** 结构操作都在顶层：「重命名或移动…」「复制到…」「删除…」；新建在目录行与空白处。 */
   async function menuAction(tree: HTMLElement, path: string, action: string) {
+    if (action === "新建文件") {
+      // 文件行不再列「新建」：在树的空白处右键，于仓库根目录新建（与右键根目录下的文件同一个落点）。
+      expect(row(tree, path)).toBeTruthy();
+      await fireEvent.contextMenu(tree, { clientX: 40, clientY: 400 });
+      await pickMenuItem(await screen.findByRole("menu", { name: "仓库根目录的操作" }), "新建文件…");
+      return;
+    }
     await fireEvent.contextMenu(row(tree, path), { clientX: 40, clientY: 60 });
     await screen.findByRole("menu", { name: /的操作$/ });
-    if (action === "新建文件") await pickMenuItem(rootMenu(), "新建", "文件…");
-    else await pickMenuItem(rootMenu(), action === "移动或重命名" ? "移动或重命名…" : action);
+    await pickMenuItem(rootMenu(), action === "移动或重命名" ? "重命名或移动…" : action);
   }
 
   const entryInput = () => document.querySelector<HTMLInputElement>("[data-entry-input]")!;
@@ -4435,6 +4441,52 @@ describe("文件操作接线（T3）", () => {
 
   afterEach(() => {
     fileEditor.reset();
+  });
+
+  it("搜索文件内容：筛选框回车、命令面板的关键词与 Ctrl+Shift+F 都进入全文搜索", async () => {
+    mocks.repositoryContentSearch.mockImplementation(async (_repo, query) => ({
+      generation: 4,
+      query,
+      scope: "repository",
+      scopePath: null,
+      matches: [],
+      filesScanned: 1,
+      skipped: [],
+      skippedFiles: 0,
+      truncated: false,
+      textTruncated: false,
+      message: null,
+    }));
+    await openFilesView();
+    const contentInput = () => document.getElementById("file-content-search") as HTMLInputElement | null;
+
+    // 筛选框里的词回车后换成搜文件内容，同一个词带进去。
+    const filter = screen.getByRole("textbox", { name: "过滤文件树" });
+    await fireEvent.input(filter, { target: { value: "render" } });
+    await fireEvent.keyDown(filter, { key: "Enter" });
+    await waitFor(() => expect(contentInput()?.value).toBe("render"));
+    await waitFor(() => expect(mocks.repositoryContentSearch.mock.calls.some((call) => call[1] === "render")).toBe(true));
+    await fireEvent.click(screen.getByRole("button", { name: "关闭搜索" }));
+    await screen.findByRole("tree", { name: "仓库文件" });
+
+    // 命令面板：没有命令匹配时，「在文件内容中搜索」就是第一条，回车即搜。
+    await press("k");
+    const palette = await screen.findByRole("dialog", { name: "命令面板" });
+    await fireEvent.input(within(palette).getByRole("combobox", { name: "搜索命令" }), { target: { value: "zq_marker" } });
+    const options = within(palette).getAllByRole("option");
+    expect(options).toHaveLength(1);
+    expect(options[0].getAttribute("aria-selected")).toBe("true");
+    expect(options[0].textContent).toContain("在文件内容中搜索“zq_marker”");
+    await fireEvent.keyDown(palette, { key: "Enter" });
+    await waitFor(() => expect(contentInput()?.value).toBe("zq_marker"));
+    await waitFor(() => expect(mocks.repositoryContentSearch.mock.calls.some((call) => call[1] === "zq_marker")).toBe(true));
+    await fireEvent.click(screen.getByRole("button", { name: "关闭搜索" }));
+    await screen.findByRole("tree", { name: "仓库文件" });
+
+    // Ctrl+Shift+F 直接打开全文搜索并把焦点放进输入框。
+    (document.activeElement as HTMLElement | null)?.blur?.();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "F", ctrlKey: true, shiftKey: true, bubbles: true }));
+    await waitFor(() => expect(document.activeElement?.id).toBe("file-content-search"));
   });
 
   it("新建文件成功后按原仓库的新代次刷新，并选中新目标", async () => {

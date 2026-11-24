@@ -1562,6 +1562,7 @@
       <ul class="file-welcome-keys">
         <li><span>按路径打开</span><kbd>{MODIFIER_LABEL} P</kbd></li>
         <li><span>筛选文件树</span><kbd>{MODIFIER_LABEL} F</kbd></li>
+        <li><span>搜索文件内容</span><kbd>{MODIFIER_LABEL} ⇧ F</kbd></li>
         <li><span>后退 / 前进</span><kbd>{MODIFIER_LABEL} ⇧ ← →</kbd></li>
       </ul>
       {#if recentFiles.length > 0 && nav?.history}

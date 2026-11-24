@@ -279,11 +279,11 @@ describe("文件树右键菜单（文件视图整合）", () => {
   it("文件树复制相对/完整/文件名写入剪贴板，成功给出不打断浏览的提示", async () => {
     const treeEl = await openFilesView();
     await expandSrc(treeEl);
-    await pickMenuItem(await menuFor(treeEl, "src/App.svelte"), "路径", "复制相对路径");
+    await pickMenuItem(await menuFor(treeEl, "src/App.svelte"), "复制相对路径");
     expect(writeText).toHaveBeenLastCalledWith("src/App.svelte");
-    await pickMenuItem(await menuFor(treeEl, "src/App.svelte"), "路径", "复制完整路径");
+    await pickMenuItem(await menuFor(treeEl, "src/App.svelte"), "复制完整路径");
     expect(writeText).toHaveBeenLastCalledWith("C:/work/demo/src/App.svelte");
-    await pickMenuItem(await menuFor(treeEl, "src/App.svelte"), "路径", "复制文件名");
+    await pickMenuItem(await menuFor(treeEl, "src/App.svelte"), "更多", "复制文件名");
     expect(writeText).toHaveBeenLastCalledWith("App.svelte");
     // 成功提示走 role=status 通知，不是错误。
     await waitFor(() => expect(document.querySelector(".toast:not(.error)")).toBeTruthy());
@@ -293,7 +293,7 @@ describe("文件树右键菜单（文件视图整合）", () => {
     const treeEl = await openFilesView();
     await expandSrc(treeEl);
     writeText.mockRejectedValueOnce(new Error("clipboard blocked"));
-    await pickMenuItem(await menuFor(treeEl, "src/App.svelte"), "路径", "复制相对路径");
+    await pickMenuItem(await menuFor(treeEl, "src/App.svelte"), "复制相对路径");
     const toast = await waitFor(() => {
       const element = document.querySelector(".toast.error");
       expect(element).toBeTruthy();
@@ -314,13 +314,14 @@ describe("文件树右键菜单（文件视图整合）", () => {
   it("文件树右键菜单只做结构操作与忽略规则，不含暂存、提交、放弃与编辑器入口（R8/R9）", async () => {
     const treeEl = await openFilesView();
     await expandSrc(treeEl);
+    // 新建在目录行上，忽略规则收在「更多」里：文件行、目录行连同子菜单一起检查。
+    const dirMenu = await menuFor(treeEl, "src");
+    const dirItems = within(dirMenu).getAllByRole("menuitem").map((item) => item.textContent ?? "");
+    await fireEvent.keyDown(dirMenu, { key: "Escape" });
     const menu = await menuFor(treeEl, "src/App.svelte");
-    // 新建与忽略收在子菜单里：展开后连同子菜单一起检查。
-    await openSubmenu(menu, "新建");
-    const create = within(screen.getByRole("menu", { name: "新建" })).getAllByRole("menuitem").map((item) => item.textContent ?? "");
-    await openSubmenu(menu, "忽略");
-    const ignore = within(screen.getByRole("menu", { name: "忽略" })).getAllByRole("menuitem").map((item) => item.textContent ?? "");
-    const text = [...within(menu).getAllByRole("menuitem").map((item) => item.textContent ?? ""), ...create, ...ignore].join(" ");
+    const more = await openSubmenu(menu, "更多");
+    const moreItems = within(more).getAllByRole("menuitem").map((item) => item.textContent ?? "");
+    const text = [...dirItems, ...within(menu).getAllByRole("menuitem").map((item) => item.textContent ?? ""), ...moreItems].join(" ");
     // 新建/复制/移动/删除是文件视图自己的结构操作入口（T3 接入）；
     // 加入 .gitignore / .git/info/exclude 是文件视图自己的忽略入口；
     // 暂存、提交、放弃与编辑器仍不在这个菜单里，写 Git 的命令也不会因此多出来。
@@ -328,7 +329,7 @@ describe("文件树右键菜单（文件视图整合）", () => {
     for (const forbidden of ["暂存", "提交", "放弃", "保存", "编辑", "永久删除"]) {
       expect(text.includes(forbidden), `不应含「${forbidden}」`).toBe(false);
     }
-    for (const expected of ["文件…", "目录…", "复制到…", "移动或重命名…", "删除…", "加入 .gitignore", "仅本地（.git/info/exclude）"]) {
+    for (const expected of ["新建文件…", "新建目录…", "复制到…", "重命名或移动…", "删除…", "加入 .gitignore", "仅本地忽略（.git/info/exclude）"]) {
       expect(text.includes(expected), `应含「${expected}」`).toBe(true);
     }
     expect(mocks.stageFiles).not.toHaveBeenCalled();
@@ -340,7 +341,7 @@ describe("文件树右键菜单（文件视图整合）", () => {
     await fireEvent.click(await within(treeEl).findByRole("button", { name: "展开 notes" }));
     await waitFor(() => expect(treeEl.querySelector('.file-tree-row[title="notes/todo.log"]')).toBeTruthy());
 
-    await pickMenuItem(await menuFor(treeEl, "notes/todo.log"), "忽略", "加入 .gitignore");
+    await pickMenuItem(await menuFor(treeEl, "notes/todo.log"), "更多", "加入 .gitignore");
     await waitFor(() => expect(mocks.ignorePath).toHaveBeenCalledWith(repoPath, "/notes/todo.log", false, 4, expect.any(Number)));
 
     // 规则写进 .gitignore 后快照代次前进，文件树按新代次重读，不再停在旧列表上。
@@ -349,7 +350,7 @@ describe("文件树右键菜单（文件视图整合）", () => {
     );
 
     // 目录也能只写本地排除。
-    await pickMenuItem(await menuFor(treeEl, "src"), "忽略", "仅本地（.git/info/exclude）");
+    await pickMenuItem(await menuFor(treeEl, "src"), "更多", "仅本地忽略（.git/info/exclude）");
     await waitFor(() => expect(mocks.ignorePath).toHaveBeenCalledWith(repoPath, "/src", true, 5, expect.any(Number)));
   });
 });

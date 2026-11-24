@@ -563,7 +563,10 @@ describe("主工作台", () => {
 
     // 路径片段（不是仓库名）也能筛出仓库，且大小写不敏感
     await fireEvent.input(input, { target: { value: "WORK/demo" } });
-    const byPath = within(palette).getAllByRole("option");
+    // 列表末尾固定多一条「在文件内容中搜索 …」，命令命中排在它前面。
+    const options = within(palette).getAllByRole("option");
+    expect(options[options.length - 1].textContent).toContain("在文件内容中搜索“WORK/demo”");
+    const byPath = options.slice(0, -1);
     expect(byPath, "路径片段只命中那一条仓库命令").toHaveLength(1);
     expect(byPath[0].textContent).toContain("切换到 demo");
     // 关键词只参与过滤、不参与显示：选项文案里不出现路径
@@ -577,7 +580,7 @@ describe("主工作台", () => {
 
     // Git 的英文叫法能找到对应的中文命令
     await fireEvent.input(input, { target: { value: "stash" } });
-    expect(within(palette).getAllByRole("option").map((item) => item.querySelector("span")?.textContent)).toEqual(["临时保存"]);
+    expect(within(palette).getAllByRole("option").map((item) => item.querySelector("span")?.textContent)).toEqual(["临时保存", "在文件内容中搜索“stash”"]);
   });
 
   it("草稿为空时面板里的提交项与提交区按钮一样不可用，并就地说明原因", async () => {
@@ -2103,7 +2106,9 @@ describe("上一个、下一个文件（R20）", () => {
     expect(shortcutCommand({ key: "ArrowUp", altKey: true })).toBe("diff.hunk.prev");
     expect(shortcutCommand({ key: "ArrowDown", altKey: true })).toBe("diff.hunk.next");
     expect(shortcutCommand({ key: "f", ctrlKey: true })).toBe("view.find");
-    expect(shortcutCommand({ key: "f", metaKey: true, shiftKey: true })).toBeNull();
+    // ⌘/Ctrl+Shift+F 是「在文件中搜索」（全仓库搜索），不是 ⌘/Ctrl+F。
+    expect(shortcutCommand({ key: "f", metaKey: true, shiftKey: true })).toBe("files.search");
+    expect(shortcutCommand({ key: "F", ctrlKey: true, shiftKey: true })).toBe("files.search");
     expect(shortcutCommand({ key: "ArrowDown", altKey: true, shiftKey: true })).toBeNull();
     expect(shortcutCommand({ key: "ArrowLeft", altKey: true, shiftKey: true })).toBe("review.prev");
     expect(shortcutCommand({ key: "ArrowRight", altKey: true, shiftKey: true })).toBe("review.next");

@@ -423,7 +423,7 @@
   /** 文件视图的对外入口：展开祖先定位路径、聚焦两种搜索、操作成功后的选择维护。 */
   let filesView = $state<{
     reveal: (path: string, line?: number | null) => Promise<boolean>;
-    focusSearch: (mode: "path" | "content") => Promise<void>;
+    focusSearch: (mode: "path" | "content", seed?: string) => Promise<void>;
     afterEntry: (action: FileEntryAction, path: string, target: string) => Promise<boolean>;
   } | null>(null);
   /** 批量写入里单个文件遇到 stale 的重试上限，与后端 settle_read 一致。 */
@@ -1171,9 +1171,12 @@
       case "files.quickOpen":
         void openFilesSearch("path");
         return;
-      case "files.search":
-        void openFilesSearch("content");
+      case "files.search": {
+        // 有单行选区（例如正在读的代码里选中一个函数名）时作为搜索词带入；从命令面板执行时不带。
+        const seed = paletteOpen ? null : findSeed(selectedText());
+        void openFilesSearch("content", seed ?? undefined);
         return;
+      }
       case "file.reveal":
         if (selected) void revealInFiles(selected.path);
         return;
@@ -2268,10 +2271,10 @@
   }
 
   /** 打开文件视图里的某一种搜索（路径 / 全文），并把焦点交给它自己的输入框。 */
-  async function openFilesSearch(mode: "path" | "content") {
+  async function openFilesSearch(mode: "path" | "content", seed?: string) {
     showFiles();
     await tick();
-    await filesView?.focusSearch(mode);
+    await filesView?.focusSearch(mode, seed);
   }
 
   /**
@@ -6336,7 +6339,12 @@
   </Modal>
 {/if}
 
-<CommandPalette open={paletteOpen} commands={paletteCommands} onClose={() => (paletteOpen = false)} />
+<CommandPalette
+  open={paletteOpen}
+  commands={paletteCommands}
+  onClose={() => (paletteOpen = false)}
+  onSearchText={opened && filesViewEnabled ? (text) => void openFilesSearch("content", text) : undefined}
+/>
 
 {#if contextMenu}
   <ContextMenu request={contextMenu} onClose={() => (contextMenu = null)} />

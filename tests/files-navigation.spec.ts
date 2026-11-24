@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { openTreeSubmenu } from "./helpers/menu";
+import { openTreeOptions } from "./helpers/menu";
 
 const repositoryDirectory = vi.hoisted(() => vi.fn());
 const repositoryFileContent = vi.hoisted(() => vi.fn());
@@ -84,14 +84,10 @@ function page(path: string, offset: number, generation = 4) {
   };
 }
 
-/** 只看改动在行右键菜单的「文件树」子菜单里。优先右键目录，避免顺手打开文件内容。 */
+/** 只看改动在筛选框旁的「文件树选项」菜单里。 */
 async function showChangedOnly() {
-  const tree = screen.getByRole("tree", { name: "仓库文件" });
-  const rows = within(tree).getAllByRole("treeitem");
-  const row = rows.find((item) => item.getAttribute("aria-label") === "src") ?? rows[0];
-  await fireEvent.contextMenu(row);
-  const sub = await openTreeSubmenu(await screen.findByRole("menu", { name: /的操作$/ }));
-  await fireEvent.click(within(sub).getByRole("menuitemcheckbox", { name: "只看有改动的文件" }));
+  const options = await openTreeOptions();
+  await fireEvent.click(within(options).getByRole("menuitemcheckbox", { name: "只看有改动的文件" }));
 }
 
 /** 模式开关不再是常驻按钮。筛选框的占位文案跟着同一份状态变，过滤时也还在。 */

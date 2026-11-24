@@ -16,6 +16,7 @@ import {
   type RemoteConnectionProgress,
   type RemoteDiffDocument,
   type RemoteDiffPage,
+  type RemoteDiffRequest,
   type RemoteDiffView,
   type RemoteOpenRequest,
   type RemoteOpenResult,
@@ -246,6 +247,15 @@ interface RemoteDiffCacheEntry {
   hunksStageableReason: string | null;
 }
 
+function newRemoteDiffCache() {
+  return {
+    entries: new Map<string, RemoteDiffCacheEntry>(),
+    pending: new Map<string, Promise<RemoteDiffCacheEntry>>(),
+  };
+}
+
+type RemoteDiffOptions = Pick<RemoteDiffRequest, "head" | "original" | "context" | "asText">;
+
 interface RemoteRepositorySession {
   key: string;
   hostId: string;
@@ -288,7 +298,7 @@ interface RemoteRepositorySession {
    * 直到重新打开这个远端仓库。绝不因为断线改用本机 Git。
    */
   disconnected: boolean;
-  diffs: Map<string, RemoteDiffCacheEntry>;
+  diffs: ReturnType<typeof newRemoteDiffCache>;
   terminals: Set<string>;
 }
 
@@ -378,6 +388,7 @@ function advanceRemoteGeneration(session: RemoteRepositorySession, snapshot: Rem
     session.token = snapshot.generation;
     remoteGeneration += 1;
     session.generation = remoteGeneration;
+    session.diffs = newRemoteDiffCache();
   }
   session.latest = snapshot;
   return session.generation;
@@ -416,7 +427,7 @@ async function remoteStatusOf(session: RemoteRepositorySession): Promise<RemoteW
       session.disconnected = true;
       noteRemoteState();
     }
-    session.diffs.clear();
+    session.diffs = newRemoteDiffCache();
     throw failure;
   }
   checkRemoteResponse(session, generation);
@@ -440,7 +451,7 @@ async function loadRemotePatch(
   session: RemoteRepositorySession,
   path: string,
   view: RemoteDiffView,
-  options: Pick<import("./remote-worktree").RemoteDiffRequest, "head" | "original" | "context" | "asText"> = {},
+  options: RemoteDiffOptions,
 ): Promise<RemotePatch & { snapshot: string | null; hunksStageableReason: string | null }> {
   const chunks: Uint8Array[] = [];
   let cursor: string | null = null;
@@ -448,6 +459,7 @@ async function loadRemotePatch(
   let total = 0;
   let truncated = false;
   const generation = session.generation;
+  const cache = session.diffs;
   const version = session.token;
   const stagedHunks = new Set<number>();
   let snapshot: string | null = null;
@@ -465,14 +477,15 @@ async function loadRemotePatch(
         ...(cursor ? { cursor } : {}),
       });
     } catch (error) {
+      checkRemoteDiffResponse(session, generation, cache);
       const failure = normalizeError(error);
-      if (remoteSessions.get(session.key) === session && DISCONNECT_CODES.has(failure.code) && !session.disconnected) {
+      if (DISCONNECT_CODES.has(failure.code)) {
         session.disconnected = true;
         noteRemoteState();
       }
       throw failure;
     }
-    checkRemoteResponse(session, generation);
+    checkRemoteDiffResponse(session, generation, cache);
     const token = typeof page.snapshot === "string" && /^[a-f0-9]{64}$/.test(page.snapshot) ? page.snapshot : null;
     if (pages === 0) {
       reason = page.hunksStageableReason ?? null;
@@ -507,6 +520,45 @@ async function loadRemotePatch(
     hunksStageableReason: patch.hunks.some((hunk) => hunk.stageable) ? null : reason ?? REMOTE_HUNKS_UNSTAGEABLE_REASON,
     ...(truncated ? { truncated: true } : {}),
   };
+}
+
+function checkRemoteDiffResponse(
+  session: RemoteRepositorySession, generation: number, cache: RemoteRepositorySession["diffs"],
+): void {
+  checkRemoteResponse(session, generation);
+  if (session.disconnected) throw remoteError("remote_disconnected", "远端连接已断开，这次差异读取已丢弃。");
+  if (session.diffs !== cache) throw remoteError("stale", "远端差异已失效，请重新读取。", session.generation);
+}
+
+async function loadRemoteDiffPage(
+  session: RemoteRepositorySession, path: string, view: RemoteDiffView, options: RemoteDiffOptions,
+  offset: number, limit: number,
+): Promise<DiffResponse> {
+  // 每次会话或代次变化都会换缓存。行窗口只影响本地切页，不参与协议请求。
+  const cache = session.diffs;
+  const generation = session.generation;
+  const key = JSON.stringify([view, path, options.head, options.original, options.context, options.asText]);
+  let entry = cache.entries.get(key);
+  if (!entry) {
+    let pending = cache.pending.get(key);
+    if (!pending) {
+      pending = loadRemotePatch(session, path, view, options).then((patch) => {
+        checkRemoteDiffResponse(session, generation, cache);
+        const snapshot = view === "task" ? session.token : patch.snapshot ?? session.token;
+        const loaded = {
+          document: remoteDiffDocument(patch, generation, path, view === "staged", snapshot),
+          hunksStageableReason: patch.hunksStageableReason ?? (view === "task" ? REMOTE_HUNKS_UNSTAGEABLE_REASON : null),
+        };
+        if (cache.entries.size >= REMOTE_DIFF_CACHE_LIMIT) cache.entries.clear();
+        cache.entries.set(key, loaded);
+        return loaded;
+      }).finally(() => cache.pending.delete(key));
+      cache.pending.set(key, pending);
+    }
+    entry = await pending;
+    checkRemoteDiffResponse(session, generation, cache);
+  }
+  return { ...remoteDiffPage(entry.document, offset, limit), hunksStageableReason: entry.hunksStageableReason };
 }
 
 /** 兼容未单独返回审查阶段的提交回执。 */
@@ -546,7 +598,7 @@ async function settleRemoteWrite(
     session.recoveryNotice = null;
     if ((op === "commit" || op === "commitAndPush") && result.draftCleared !== false) session.draft = "";
     noteRemoteOutcome(session, op, result.reviewOutcome);
-    session.diffs.clear();
+    session.diffs = newRemoteDiffCache();
     advanceRemoteGeneration(session, result.snapshot);
     noteRemoteState();
     return result.snapshot;
@@ -789,7 +841,7 @@ async function openRemote(
     unrecordedHeadOp: null,
     returnedOutcome: null,
     disconnected: false,
-    diffs: new Map(),
+    diffs: newRemoteDiffCache(),
     terminals: new Set(),
   };
   if (session.reviewId) {
@@ -2059,7 +2111,7 @@ async function readRemoteEvents(session: RemoteRepositorySession): Promise<void>
       }
       if (changed) {
         session.generation = ++remoteGeneration;
-        session.diffs.clear();
+        session.diffs = newRemoteDiffCache();
         publishRemoteEvent("repo-changed", { path: session.key, generation: session.generation, degraded: false });
       }
     }
@@ -2731,24 +2783,9 @@ const remoteOverrides: Record<string, unknown> = {
     }
     const session = remoteBridgeSession(path, generation);
     if (baseline !== session.baseline) throw remoteError("invalid_baseline", "这次审查的任务起点已变化。");
-    const cacheKey = JSON.stringify(["task", relative, original, head, session.token, context, asText]);
-    let entry = session.diffs.get(cacheKey);
-    if (!entry) {
-      const patch = await loadRemotePatch(session, relative, "task", {
-        head,
-        ...(original ? { original } : {}),
-        ...(context === undefined ? {} : { context }),
-        ...(asText === undefined ? {} : { asText }),
-      });
-      checkRemoteResponse(session, generation);
-      entry = {
-        document: remoteDiffDocument(patch, generation, relative, false, session.token),
-        hunksStageableReason: patch.hunksStageableReason ?? REMOTE_HUNKS_UNSTAGEABLE_REASON,
-      };
-      if (session.diffs.size >= REMOTE_DIFF_CACHE_LIMIT) session.diffs.clear();
-      session.diffs.set(cacheKey, entry);
-    }
-    return { ...remoteDiffPage(entry.document, offset, limit), hunksStageableReason: entry.hunksStageableReason };
+    return loadRemoteDiffPage(session, relative, "task", {
+      head, original: original || undefined, context, asText,
+    }, offset, limit);
   },
 
   async taskReviewToken(
@@ -2784,31 +2821,9 @@ const remoteOverrides: Record<string, unknown> = {
     if (generation !== session.generation) {
       throw remoteError("stale", "远端仓库已有变化，请刷新后重试。", session.generation);
     }
-    const view: RemoteDiffView = staged ? "staged" : "unstaged";
-    const cacheKey = JSON.stringify([view, relative, original, context, asText, session.token]);
-    let entry = session.diffs.get(cacheKey);
-    if (!entry) {
-      const patch = await loadRemotePatch(session, relative, view, {
-        ...(original ? { original } : {}),
-        ...(context === undefined ? {} : { context }),
-        ...(asText === undefined ? {} : { asText }),
-      });
-      // 等待期间切了仓库：这次响应属于旧连接，直接丢弃而不是贴到新仓库上。
-      if (remoteSessions.get(path) !== session) {
-        throw remoteError("remote_disconnected", "远端仓库已切换，这次差异读取已丢弃。");
-      }
-      entry = {
-        document: remoteDiffDocument(patch, session.generation, relative, staged, patch.snapshot ?? session.token),
-        // 原因跟着文档一起缓存：翻页与命中缓存给出的都是同一句话。
-        hunksStageableReason: patch.hunksStageableReason,
-      };
-      if (session.diffs.size >= REMOTE_DIFF_CACHE_LIMIT) session.diffs.clear();
-      session.diffs.set(cacheKey, entry);
-    }
-    if (entry.document.generation !== generation) {
-      throw remoteError("stale", "远端仓库已有变化，请刷新后重试。", session.generation);
-    }
-    return { ...remoteDiffPage(entry.document, offset, limit), hunksStageableReason: entry.hunksStageableReason };
+    return loadRemoteDiffPage(session, relative, staged ? "staged" : "unstaged", {
+      original: original || undefined, context, asText,
+    }, offset, limit);
   },
 
   async stageFiles(path: string, paths: string[], generation: number, requestId: number): Promise<StatusSnapshot> {

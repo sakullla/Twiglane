@@ -147,6 +147,7 @@ fn main() {
             "push_local_branch",
             "create_branch",
             "create_branch_from",
+            "create_worktree",
             "rename_branch",
             "reveal_path",
             "open_path",

@@ -379,6 +379,16 @@ pub struct TagState {
     pub snapshot: StatusSnapshot,
 }
 
+/// 新建分支并放进新的附属工作区：返回新工作区的规范路径，由界面按普通「打开仓库」切过去。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatedWorktree {
+    pub path: String,
+    pub branch: String,
+    /// 原仓库写入后的 generation：界面据此刷新原仓库的分支列表。
+    pub generation: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CloneResult {

@@ -749,11 +749,13 @@ fn token_missing(repo: &Repository) -> AppError {
     )
 }
 
+/// 明文 HTTP 只在两种情况下使用令牌：本机回环地址，或用户亲手填写的自建 GitLab 实例
+/// （手填 http:// 地址即明确同意）。自动探测到的明文实例一律不发送令牌。
 fn ensure_secure_channel(repo: &Repository) -> Result<(), AppError> {
-    if repo.api_base.starts_with("http://") && !repo.loopback {
+    if repo.api_base.starts_with("http://") && !repo.loopback && repo.gitlab_instance.is_none() {
         return Err(AppError::new(
             "change_request_insecure",
-            "该实例的 API 只能通过明文 HTTP 访问，不会在这条通道上读取或发送令牌，也未创建 MR/PR。请改用 HTTPS 远程地址。",
+            "该实例的 API 只能通过明文 HTTP 访问，自动识别时不会在这条通道上发送令牌，也未创建 MR/PR。若这是内网 GitLab，请在下方填写 http:// 开头的实例地址以确认使用；否则请改用 HTTPS。",
         ));
     }
     Ok(())

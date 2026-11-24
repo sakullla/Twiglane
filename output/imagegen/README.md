@@ -2,7 +2,7 @@
 
 `twiglane-logo.png` is the final 1024 × 1024 blue-violet icon master with a transparent outer margin. `twiglane-logo-source.png` preserves the raw generated artwork.
 
-The image was generated with the configured provider's Responses `image_generation` tool (`gpt-image-2.5`, high quality), using the provider-loading and generation functions from the user-specified `Rillight/tool/generate_app_icons.py`. The exact generation prompt is in `twiglane-logo-prompt.txt`.
+The image was generated with the configured provider's Responses `image_generation` tool (`gpt-image-2.5`, high quality), using the provider-loading and generation functions from a local icon-generation script. The exact generation prompt is in `twiglane-logo-prompt.txt`.
 
 After generation, the user's blue-violet preference was applied to the green portions of the artwork while preserving the ivory glyph, shading and geometry. The edge-connected white background was converted to alpha. Application theme tokens were not changed.
 

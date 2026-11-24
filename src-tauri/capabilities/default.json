@@ -113,6 +113,7 @@
         "allow-push-local-branch",
     "allow-create-branch",
     "allow-create-branch-from",
+    "allow-create-worktree",
     "allow-rename-branch",
     "allow-reveal-path",
     "allow-open-path",

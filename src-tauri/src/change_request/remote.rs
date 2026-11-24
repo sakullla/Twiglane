@@ -304,7 +304,7 @@ fn manual_gitlab(
 ) -> Result<Repository, AppError> {
     let invalid = || AppError::new(
         "change_request_gitlab_instance",
-        "请输入 GitLab 实例的 HTTPS 地址，可包含端口和部署子路径。请去掉用户名、查询参数与片段。",
+        "请输入 GitLab 实例的 HTTP 或 HTTPS 地址，可包含端口和部署子路径。请去掉用户名、查询参数与片段。",
     );
     let instance_url = instance_url.trim();
     if instance_url.len() > 4096 || instance_url.chars().any(char::is_control) {
@@ -313,7 +313,8 @@ fn manual_gitlab(
     let instance = Url::parse(instance_url).map_err(|_| invalid())?;
     let host = instance.host_str().ok_or_else(invalid)?.to_string();
     let loopback = host_is_loopback(&host);
-    if !(instance.scheme() == "https" || (instance.scheme() == "http" && loopback))
+    // 自建实例允许明文 HTTP：地址由用户亲手填写，等于明确同意在这条通道上使用令牌（内网 GitLab 常见）。
+    if !matches!(instance.scheme(), "https" | "http")
         || !instance.username().is_empty()
         || instance.password().is_some()
         || instance.query().is_some()

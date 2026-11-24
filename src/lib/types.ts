@@ -890,6 +890,13 @@ export interface TagState {
   snapshot: StatusSnapshot;
 }
 
+/** 新建分支并放进新的附属工作区的结果：新工作区路径与原仓库写入后的 generation。 */
+export interface CreatedWorktree {
+  path: string;
+  branch: string;
+  generation: number;
+}
+
 export interface CloneResult {
   path: string;
   opened: OpenedRepository;

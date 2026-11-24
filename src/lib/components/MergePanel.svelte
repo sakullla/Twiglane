@@ -172,6 +172,11 @@
   let message = $state(untrack(() => messageByRepo.get(opened.summary.path) ?? ""));
   let busy = $state(false);
   let errorText = $state<string | null>(null);
+  /**
+   * 写入前被 generation 校验拦下（仓库刚有变化）：这不是失败，什么都没写。
+   * 用中性说明代替红色错误和错误提示，同时按最新状态重新检查。
+   */
+  let staleText = $state<string | null>(null);
   let aborting = $state(false);
   let abortNote = $state("");
   let abortPaths = $state<string[]>([]);
@@ -404,10 +409,17 @@
     if (blocked) return;
     busy = true;
     errorText = null;
+    staleText = null;
     try {
       await action();
     } catch (error) {
       const failure = normalizeError(error);
+      if (failure.code === "stale") {
+        if (failure.generation !== undefined) onGeneration(failure.generation);
+        previewNonce += 1;
+        staleText = "仓库刚刚有变化，这次没有执行任何操作。已按最新状态重新检查，请确认结果后再继续。";
+        return;
+      }
       errorText = failure.message;
       onFailure(failure);
     } finally {
@@ -484,11 +496,13 @@
 
   function setSource(value: string) {
     source = value;
+    staleText = null;
     preview = null;
   }
 
   function setTarget(value: string) {
     target = value;
+    staleText = null;
     preview = null;
   }
 
@@ -542,8 +556,7 @@
           nextId(),
         )
         .catch((error: unknown) => {
-          // 写入前被 generation 校验拦下：结论已不可信，按最新状态重新检查。
-          if (normalizeError(error).code === "stale") previewNonce += 1;
+          // 写入前被 generation 校验拦下：结论已不可信，run() 按最新状态重新检查并给出中性说明。
           throw error;
         });
       if (started.switchedFrom) {
@@ -1323,6 +1336,8 @@
 
   {#if errorText}
     <div class="callout error mp-error" role="alert"><Icon name="alert-circle" size={15} /><span>{errorText}</span></div>
+  {:else if staleText}
+    <div class="callout info mp-error" role="status"><Icon name="info" size={15} /><span>{staleText}</span></div>
   {/if}
 
   <div class="mp-foot" class:strip>

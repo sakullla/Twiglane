@@ -114,6 +114,12 @@
   /** 新分支的起点：空串表示当前分支（或游离 HEAD 的当前提交）。 */
   let createBase = $state(untrack(() => (startCreating ? startBase : "")));
   let createCheckout = $state(true);
+  /** 新分支放进新的附属工作区（git worktree）：当前工作区不切换、不动未提交改动。只支持本机仓库。 */
+  let createInWorktree = $state(false);
+  /** 新工作区的完整路径；用户没改过时随分支名自动生成。 */
+  let worktreeDir = $state("");
+  let worktreeDirTouched = $state(false);
+  let worktreeSupported = $derived(!isRemoteRepositoryKey(opened.summary.path));
   let renaming = $state<{ name: string; value: string } | null>(null);
   let menu = $state<ContextMenuRequest | null>(null);
   let nameInput = $state<HTMLInputElement | null>(null);
@@ -492,7 +498,66 @@
     return createBase || current.name || current.headOid || "HEAD";
   }
 
+  /** 路径里实际用的分隔符：Windows 路径可能是反斜杠，其余用正斜杠。 */
+  function separatorOf(path: string): string {
+    return path.lastIndexOf("\\") > path.lastIndexOf("/") ? "\\" : "/";
+  }
+
+  /** 默认放在仓库旁边：<仓库所在目录>/<仓库名>-<分支名>，分支名里的 / 换成 -。 */
+  function defaultWorktreeDir(name: string): string {
+    const root = opened.summary.path.replace(/[\\/]+$/, "");
+    const sep = separatorOf(root);
+    const cut = root.lastIndexOf(sep);
+    const parent = cut > 0 ? root.slice(0, cut) : root;
+    const repoName = cut >= 0 ? root.slice(cut + 1) : root;
+    const slug = name.trim().replace(/[\\/:*?"<>|\s]+/g, "-").replace(/^-+|-+$/g, "");
+    return `${parent}${sep}${repoName}-${slug || "worktree"}`;
+  }
+
+  $effect(() => {
+    const name = branchName;
+    if (!worktreeDirTouched) worktreeDir = defaultWorktreeDir(name);
+  });
+
+  /** 把完整路径拆成已存在的父目录与新目录名：后端只在父目录下新建这一层。 */
+  function splitWorktreeDir(path: string): { parent: string; directory: string } | null {
+    const trimmed = path.trim().replace(/[\\/]+$/, "");
+    const cut = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+    if (cut <= 0 || cut === trimmed.length - 1) return null;
+    const parent = trimmed.slice(0, cut);
+    // 「C:」本身不是目录（是该盘的当前目录）：补上分隔符才是盘符根。
+    return { parent: /^[A-Za-z]:$/.test(parent) ? `${parent}/` : parent, directory: trimmed.slice(cut + 1) };
+  }
+
+  async function createBranchInWorktree() {
+    const currentRepo = opened;
+    const name = branchName.trim();
+    if (!name) return;
+    const target = splitWorktreeDir(worktreeDir);
+    if (!target) {
+      errorText = "工作区位置需要是一个完整路径，例如 /Users/me/work/app-feature。未创建工作区。";
+      return;
+    }
+    const start = startPoint();
+    nameInput?.focus();
+    const created = await write(() =>
+      api.createWorktree(currentRepo.summary.path, name, start, target.parent, target.directory, currentRepo.generation, nextId()),
+    );
+    if (opened.summary.path !== currentRepo.summary.path) return;
+    if (!created) return;
+    resetCreate();
+    onNotice(`已从 ${start} 创建分支 ${name}，并放进新工作区 ${created.path}。当前工作区没有切换。`);
+    // 原仓库多了一个分支：先重读列表（打开新工作区失败时对话框仍显示最新状态），再打开新工作区。
+    await loadBranches();
+    if (opened.summary.path !== currentRepo.summary.path) return;
+    await openWorktree(created.path);
+  }
+
   async function createNamedBranch() {
+    if (createInWorktree && worktreeSupported) {
+      await createBranchInWorktree();
+      return;
+    }
     const currentRepo = opened;
     const name = branchName.trim();
     if (!name) return;
@@ -529,6 +594,8 @@
     creating = false;
     branchName = "";
     createBase = "";
+    createInWorktree = false;
+    worktreeDirTouched = false;
   }
 
   /** 创建或取消后收起并清空；表单节点随之消失，焦点交还给「新建分支」按钮。 */
@@ -1194,16 +1261,50 @@
               onChange={(name) => (createBase = name)}
             />
           </div>
-          <label class="switch branch-checkout">
-            <input type="checkbox" bind:checked={createCheckout} title={blocked ? BUSY_REASON : undefined} disabled={blocked} />
-            <span>创建后切换过去</span>
-          </label>
+          <div class="branch-create-switches">
+            {#if worktreeSupported}
+              <label class="switch branch-worktree" title="在新目录里检出新分支（git worktree），当前工作区和未提交改动都不动">
+                <input type="checkbox" bind:checked={createInWorktree} title={blocked ? BUSY_REASON : undefined} disabled={blocked} />
+                <span>放到新工作区</span>
+              </label>
+            {/if}
+            {#if !(createInWorktree && worktreeSupported)}
+              <label class="switch branch-checkout">
+                <input type="checkbox" bind:checked={createCheckout} title={blocked ? BUSY_REASON : undefined} disabled={blocked} />
+                <span>创建后切换过去</span>
+              </label>
+            {/if}
+          </div>
         </div>
-        <p class="hint">{createCheckout ? "切换沿用分支切换的保护：会覆盖未提交修改时停下，工作区保持原样。" : "只创建分支，当前分支和工作区都不变。"}</p>
+        {#if createInWorktree && worktreeSupported}
+          <div class="branch-worktree-dir">
+            <label class="label" for="branch-worktree-dir">工作区位置</label>
+            <input
+              id="branch-worktree-dir"
+              class="input"
+              readonly={writing}
+              value={worktreeDir}
+              oninput={(event) => {
+                worktreeDir = (event.currentTarget as HTMLInputElement).value;
+                worktreeDirTouched = true;
+              }}
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </div>
+          <p class="hint">在这个新目录里检出新分支并打开它；当前工作区、当前分支和未提交改动都保持原样。目录必须还不存在。</p>
+        {:else}
+          <p class="hint">{createCheckout ? "切换沿用分支切换的保护：会覆盖未提交修改时停下，工作区保持原样。" : "只创建分支，当前分支和工作区都不变。"}</p>
+        {/if}
         <div class="create-form-actions">
           <button type="button" class="btn btn-secondary" title={writing ? BUSY_REASON : undefined} disabled={writing} onclick={closeCreate}>取消</button>
-          <button type="submit" class="btn btn-primary" title={blocked ? BUSY_REASON : branchName.trim().length === 0 ? "先填写分支名称" : undefined} disabled={blocked || branchName.trim().length === 0}>
-            <Icon name="plus" size={14} />{createCheckout ? "创建并切换" : "创建分支"}
+          <button
+            type="submit"
+            class="btn btn-primary"
+            title={blocked ? BUSY_REASON : branchName.trim().length === 0 ? "先填写分支名称" : createInWorktree && worktreeSupported && !worktreeDir.trim() ? "先填写工作区位置" : undefined}
+            disabled={blocked || branchName.trim().length === 0 || (createInWorktree && worktreeSupported && !worktreeDir.trim())}
+          >
+            <Icon name="plus" size={14} />{createInWorktree && worktreeSupported ? "创建并打开工作区" : createCheckout ? "创建并切换" : "创建分支"}
           </button>
         </div>
       </form>

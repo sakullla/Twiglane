@@ -627,8 +627,11 @@ describe("合并面板", () => {
     await fireEvent.click(start);
     await vi.waitFor(() => expect(startMerge).toHaveBeenCalledWith("/repo", "feature", null, "merge", 7, 1));
     // 被 generation 校验拦下后不会写入，并按最新状态重新检查。
-    await vi.waitFor(() => expect(onFailure).toHaveBeenCalled());
     await vi.waitFor(() => expect(mergePreview).toHaveBeenCalledTimes(2));
+    // 这不是失败：不弹错误提示、不显示红色错误，只给一条中性说明。
+    expect(onFailure).not.toHaveBeenCalled();
+    expect(document.querySelector(".mp-error.error")).toBeNull();
+    expect(document.querySelector(".mp-error.info")?.textContent).toContain("这次没有执行任何操作");
   });
 
   it("读不到分支位置时不放宽：沿用预检时的 generation", async () => {

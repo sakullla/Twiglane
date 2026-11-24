@@ -13,7 +13,7 @@
       "bundle": "nsis",
       "installed": true,
       "installedAt": "2026-11-07T07:42:53.248Z",
-      "installerPath": "C:/Users/12976/.cargo/target/release/bundle/nsis/Twiglane_0.2.25_x64-setup.exe",
+      "installerPath": "<cargo-target>/release/bundle/nsis/Twiglane_0.2.25_x64-setup.exe",
       "installerSha256": "d2a8e3599868566efcccdabc738789e228ba7e6b807d3915b1552102d19279be"
     },
     "cliora": {
@@ -21,7 +21,7 @@
       "bundle": "nsis",
       "installed": true,
       "installedAt": "2026-11-07T07:42:53.248Z",
-      "installerPath": "C:/Users/12976/.cargo/target/release/bundle/nsis/Cliora_0.4.104_x64-setup.exe",
+      "installerPath": "<cargo-target>/release/bundle/nsis/Cliora_0.4.104_x64-setup.exe",
       "installerSha256": "588745bd62d904a20999310664c74eddcd61618c61909d86f87dd9697381aeb7"
     }
   },
@@ -41,7 +41,7 @@
       ],
       "observations": {
         "reviewStatus": "accepted",
-        "worktreePath": "C:/Users/12976/AppData/Local/Temp/Twiglane cliora e2e",
+        "worktreePath": "%TEMP%/Twiglane cliora e2e",
         "baseline": "044853d9979c82b0332c96f82a06a7540f45f1db",
         "reviewId": "b949e63e-afdc-406e-90d7-f4488068940f",
         "result": "系统链接启动 Twiglane 进程，随后 cliora 从 opening 进入 accepted。"
@@ -129,11 +129,11 @@
       "realGit": true,
       "steps": [
         "单独启动 Twiglane",
-        "从最近仓库打开 Rillight",
+        "从最近仓库打开一个普通仓库",
         "检查标题栏与 Git 面板"
       ],
       "observations": {
-        "openedRepository": "C:/Users/12976/project/Rillight",
+        "openedRepository": "<projects>/sample-repo",
         "branch": "main",
         "hasClioraReturnEntry": false,
         "worktreeClean": true,

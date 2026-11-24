@@ -19,7 +19,7 @@ use crate::git::command::{
     fetch_command, publish_command, pull_ff_command, push_command, remote_names_command,
     push_to_remote_command, push_to_upstream_command,
     remote_add_command, remote_set_url_command, remote_verbose_command, verify_ref_command,
-    rename_branch_command,
+    rename_branch_command, worktree_add_command,
     set_upstream_to_command, status_command, switch_command, switch_track_as_command,
     switch_track_command,
 };
@@ -32,7 +32,8 @@ use crate::git::ops::{
 use crate::git::runner::{PinnedDirectory, ProcessOutput};
 use crate::git::schedule::{internal_request_id, GitJob, JobKind, ScheduledOutput};
 use crate::model::{
-    BranchRecord, BranchState, CloneResult, CommitPushReport, RemoteInfo, RemoteState,
+    BranchRecord, BranchState, CloneResult, CommitPushReport, CreatedWorktree, RemoteInfo,
+    RemoteState,
     StatusSnapshot,
 };
 use crate::redact::{contains_secret, redact};
@@ -988,6 +989,103 @@ pub async fn create_branch_from(
         )
         .with_generation(error.generation.unwrap_or(created.generation))
     })
+}
+
+/// 新建分支并放进新的附属工作区（`git worktree add -b`）。
+///
+/// - 分支名、起点与「新建分支」同一套校验；分支已存在时拒绝；
+/// - 目标是 `parent/directory`：父目录必须已存在，目标本身必须不存在，绝不覆盖已有文件；
+/// - 当前工作区不切换、不动未提交改动；新工作区由界面按普通「打开仓库」打开。
+#[allow(clippy::too_many_arguments)]
+pub async fn create_worktree(
+    backend: &Backend,
+    path: &str,
+    name: &str,
+    start: &str,
+    parent: &str,
+    directory: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<CreatedWorktree, AppError> {
+    let root = repo_root(path)?;
+    validate_branch_input(name)?;
+    validate_worktree_directory(directory)?;
+    let parent = canonical_existing(&validate_input_path(parent)?)?;
+    ensure_directory(&parent)?;
+    let target = parent.join(directory.trim());
+    if target.exists() {
+        return Err(AppError::new(
+            "worktree_destination",
+            format!("目标目录已经存在，未创建工作区，也没有覆盖任何内容。{}", target.display()),
+        )
+        .with_generation(generation));
+    }
+    let _guard = backend
+        .actions
+        .enter(action_key("branch", &repo_key(&root)))?;
+    let git = require_git(backend).await?;
+    ensure_branch_format(backend, &root, &git.path, name, generation, request_id).await?;
+    let current = load_branch_state(backend, &root, generation, internal_request_id()).await?;
+    if current
+        .branches
+        .iter()
+        .any(|branch| !branch.remote && branch.name == name)
+    {
+        return Err(duplicate_branch().with_generation(current.generation));
+    }
+    let start = validate_start_point(&current, start)?;
+    let (program, args) = worktree_add_command(&git.path, &root, name, &target, &start);
+    let scheduled = write_repo(
+        backend,
+        &root,
+        current.generation,
+        internal_request_id(),
+        program,
+        args,
+    )
+    .await?;
+    if scheduled.output.exit_code != 0 {
+        let text = output_text(&scheduled.output);
+        if text.to_ascii_lowercase().contains("already exists") || text.contains("已经存在") {
+            return Err(AppError::new(
+                "worktree_exists",
+                "分支或目标目录已经存在，未创建工作区。",
+            )
+            .with_generation(scheduled.generation));
+        }
+        return Err(git_failure("worktree_add_failed", &scheduled.output, "没有创建工作区。")
+            .with_generation(scheduled.generation));
+    }
+    let created = canonical_existing(&target).map_err(|_| {
+        AppError::new(
+            "worktree_add_failed",
+            format!("Git 已结束，但没有找到新工作区：{}", target.display()),
+        )
+        .with_generation(scheduled.generation)
+    })?;
+    Ok(CreatedWorktree {
+        path: repo_key(&created),
+        branch: name.to_string(),
+        generation: scheduled.generation,
+    })
+}
+
+/// 新工作区的目录名：只是一段名称，不能带路径分隔符，也不能是 `.`、`..` 或以 `-` 开头。
+fn validate_worktree_directory(directory: &str) -> Result<(), AppError> {
+    let name = directory.trim();
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.starts_with('-')
+        || name.len() > 255
+        || name.chars().any(|c| c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+    {
+        return Err(AppError::new(
+            "worktree_directory",
+            "工作区目录名无效：只填一段名称，不要包含路径分隔符或特殊字符。未创建工作区。",
+        ));
+    }
+    Ok(())
 }
 
 /// 起点：已知分支名原样使用；否则必须是 7–40 位十六进制提交标识。
@@ -3340,6 +3438,51 @@ mod tests {
             .unwrap_err();
         assert_eq!(empty.code, "empty_message");
         assert_eq!(git_text(&work, &["rev-list", "--count", "HEAD"]), commits);
+    }
+
+    #[tokio::test]
+    async fn create_worktree_adds_branch_in_new_directory_without_touching_current_work() {
+        let fixture = crate::test_support::git_fixture("create-worktree");
+        let backend = fixture.backend();
+        let (_origin, work) = seed_bare(&fixture);
+        fs::write(work.join("file.txt"), "local edit\n").unwrap();
+        let opened = add_repository(&backend, &repo_key(&work), 1).await.unwrap();
+        let parent = repo_key(fixture.path());
+
+        for bad in ["", "..", "a/b", "-x", "a\\b"] {
+            let error = create_worktree(&backend, &opened.summary.path, "topic", "main", &parent, bad, opened.generation, 2)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, "worktree_directory", "{bad}");
+        }
+        let occupied = create_worktree(&backend, &opened.summary.path, "topic", "main", &parent, "work", opened.generation, 3)
+            .await
+            .unwrap_err();
+        assert_eq!(occupied.code, "worktree_destination");
+        let invalid = create_worktree(&backend, &opened.summary.path, "bad..name", "main", &parent, "wt", opened.generation, 4)
+            .await
+            .unwrap_err();
+        assert_eq!(invalid.code, "branch_invalid");
+        assert!(!fixture.path().join("wt").exists());
+
+        let created = create_worktree(&backend, &opened.summary.path, "topic", "main", &parent, "work-topic", opened.generation, 5)
+            .await
+            .unwrap();
+        assert_eq!(created.branch, "topic");
+        let target = fixture.path().join("work-topic");
+        assert_eq!(created.path, repo_key(&canonical_existing(&target).unwrap()));
+        assert_eq!(git_text(&target, &["symbolic-ref", "--short", "HEAD"]), "topic");
+        assert_eq!(fs::read_to_string(target.join("file.txt")).unwrap().replace("\r\n", "\n"), "base\n");
+        // 当前工作区不切换、不动未提交改动。
+        assert_eq!(git_text(&work, &["symbolic-ref", "--short", "HEAD"]), "main");
+        assert_eq!(fs::read_to_string(work.join("file.txt")).unwrap(), "local edit\n");
+        assert!(created.generation > opened.generation);
+
+        let duplicate = create_worktree(&backend, &opened.summary.path, "topic", "main", &parent, "again", created.generation, 6)
+            .await
+            .unwrap_err();
+        assert_eq!(duplicate.code, "branch_duplicate");
+        assert!(!fixture.path().join("again").exists());
     }
 
     #[tokio::test]

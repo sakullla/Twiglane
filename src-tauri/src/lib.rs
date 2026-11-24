@@ -226,6 +226,7 @@ pub fn run() {
             push_local_branch,
             create_branch,
             create_branch_from,
+            create_worktree,
             rename_branch,
             reveal_path,
             open_path,
@@ -1655,6 +1656,31 @@ async fn create_branch_from(
         &name,
         &start,
         checkout,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
+async fn create_worktree(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    name: String,
+    start: String,
+    parent: String,
+    directory: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<crate::model::CreatedWorktree, AppError> {
+    crate::git::sync::create_worktree(
+        state.inner(),
+        &path,
+        &name,
+        &start,
+        &parent,
+        &directory,
         generation,
         request_id,
     )

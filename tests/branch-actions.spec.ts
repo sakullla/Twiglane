@@ -17,6 +17,7 @@ const api = vi.hoisted(() => ({
   openRepository: vi.fn(),
   repoHeads: vi.fn(),
   removeWorktree: vi.fn(),
+  createWorktree: vi.fn(),
 }));
 
 vi.mock("../src/lib/api", () => ({ api }));
@@ -192,6 +193,75 @@ describe("分支右键菜单", () => {
     await fireEvent.click(screen.getByRole("button", { name: /创建分支/ }));
     await waitFor(() => expect(api.createBranchFrom).toHaveBeenCalledWith("/repo", "spike", "feature/ui", false, 4, 7));
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("放到新工作区：默认放在仓库旁边，创建后打开新工作区，当前工作区不切换", async () => {
+    api.createWorktree.mockResolvedValue({ path: "/work/demo-hotfix-login", branch: "hotfix/login", generation: 5 });
+    const nextRepo = { ...opened, summary: { name: "demo-hotfix-login", path: "/work/demo-hotfix-login" } };
+    api.openRepository.mockResolvedValue(nextRepo);
+    const onOpened = vi.fn();
+    const beforeOpen = vi.fn(async () => true);
+    const onClose = vi.fn();
+    const onNotice = vi.fn();
+    render(BranchDialog, {
+      props: {
+        opened: { ...opened, summary: { name: "demo", path: "/work/demo" } },
+        disabled: false,
+        onBusy: vi.fn(),
+        onSnapshot: vi.fn(),
+        onFailure: vi.fn(),
+        nextId: () => 7,
+        onClose,
+        onNotice,
+        onOpened,
+        beforeOpen,
+      },
+    });
+    await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));
+    await fireEvent.click(screen.getByRole("button", { name: "新建分支" }));
+    await fireEvent.input(screen.getByLabelText("新建分支"), { target: { value: "hotfix/login" } });
+    await fireEvent.click(screen.getByRole("checkbox", { name: "放到新工作区" }));
+    // 选了新工作区就不再问「创建后切换过去」：当前工作区本来就不动。
+    expect(screen.queryByRole("checkbox", { name: "创建后切换过去" })).toBeNull();
+    const location = screen.getByLabelText("工作区位置") as HTMLInputElement;
+    expect(location.value).toBe("/work/demo-hotfix-login");
+    await fireEvent.click(screen.getByRole("button", { name: /创建并打开工作区/ }));
+    await waitFor(() =>
+      expect(api.createWorktree).toHaveBeenCalledWith("/work/demo", "hotfix/login", "feature/ui", "/work", "demo-hotfix-login", 4, 7),
+    );
+    expect(api.createBranchFrom).not.toHaveBeenCalled();
+    await waitFor(() => expect(beforeOpen).toHaveBeenCalledWith("/work/demo-hotfix-login"));
+    await waitFor(() => expect(onOpened).toHaveBeenCalledWith(nextRepo));
+    expect(onClose).toHaveBeenCalled();
+    expect(onNotice).toHaveBeenCalledWith(expect.stringContaining("当前工作区没有切换"));
+  });
+
+  it("工作区位置可以改；远端仓库不提供新工作区选项", async () => {
+    api.createWorktree.mockResolvedValue({ path: "D:/elsewhere/wt", branch: "spike", generation: 5 });
+    api.openRepository.mockResolvedValue(opened);
+    const view = render(BranchDialog, {
+      props: { opened, disabled: false, onBusy: vi.fn(), onSnapshot: vi.fn(), onFailure: vi.fn(), onClose: vi.fn(), onNotice: vi.fn(), nextId: () => 7 },
+    });
+    await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));
+    await fireEvent.click(screen.getByRole("button", { name: "新建分支" }));
+    await fireEvent.click(screen.getByRole("checkbox", { name: "放到新工作区" }));
+    await fireEvent.input(screen.getByLabelText("工作区位置"), { target: { value: "D:\\elsewhere\\wt" } });
+    // 改过位置后再改分支名，不覆盖用户填的位置。
+    await fireEvent.input(screen.getByLabelText("新建分支"), { target: { value: "spike" } });
+    expect((screen.getByLabelText("工作区位置") as HTMLInputElement).value).toBe("D:\\elsewhere\\wt");
+    await fireEvent.click(screen.getByRole("button", { name: /创建并打开工作区/ }));
+    await waitFor(() => expect(api.createWorktree).toHaveBeenCalledWith("/repo", "spike", "feature/ui", "D:\\elsewhere", "wt", 4, 7));
+    view.unmount();
+
+    render(BranchDialog, {
+      props: {
+        opened: { ...opened, summary: { name: "demo", path: "ssh://host/repo" } },
+        disabled: false, onBusy: vi.fn(), onSnapshot: vi.fn(), onFailure: vi.fn(), onClose: vi.fn(), onNotice: vi.fn(), nextId: () => 7,
+      },
+    });
+    await waitFor(() => expect(document.querySelectorAll(".branch-row").length).toBe(2));
+    await fireEvent.click(screen.getByRole("button", { name: "新建分支" }));
+    expect(screen.queryByRole("checkbox", { name: "放到新工作区" })).toBeNull();
   });
 
   it("从当前分支新建时起点落在「当前分支」选项上，不留空下拉", async () => {

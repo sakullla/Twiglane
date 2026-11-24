@@ -382,6 +382,8 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--danger) 1
 .review-strip-notice { display: inline-flex; align-items: center; gap: var(--space-2); min-width: 0; max-width: 380px; }
 .review-strip-note { max-width: 360px; }
 .review-strip-dismiss { width: 22px; height: 22px; flex: none; }
+/* 完全关闭审查：固定在这一行最右端，关闭全部来源并收起审查栏。 */
+.review-strip-close { flex: none; margin-left: var(--space-4); }
 .review-strip-jump { flex: none; }
 .review-source-manager { position: relative; flex: none; }
 .review-source-manager-trigger[aria-expanded="true"] { background: var(--active); color: var(--fg); }

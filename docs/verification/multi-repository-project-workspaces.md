@@ -21,7 +21,7 @@ state.json v1 升级到 v2 前保留精确字节备份 `state.v1.backup.json`，
 
 ## 开发验证记录
 
-受控命令回执均在 `/Users/yanggeng/.sakullla/runtime/controlled-commands/`，以下为实际完成过的记录；最终补验记录在交付前追加。
+受控命令回执均在 `~/.sakullla/runtime/controlled-commands/`，以下为实际完成过的记录；最终补验记录在交付前追加。
 
 | 命令/场景 | 结果 | 回执目录名 |
 | --- | --- | --- |

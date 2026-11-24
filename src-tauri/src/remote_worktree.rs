@@ -1232,7 +1232,11 @@ async fn connect_planned(
         return Err(AppError::new("target_changed", "安装目标已变化，请重新打开并确认。"));
     }
     let needs_install = plan.installed.as_deref() != Some(&plan.artifact.sha256);
-    if needs_install && !request.allow_install {
+    // 只有「第一次把组件放到这台主机」需要确认。主机上已经有 Twiglane 自己的组件（只是旧版本）时，
+    // 用户早已同意过：每次升级 Twiglane 都会带来新构建的组件，按升级直接换成本机发行包里签名的那一份，
+    // 不再每次弹出安装确认。传输仍然核对摘要、原子替换，失败时保留原组件。
+    let upgrade = needs_install && plan.installed.is_some();
+    if needs_install && !request.allow_install && !upgrade {
         return Ok(Opened::NeedsInstall(Box::new(selected)));
     }
     if needs_install {
@@ -3844,9 +3848,21 @@ esac
         assert!(!root.join("wrote").exists(), "changed operation consent must not install or connect");
         request.replace_pending_provision = Some(old_id);
         probe["peerRevision"] = json!("d".repeat(64));
-        write("probe-v2.json", probe);
+        write("probe-v2.json", probe.clone());
         let stale = connect(Some(&helper), &request, Some(*offer), None, &progress, &access).await.err().unwrap();
         assert_eq!(stale.code, "target_changed");
         assert!(!root.join("wrote").exists(), "mismatched configuration must not install or connect");
+
+        // 主机上已有 Twiglane 的旧版组件：按升级直接传输，不再要求确认。
+        // 本用例的连接器在 install-v2 上记下「写入」并失败，足以证明没有停在确认上。
+        probe["peerRevision"] = json!("b".repeat(64));
+        probe["agentSha256"] = json!("e".repeat(64));
+        write("probe-v2.json", probe);
+        request.allow_install = false;
+        request.replace_pending_provision = None;
+        request.provision = None;
+        let upgraded = connect(Some(&helper), &request, None, None, &progress, &access).await;
+        assert!(!matches!(upgraded, Ok(Opened::NeedsInstall(_))), "an existing older component is upgraded without asking again");
+        assert!(root.join("wrote").exists(), "upgrade transfers the bundled component");
     }
 }

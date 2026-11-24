@@ -281,6 +281,23 @@ function reviewProps(overrides: Record<string, unknown> = {}) {
 }
 
 describe("任务审阅组件", () => {
+  it("任务文件栏和差异之间的分隔条可以拖动或用方向键调整，宽度记在本机", async () => {
+    globalThis.localStorage?.removeItem("twiglane.taskFilesWidth");
+    render(TaskReview, { props: reviewProps() });
+    const handle = await screen.findByRole("slider", { name: "调整任务文件栏宽度" });
+    const split = () => document.querySelector<HTMLElement>(".task-split")!;
+    expect(split().style.getPropertyValue("--task-files")).toBe("360px");
+    await fireEvent.keyDown(handle, { key: "ArrowRight" });
+    expect(split().style.getPropertyValue("--task-files")).toBe("376px");
+    expect(globalThis.localStorage?.getItem("twiglane.taskFilesWidth")).toBe("376");
+    await fireEvent.pointerDown(handle, { clientX: 400, pointerId: 1 });
+    await fireEvent.pointerMove(handle, { clientX: 300, pointerId: 1 });
+    await fireEvent.pointerUp(handle, { clientX: 300, pointerId: 1 });
+    expect(split().style.getPropertyValue("--task-files")).toBe("276px");
+    expect(globalThis.localStorage?.getItem("twiglane.taskFilesWidth")).toBe("276");
+    globalThis.localStorage?.removeItem("twiglane.taskFilesWidth");
+  });
+
   it("连续分页不重复读取或跳过页，反复点击只保留一个分页请求", async () => {
     const pending: Array<() => void> = [];
     mocks.api.loadTaskDiff.mockImplementation((_worktree: string, _base: string, _head: string, path: string, _generation: number, _id: number, _original: string | null, offset: number) => {

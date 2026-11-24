@@ -37,6 +37,8 @@
   import Icon from "./Icon.svelte";
   import LineCounts from "./LineCounts.svelte";
   import MultiFileDiff from "./MultiFileDiff.svelte";
+  import PaneResizer from "./PaneResizer.svelte";
+  import { clampWidth } from "../layout";
 
   /**
    * 任务净差异：cliora 审查链接带来的起点到当前工作区的最终结果。
@@ -186,6 +188,41 @@
   ]);
 
   type Phase = "no-baseline" | "reading" | "ready" | "failed";
+
+  /* 左侧任务文件栏可以拖动调宽（与提交文件栏同一套分隔条）；宽度是本机偏好，存在 localStorage。 */
+  const TASK_FILES_WIDTH_KEY = "twiglane.taskFilesWidth";
+  const DEFAULT_TASK_FILES_WIDTH = 360;
+  /** 工具行里有搜索、审阅进度与导航，再窄就挤不下。 */
+  const MIN_TASK_FILES_WIDTH = 220;
+  const MIN_TASK_DIFF_WIDTH = 360;
+
+  function readTaskFilesWidth(): number {
+    try {
+      const stored = Number(globalThis.localStorage?.getItem(TASK_FILES_WIDTH_KEY));
+      return stored > 0 ? clampWidth(stored) : DEFAULT_TASK_FILES_WIDTH;
+    } catch {
+      return DEFAULT_TASK_FILES_WIDTH;
+    }
+  }
+
+  function saveTaskFilesWidth(): void {
+    try {
+      globalThis.localStorage?.setItem(TASK_FILES_WIDTH_KEY, String(taskFilesWidth));
+    } catch {
+      // 本机偏好写不进去时只影响下次打开的初始宽度。
+    }
+  }
+
+  /** 渲染宽度：容器窄时收紧，给差异区留足宽度，不改写已保存的宽度。 */
+  function fitTaskFilesWidth(width: number, total: number): number {
+    const wanted = Math.max(MIN_TASK_FILES_WIDTH, width);
+    if (total <= 0) return wanted;
+    return Math.max(MIN_TASK_FILES_WIDTH, Math.min(wanted, total - MIN_TASK_DIFF_WIDTH));
+  }
+
+  let taskFilesWidth = $state(readTaskFilesWidth());
+  let taskSplitWidth = $state(0);
+  let taskFilesShown = $derived(fitTaskFilesWidth(taskFilesWidth, taskSplitWidth));
 
   let task = $state.raw<TaskReview | null>(null);
   let phase = $state<Phase>("no-baseline");
@@ -948,7 +985,7 @@
       <p>{task.message}</p>
     </div>
   {:else}
-    <div class="task-split">
+    <div class="task-split" style={`--task-files:${taskFilesShown}px`} bind:clientWidth={taskSplitWidth}>
       <aside class="task-files" aria-label="任务文件">
         <FileList
           variant="task"
@@ -978,6 +1015,14 @@
           {stageSideFor}
         />
       </aside>
+      <PaneResizer
+        value={taskFilesShown}
+        saved={taskFilesWidth}
+        label="调整任务文件栏宽度"
+        fit={(width) => fitTaskFilesWidth(width, taskSplitWidth)}
+        onResize={(width) => (taskFilesWidth = width)}
+        onCommit={saveTaskFilesWidth}
+      />
       {#if rows.length > 0}
         <div class="task-diff">
           {#if selected && onOpenUnstaged && !multiActive}

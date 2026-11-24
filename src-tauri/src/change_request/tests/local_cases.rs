@@ -202,6 +202,7 @@ fn insecure_plain_http_instances_never_receive_tokens() {
     };
     assert!(ensure_secure_channel(&loopback).is_ok());
 
+
     let secure = Repository {
         api_base: "https://git.example.test/api/v1".to_string(),
         web_base: "https://git.example.test".to_string(),
@@ -217,14 +218,20 @@ fn insecure_plain_http_instances_never_receive_tokens() {
 }
 
 #[tokio::test]
-async fn manual_gitlab_strips_a_same_origin_web_clone_prefix_and_requires_safe_input() {
+async fn manual_gitlab_strips_a_same_origin_web_clone_prefix_and_accepts_http_or_https_only() {
     let http = http_with(256, 200);
     let remote = "https://git.example.test:8443/tools/gitlab/team/sub/app.git";
     let repo = resolve_repository(&http, remote, Some("https://git.example.test:8443/tools/gitlab/")).await.unwrap();
     assert_eq!(repo.full_path(), "team/sub/app");
     assert_eq!(repo.api_base, "https://git.example.test:8443/tools/gitlab/api/v4");
+    // 内网 GitLab 常用明文 HTTP：手填 http:// 实例地址可以使用。
+    let plain = resolve_repository(&http, remote, Some("http://git.example.test/tools/gitlab")).await.unwrap();
+    assert_eq!(plain.api_base, "http://git.example.test/tools/gitlab/api/v4");
+    assert!(plain.gitlab_instance.is_some());
+    // 手填即明确同意：明文实例也可以发送令牌（自动探测到的明文实例仍然拒绝，见上一个用例）。
+    assert!(ensure_secure_channel(&plain).is_ok());
     for invalid in [
-        "http://git.example.test/tools/gitlab",
+        "ftp://git.example.test/tools/gitlab",
         "https://user:password@git.example.test/tools/gitlab",
         "https://git.example.test/tools/gitlab?query=secret",
         "https://git.example.test/tools/gitlab#fragment",

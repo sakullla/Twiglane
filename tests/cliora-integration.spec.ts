@@ -649,6 +649,41 @@ describe("cliora v2 审查链接", () => {
     expect(clioraReview.sources.map(source => source.reviewId)).toEqual([REVIEW_A]);
   });
 
+  it("只剩一个未选中的来源时可直接关闭，不必先切换过去", async () => {
+    mocks.api.clioraReviewSources.mockResolvedValue({ sources: [
+      { source: { protocolVersion: 3, workspaceId: null, repositoryId: null, workspaceName: null, reviewId: REVIEW_A, sessionId: SESSION_A, worktreePath: WORKTREE, baseline: BASELINE }, result: null, lastReturn: null },
+      { source: { protocolVersion: 3, workspaceId: null, repositoryId: null, workspaceName: null, reviewId: REVIEW_B, sessionId: SESSION_B, worktreePath: OTHER_WORKTREE, baseline: COMMITTED }, result: null, lastReturn: null },
+    ], expiredPending: 0 });
+    mocks.api.openRepository.mockImplementation(async (path: string) => openedAt(path));
+    await mountShell();
+    await waitFor(() => expect(screen.queryByRole("button", { name: "选择 Cliora 审查来源" })).toBeTruthy());
+
+    // 关掉一个后只剩一个、且没有选中：不必先切换过去，直接关闭。
+    await fireEvent.click(screen.getByText("管理审查来源（2）"));
+    await fireEvent.click(screen.getByRole("button", { name: `关闭审查来源 ${REVIEW_B.slice(0, 8)}` }));
+    await waitFor(() => expect(clioraReview.sources.map((source) => source.reviewId)).toEqual([REVIEW_A]));
+    expect(clioraReview.source).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "关闭审查来源" }));
+    await waitFor(() => expect(mocks.api.clioraReviewForget).toHaveBeenCalledWith(REVIEW_A, SESSION_A));
+    await waitFor(() => expect(clioraReview.sources).toHaveLength(0));
+    expect(mocks.api.openRepository).not.toHaveBeenCalledWith(WORKTREE, expect.anything());
+  });
+
+  it("审查栏右端的关闭按钮关闭全部来源并收起这一行", async () => {
+    mocks.api.clioraReviewSources.mockResolvedValue({ sources: [
+      { source: { protocolVersion: 3, workspaceId: null, repositoryId: null, workspaceName: null, reviewId: REVIEW_A, sessionId: SESSION_A, worktreePath: WORKTREE, baseline: BASELINE }, result: null, lastReturn: null },
+      { source: { protocolVersion: 3, workspaceId: null, repositoryId: null, workspaceName: null, reviewId: REVIEW_B, sessionId: SESSION_B, worktreePath: OTHER_WORKTREE, baseline: COMMITTED }, result: null, lastReturn: null },
+    ], expiredPending: 0 });
+    mocks.api.openRepository.mockImplementation(async (path: string) => openedAt(path));
+    await mountShell();
+    await waitFor(() => expect(screen.queryByRole("button", { name: "选择 Cliora 审查来源" })).toBeTruthy());
+    await fireEvent.click(screen.getByRole("button", { name: "关闭 Cliora 审查" }));
+    await waitFor(() => expect(mocks.api.clioraReviewForget).toHaveBeenCalledWith(REVIEW_A, SESSION_A));
+    expect(mocks.api.clioraReviewForget).toHaveBeenCalledWith(REVIEW_B, SESSION_B);
+    await waitFor(() => expect(document.querySelector(".review-strip")).toBeNull());
+    expect(clioraReview.sources).toHaveLength(0);
+  });
+
   it("审查来源管理弹层支持点击条目切换、Esc 关闭归还焦点，且审查条支持一键回到任务净差异与关闭提示", async () => {
     mocks.api.clioraReviewSources.mockResolvedValue({
       sources: [

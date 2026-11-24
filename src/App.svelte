@@ -4094,6 +4094,31 @@
     } catch (error) { showError(error); }
   }
 
+  /**
+   * 完全关闭 Cliora 审查：关闭全部来源并收起审查栏。仓库、阅读记录和草稿都保留；
+   * 某个来源关闭失败时其余照常关闭，失败的原因如实说明。
+   */
+  async function closeAllClioraReviews() {
+    if (switchBlocked(commandState)) return;
+    const sources = [...clioraReview.sources];
+    const wasActive = Boolean(clioraReview.source);
+    closeReviewManager(false);
+    let failure: unknown = null;
+    for (const source of sources) {
+      try {
+        await api.clioraReviewForget(source.reviewId, source.sessionId);
+        forgetClioraReview(source.reviewId);
+        forgetComments(source.reviewId);
+      } catch (error) {
+        failure ??= error;
+      }
+    }
+    clioraSourcesNotice = "";
+    if (wasActive) closeTask();
+    if (failure) showError(failure);
+    else if (sources.length > 0) notice("已关闭全部审查来源；仓库、阅读记录和草稿仍保留。需要审查时从 Cliora 重新发起。");
+  }
+
   /** 审查来源的仓库名：工作区路径最后一段，比整条路径好认。 */
   function clioraRepoName(source: (typeof clioraReview.sources)[number]): string {
     return source.worktreePath.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || source.worktreePath;
@@ -5555,6 +5580,14 @@
       {/if}
       {#if clioraReview.source}
         <button class="btn btn-ghost btn-sm" disabled={writeLocked} title={writeLocked ? switchBlockedReason(commandState) : "关闭后仓库、阅读记录和草稿都保留"} onclick={() => void closeClioraReview()}>关闭此审查来源</button>
+      {:else if clioraReview.sources.length === 1}
+        <!-- 只剩一个来源且没有选中它：直接关闭，不必先切换过去。 -->
+        <button
+          class="btn btn-ghost btn-sm"
+          disabled={writeLocked}
+          title={writeLocked ? switchBlockedReason(commandState) : `关闭 ${clioraRepoName(clioraReview.sources[0])} 的审查来源；仓库、阅读记录和草稿都保留`}
+          onclick={() => void closeClioraReview(clioraReview.sources[0].reviewId)}
+        >关闭审查来源</button>
       {/if}
       {#if clioraReview.sources.length > 1}
         <div class="review-source-manager" bind:this={reviewManagerAnchor}>
@@ -5602,6 +5635,18 @@
           {/if}
         </div>
       {/if}
+      <button
+        type="button"
+        class="icon-btn sm review-strip-close"
+        aria-label="关闭 Cliora 审查"
+        disabled={writeLocked && clioraReview.sources.length > 0}
+        title={writeLocked && clioraReview.sources.length > 0
+          ? switchBlockedReason(commandState)
+          : clioraReview.sources.length > 1
+            ? `关闭全部 ${clioraReview.sources.length} 个审查来源并收起这一行；仓库、阅读记录和草稿都保留`
+            : "关闭审查并收起这一行；仓库、阅读记录和草稿都保留"}
+        onclick={() => void closeAllClioraReviews()}
+      ><Icon name="x" size={14} /></button>
     </div>
   {/if}
   <!-- 标题栏项目标签的可见内容：图标 + 项目名 +「项目外 / 名单待处理」。名称可省略，状态字不参与省略。 -->

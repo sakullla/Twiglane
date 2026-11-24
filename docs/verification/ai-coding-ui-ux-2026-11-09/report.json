@@ -13,7 +13,7 @@
   "environment": {
     "node": "v26.4.0",
     "platform": "win32 x64",
-    "temp": "C:\\Users\\12976\\AppData\\Local\\Temp"
+    "temp": "%TEMP%"
   },
   "health": {
     "mockApi": true,

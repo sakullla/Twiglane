@@ -729,6 +729,28 @@ pub fn create_branch_at_command(
     (git.to_path_buf(), args)
 }
 
+/// 新建分支并检出到新的附属工作区：`git worktree add -b <name> -- <path> <start>`。
+/// 不带 `--force`：目标已存在、分支已存在或已被其他工作区检出时由 Git 拒绝。
+pub fn worktree_add_command(
+    git: &Path,
+    root: &Path,
+    name: &str,
+    target: &Path,
+    start: &str,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("worktree"),
+        OsString::from("add"),
+        OsString::from("-b"),
+        OsString::from(name),
+        OsString::from("--"),
+        target.as_os_str().to_os_string(),
+        OsString::from(start),
+    ]);
+    (git.to_path_buf(), args)
+}
+
 /// 重命名本地分支：`git branch -m -- <old> <new>`（不加 -M，目标已存在时由 Git 拒绝）。
 pub fn rename_branch_command(
     git: &Path,

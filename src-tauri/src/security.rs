@@ -128,6 +128,8 @@ fn capabilities_grant_only_explicit_terminal_ipc_not_a_generic_shell() {
         "allow-push-local-branch",
         "allow-create-branch",
         "allow-create-branch-from",
+        // 新建分支并放进新的附属工作区：参数只有仓库路径、分支名、起点与父目录下的一段目录名。
+        "allow-create-worktree",
         "allow-rename-branch",
         "allow-reveal-path",
         "allow-open-path",

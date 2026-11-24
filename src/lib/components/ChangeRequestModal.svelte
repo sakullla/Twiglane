@@ -72,6 +72,7 @@
   const submitting = $derived(phase.kind === "submitting");
   const canConfigureGitLab = $derived(phase.kind === "failed" && (
     phase.code === "change_request_gitlab_instance" || phase.code === "change_request_gitlab_project" ||
+    phase.code === "change_request_insecure" ||
     ((!prepared || prepared.gitlabInstance) &&
       (phase.code === "change_request_network" || phase.code === "change_request_platform_unknown"))
   ));
@@ -327,7 +328,10 @@
           placeholder="https://git.example.com:8443/gitlab"
           bind:value={gitlabInstanceDraft}
         />
-        <p class="change-request-hint">填写浏览器访问 GitLab 的实例根地址，保留实际端口和部署子路径。</p>
+        <p class="change-request-hint">
+          填写浏览器访问 GitLab 的实例根地址，保留实际端口和部署子路径；支持 http:// 与 https://。
+          {#if /^\s*http:\/\//i.test(gitlabInstanceDraft)}<br /><span class="change-request-warn">明文 HTTP：令牌会以明文发送，只建议在可信内网使用。</span>{/if}
+        </p>
         <div><button
           type="button"
           class="btn btn-secondary btn-sm"
@@ -578,6 +582,9 @@
     margin: 0;
     color: var(--fg-subtle);
     font-size: var(--text-xs);
+  }
+  .change-request-warn {
+    color: var(--warning-text);
   }
   .change-request-link {
     margin: 0;

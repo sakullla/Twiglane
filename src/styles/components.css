@@ -316,6 +316,9 @@
 .branch-base { display: inline-flex; align-items: center; gap: var(--space-8); min-width: 0; flex: 1; color: var(--fg-muted); font-size: var(--text-sm); }
 .branch-base .branch-picker { flex: 1; min-width: 0; max-width: 360px; }
 .branch-checkout { flex: none; color: var(--fg); }
+.branch-create-switches { display: inline-flex; align-items: center; flex-wrap: wrap; gap: var(--space-12); flex: none; }
+.branch-worktree { flex: none; color: var(--fg); }
+.branch-worktree-dir { display: flex; flex-direction: column; gap: 6px; }
 .branch-rename .row { align-items: center; }
 .branch-rename .input { flex: 1; min-width: 0; }
 .branch-row:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
@@ -2692,8 +2695,8 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 .task-failure p { margin: 0; }
 .task-empty { padding: var(--space-16) var(--space-12); }
 .task-placeholder { background: var(--surface); }
-/* 左边任务文件队列沿用改动列表组件，宽度比提交文件栏宽一档：工具行里有审阅进度与导航。 */
-.task-split { flex: 1; min-height: 0; display: grid; grid-template-columns: clamp(300px, 34%, 420px) minmax(0, 1fr); }
+/* 左边任务文件队列沿用改动列表组件；与差异区之间是可拖动的分隔条（PaneResizer），栏宽由 --task-files 给出。 */
+.task-split { flex: 1; min-height: 0; display: grid; grid-template-columns: var(--task-files, 360px) 1px minmax(0, 1fr); }
 .task-files {
   display: flex;
   flex-direction: column;
@@ -2701,7 +2704,6 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
   min-height: 0;
   padding-top: var(--space-8);
   background: var(--surface-2);
-  box-shadow: inset -1px 0 0 var(--border);
 }
 
 /* 右栏：净差异与（必要时）截断说明。截断说明独立一行，不挤动代码区。 */
@@ -2729,6 +2731,7 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 @container history-detail (max-width: 720px) {
   .task-split { grid-template-columns: minmax(0, 1fr); grid-template-rows: fit-content(45%) minmax(0, 1fr); }
   .task-files { box-shadow: inset 0 -1px 0 var(--border); }
+  .task-split > .resizer { display: none; }
 }
 
 

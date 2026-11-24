@@ -53,6 +53,7 @@ import type {
   RepositoryDocument,
   FilePreview,
   CloneResult,
+  CreatedWorktree,
   HttpCredential,
   CommitBranches,
   CommitDetail,
@@ -1390,6 +1391,19 @@ const apiBase = {
     generation: number,
     requestId: number,
   ) => invoke<BranchState>("create_branch_from", { path, name, start, checkout, generation, requestId }),
+  /**
+   * 新建分支并放进新的附属工作区（git worktree add -b）：目标是 parent/directory，必须不存在。
+   * 当前工作区不切换；返回新工作区路径，由界面按普通打开仓库切过去。只支持本机仓库。
+   */
+  createWorktree: (
+    path: string,
+    name: string,
+    start: string,
+    parent: string,
+    directory: string,
+    generation: number,
+    requestId: number,
+  ) => invoke<CreatedWorktree>("create_worktree", { path, name, start, parent, directory, generation, requestId }),
   renameBranch: (path: string, oldName: string, newName: string, generation: number, requestId: number) =>
     invoke<BranchState>("rename_branch", { path, old: oldName, new: newName, generation, requestId }),
   /** 在系统文件管理器里显示仓库内的文件（relative 为空时显示仓库根目录）。 */

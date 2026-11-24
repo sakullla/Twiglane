@@ -9,7 +9,7 @@ use crate::git::command::{
     commit_numstat_command, diff_tree_command, history_details_command, history_log_command,
     ignored_files_command, local_branch_names_command, ref_labels_command, rev_parse_command,
     show_current_branch_command, stash_apply_command, stash_drop_command, stash_list_command,
-    stash_push_command, status_command, verify_local_branch_command, verify_upstream_command,
+    stash_push_command, status_command, unpushed_tips_command, verify_local_branch_command,
     HistoryLog, EMPTY_TREE_OID,
     HISTORY_PAGE_SIZE,
 };
@@ -90,8 +90,6 @@ pub async fn history_page(
     let mut resolved = resolve_history(request, None)?;
     let git = require_git(backend).await?;
     let generation = ensure_scope(backend, &root, &git.path, &mut resolved, generation, request_id).await?;
-    let refs = load_labels(backend, &root, &git.path, generation, request_id).await?;
-    let generation = refs.0;
     let (mut commits, has_more, generation) = load_history_page(
         backend,
         &root,
@@ -102,7 +100,13 @@ pub async fn history_page(
         generation,
     )
     .await?;
-    attach_labels(&mut commits, &refs.1);
+    let generation = if commits.is_empty() {
+        generation
+    } else {
+        let (generation, labels) = load_labels(backend, &root, &git.path, generation, request_id).await?;
+        attach_labels(&mut commits, &labels);
+        generation
+    };
     let meta = load_branch_meta(backend, &root, &git.path, generation).await?;
     let state = classify_history(
         backend,
@@ -562,9 +566,14 @@ pub async fn file_history(
         )
         .with_generation(generation));
     }
-    let (generation, labels) =
-        load_labels(backend, &root, &git.path, generation, internal_request_id()).await?;
-    attach_labels(&mut commits, &labels);
+    let generation = if commits.is_empty() {
+        generation
+    } else {
+        let (generation, labels) =
+            load_labels(backend, &root, &git.path, generation, internal_request_id()).await?;
+        attach_labels(&mut commits, &labels);
+        generation
+    };
     let meta = load_branch_meta(backend, &root, &git.path, generation).await?;
     let state = classify_history(
         backend,
@@ -778,6 +787,7 @@ struct ResolvedHistory {
     /// 「未推送」：当前分支上还没到远程的提交。有上游时是 `@{upstream}..HEAD`，
     /// 没有上游时是 `HEAD --not --remotes`；由 ensure_scope 在读取前确定。
     unpushed: bool,
+    unpushed_tips_equal: bool,
     /// 任务范围：`<起点>..HEAD`。起点是已校验的完整提交标识，不是分支名，不走分支存在性校验。
     range: bool,
     exclude_remotes: bool,
@@ -821,6 +831,7 @@ fn resolve_history(request: &HistoryRequest, file_path: Option<PathBuf>) -> Resu
         scope_label,
         head_scope,
         unpushed,
+        unpushed_tips_equal: false,
         range: range_base.is_some(),
         exclude_remotes: false,
         author: if author.is_empty() { None } else { Some(author) },
@@ -901,27 +912,23 @@ async fn ensure_scope(
             root,
             generation,
             request_id,
-            verify_upstream_command(git, root),
+            unpushed_tips_command(git, root),
         )
         .await?;
-        if output.exit_code == 0 {
-            resolved.revision = Some("@{upstream}..HEAD".to_string());
-            resolved.exclude_remotes = false;
+        let mut tips = output.stdout.split(|byte| *byte == b'\n');
+        let head = String::from_utf8_lossy(tips.next().unwrap_or_default());
+        let Ok(head) = validate_oid(&head) else {
+            // 未出生分支交给 git log 区分无提交与实际读取错误。
             return Ok(generation);
+        };
+        let upstream = String::from_utf8_lossy(tips.next().unwrap_or_default());
+        if let (0, Ok(upstream)) = (output.exit_code, validate_oid(&upstream)) {
+            resolved.unpushed_tips_equal = upstream == head;
+            resolved.revision = Some(format!("{upstream}..{head}"));
+        } else {
+            resolved.revision = Some(head);
+            resolved.exclude_remotes = true;
         }
-        // 没有上游：只留任何远程跟踪分支都还没有的提交。还没有提交的分支不写 HEAD，
-        // 交给 `git log` 自己报「没有提交」，得到空列表而不是「找不到提交」。
-        let (head, generation) = read_output(
-            backend,
-            root,
-            generation,
-            internal_request_id(),
-            rev_parse_command(git, root, "HEAD"),
-        )
-        .await?;
-        let born = head.exit_code == 0;
-        resolved.revision = born.then(|| "HEAD".to_string());
-        resolved.exclude_remotes = born;
         return Ok(generation);
     }
     if resolved.range {
@@ -957,6 +964,9 @@ async fn load_history_page(
     follow: bool,
     generation: u64,
 ) -> Result<(Vec<HistoryCommit>, bool, u64), AppError> {
+    if resolved.unpushed_tips_equal {
+        return Ok((Vec::new(), false, generation));
+    }
     let prefix = is_oid_prefix(&resolved.query);
     let dated = resolved.since.is_some() || resolved.until.is_some();
     // 无日期、非文件历史仍是一条带 --skip 和 --max-count 的日志。文件历史不能走这条，
@@ -1176,6 +1186,9 @@ async fn classify_history(
 ) -> Result<(u64, String), AppError> {
     if !empty_page || offset > 0 {
         return Ok((generation, "ok".to_string()));
+    }
+    if resolved.unpushed && resolved.revision.is_some() {
+        return Ok((generation, "no_match".to_string()));
     }
     let (bytes, generation) = read_bytes(
         backend,
@@ -2925,7 +2938,10 @@ mod tests {
     #[tokio::test]
     async fn unpushed_scope_follows_upstream_and_falls_back_to_remotes() {
         let fixture = crate::test_support::git_fixture("history-unpushed");
-        let backend = fixture.backend();
+        let trace = fixture.path().join("trace.log");
+        let backend = fixture
+            .backend_with_extra_env(vec![("GIT_TRACE".into(), trace.as_os_str().to_os_string())]);
+        let trace_contents = || fs::read_to_string(&trace).unwrap();
         let unborn = fixture.repo("unborn");
         git(&unborn, &["init", "-b", "main"]);
         let unborn_root = canonical_existing(&unborn).unwrap();
@@ -2952,11 +2968,14 @@ mod tests {
         let oids = |page: &HistoryPage| page.commits.iter().map(|commit| commit.oid.clone()).collect::<Vec<_>>();
 
         // 没有上游：任何远程分支上都还没有的提交。
+        let before = trace_contents().len();
         let page = history_page(&backend, &repo_key(&root), &request, generation(&backend, &root), 2)
             .await
             .unwrap();
         assert_eq!(page.scope, "unpushed");
         assert_eq!(oids(&page), vec![c.clone(), b.clone()]);
+        let after = trace_contents();
+        assert_eq!(after[before..].matches("built-in: git rev-parse ").count(), 1);
 
         // 有上游：按上游计算，与状态栏的领先数一致；别的远程分支上有也不算推送到了上游。
         git(&repo, &["update-ref", "refs/remotes/origin/main", &b]);
@@ -2968,11 +2987,28 @@ mod tests {
         assert_eq!(oids(&page), vec![c.clone()]);
 
         git(&repo, &["update-ref", "refs/remotes/origin/main", &c]);
+        let before = trace_contents().len();
         let page = history_page(&backend, &repo_key(&root), &request, generation(&backend, &root), 4)
             .await
             .unwrap();
         assert!(page.commits.is_empty());
         assert_eq!(page.state, "no_match");
+        assert_eq!(page.head.as_deref(), Some("main"));
+        assert_eq!(page.branches, vec!["main"]);
+        let after = trace_contents();
+        for command in ["git log ", "git rev-list ", "refs/tags"] {
+            assert!(!after[before..].contains(command), "{command}: {}", &after[before..]);
+        }
+
+        // detached HEAD 不会沿用刚才分支的上游，仍排除已有的远程提交。
+        git(&repo, &["update-ref", "refs/remotes/origin/main", &a]);
+        git(&repo, &["update-ref", "-d", "refs/remotes/origin/other"]);
+        git(&repo, &["checkout", "--detach"]);
+        let page = history_page(&backend, &repo_key(&root), &request, generation(&backend, &root), 5)
+            .await
+            .unwrap();
+        assert_eq!(oids(&page), vec![c, b]);
+        assert!(page.head.is_none());
     }
 
     #[tokio::test]

@@ -1085,14 +1085,16 @@ pub fn verify_local_branch_command(
     (git.to_path_buf(), args)
 }
 
-/// 当前分支是否设置了上游：`@{upstream}` 解析成功即有。
-pub fn verify_upstream_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
+/// 先输出 HEAD，再输出上游。在没有可解析的上游时，Git 仍保留先输出的 HEAD。
+pub fn unpushed_tips_command(git: &Path, root: &Path) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
     args.extend([
         OsString::from("rev-parse"),
-        OsString::from("--verify"),
-        OsString::from("--quiet"),
+        OsString::from("--revs-only"),
+        OsString::from("--no-flags"),
+        OsString::from("HEAD^{commit}"),
         OsString::from("@{upstream}"),
+        OsString::from("--"),
     ]);
     (git.to_path_buf(), args)
 }

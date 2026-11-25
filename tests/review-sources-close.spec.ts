@@ -4,26 +4,11 @@
  */
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { DiffLine, DiffResponse, FileChange, StatusSnapshot } from "../src/lib/types";
 import { clioraReview, resetClioraReview } from "../src/lib/cliora-review.svelte";
 import { resetReviewProgress } from "../src/lib/review-progress.svelte";
 import { commentDraftCount, resetReviewComments } from "../src/lib/review-comments.svelte";
 import { resetReviewWorkbench } from "../src/lib/review-workbench.svelte";
-import {
-  BASELINE,
-  BASELINE_B,
-  REVIEW_A,
-  REVIEW_B,
-  SESSION_A,
-  WORKTREE,
-  activeViewId,
-  completionAction,
-  composeComment,
-  openSourceMenu,
-  resetShellMocks,
-  reviewUrl,
-  selectedTaskPath,
-  workbench,
-} from "./helpers/review-shell";
 
 const mocks = vi.hoisted(() => {
   const created = new Map<string, ReturnType<typeof vi.fn>>();
@@ -51,6 +36,232 @@ vi.mock("../src/lib/api", () => ({
 }));
 
 import App from "../src/App.svelte";
+
+/* ------------------------- 外壳夹具（本 spec 自包含） ------------------------- */
+
+const WORKTREE = "C:/work/代码 demo";
+const REVIEW_A = "6f1a2b3c-4d5e-4f60-8172-93a4b5c6d7e8";
+const REVIEW_B = "1a2b3c4d-5e6f-4071-8293-a4b5c6d7e8f9";
+const SESSION_A = "0b1c2d3e-4f50-4172-8394-a5b6c7d8e9f0";
+const BASELINE = "a".repeat(40);
+const BASELINE_B = "d".repeat(40);
+
+/** v2 审查链接；baseline 省略时就是「没有起点」的链接。 */
+function reviewUrl(reviewId: string, sessionId: string, baseline: string | null): string {
+  return (
+    "twiglane://review?v=2&reviewId=" + reviewId + "&sessionId=" + sessionId + "&worktreePath=" + encodeURIComponent(WORKTREE) +
+    (baseline ? "&baseline=" + baseline : "")
+  );
+}
+
+const branch = {
+  name: "main",
+  detached: false,
+  unborn: false,
+  headOid: BASELINE,
+  upstream: "origin/main",
+  ahead: 0,
+  behind: 0,
+  liveRemoteChecked: false,
+  remoteCheckedAtMs: 0,
+  remoteCheckStale: false,
+};
+
+const changes: FileChange[] = [
+  { path: "src/a.ts", originalPath: null, staged: "none", unstaged: "modified", untracked: false, unmerged: false },
+];
+
+const snapshot: StatusSnapshot = { generation: 4, branch, files: changes };
+
+function openedAt(path: string) {
+  return { summary: { name: path.split("/").pop() ?? path, path }, generation: 4, snapshot, draft: "", watchDegraded: false };
+}
+
+function diffFor(path: string): DiffResponse {
+  const lines: DiffLine[] = [
+    { kind: "context", text: " keep", oldNo: 1, newNo: 1, hunkIndex: 0 },
+    { kind: "add", text: "+" + path, oldNo: null, newNo: 2, hunkIndex: 0 },
+  ];
+  return {
+    generation: 4,
+    path,
+    staged: false,
+    binary: false,
+    text: null,
+    summary: "1 行新增。",
+    additions: 1,
+    deletions: 0,
+    complete: true,
+    truncated: false,
+    snapshot: "snap",
+    hunks: [{ index: 0, header: "@@ -1,1 +1,2 @@", complete: true, stageable: true, startLine: 0, lineCount: 2 }],
+    lines,
+    offset: 0,
+    totalLines: 2,
+  };
+}
+
+/** 任务范围夹具：链接自带的起点就是 baseline。 */
+function taskFor(baseline: string, paths: string[] = ["src/a.ts", "src/b.ts", "src/c.ts"]) {
+  return {
+    generation: 4,
+    worktree: WORKTREE,
+    baselineRef: baseline,
+    baselineOid: baseline,
+    headOid: BASELINE,
+    branch,
+    commits: [],
+    commitCount: 0,
+    commitsTruncated: false,
+    files: paths.map((path) => ({
+      path,
+      originalPath: null,
+      status: "modified",
+      additions: 1,
+      deletions: 0,
+      binary: false,
+      oldSize: null,
+      newSize: null,
+      untracked: false,
+      unmerged: false,
+    })),
+    filesTotal: paths.length,
+    filesTruncated: false,
+    additions: paths.length,
+    deletions: 0,
+    dirty: true,
+    untrackedFiles: 0,
+    conflicted: false,
+    empty: paths.length === 0,
+    rangeVersion: `range-${baseline}`,
+    message: paths.length === 0 ? "这个任务在起点之后没有净改动。" : `读取成功：最终净改动 ${paths.length} 个文件。`,
+  };
+}
+
+type MockFn = ReturnType<typeof vi.fn>;
+
+interface ShellMocks {
+  api: Record<string, MockFn>;
+  created: Map<string, MockFn>;
+  listenEvent: MockFn;
+  pickDirectory: MockFn;
+  pickFile: MockFn;
+}
+
+interface DeepLinkMocks {
+  getCurrent: MockFn;
+  onOpenUrl: MockFn;
+}
+
+/** 与 cliora-integration.spec 相同的外壳默认值：一个最近仓库、Git 可用、读取都成功。 */
+function resetShellMocks(mocks: ShellMocks, deepLink: DeepLinkMocks): void {
+  for (const fn of mocks.created.values()) fn.mockReset();
+  mocks.listenEvent.mockReset();
+  mocks.pickDirectory.mockReset();
+  mocks.pickFile.mockReset();
+  deepLink.getCurrent.mockReset();
+  deepLink.onOpenUrl.mockReset();
+  deepLink.getCurrent.mockResolvedValue(null);
+  deepLink.onOpenUrl.mockResolvedValue(() => {});
+
+  mocks.listenEvent.mockResolvedValue(() => {});
+  mocks.pickDirectory.mockResolvedValue(null);
+  mocks.pickFile.mockResolvedValue(null);
+  const git = { available: true, path: "git", version: "2.49.0", overridden: false, belowBaseline: false, message: "Git 2.49.0 可用" };
+  mocks.api.getSettings.mockResolvedValue({
+    theme: "dark",
+    panelWidths: { sidebar: 256, files: 360 },
+    git,
+    recent: [{ name: "demo", path: WORKTREE, openedAtMs: 1 }],
+    settingsWarning: null,
+  });
+  mocks.api.detectGit.mockResolvedValue(git);
+  mocks.api.cancelReads.mockResolvedValue(undefined);
+  mocks.api.saveDraft.mockResolvedValue(undefined);
+  mocks.api.setTheme.mockResolvedValue(undefined);
+  mocks.api.setPanelWidths.mockImplementation(async (widths: unknown) => widths);
+  mocks.api.openRepository.mockResolvedValue(openedAt(WORKTREE));
+  mocks.api.refreshStatus.mockResolvedValue(snapshot);
+  mocks.api.loadDiff.mockImplementation(async (_path: string, relative: string) => diffFor(relative));
+  mocks.api.mergeSession.mockResolvedValue({
+    generation: 4,
+    operation: "none",
+    canContinue: false,
+    canAbort: false,
+    source: null,
+    target: "main",
+    headOid: BASELINE,
+    conflicts: [],
+    unresolved: 0,
+    note: "当前没有进行中的合并。",
+    snapshot,
+  });
+  mocks.api.measureProbe.mockResolvedValue({ enabled: false, elapsedMs: 0, script: null });
+  mocks.api.repoHeads.mockResolvedValue([]);
+  mocks.api.clioraReviewRequest.mockResolvedValue({ reviewId: REVIEW_A, sessionId: SESSION_A, worktreePath: WORKTREE, baseline: BASELINE });
+  mocks.api.clioraReviewSources.mockResolvedValue(null);
+  mocks.api.clioraReviewReceipt.mockResolvedValue(undefined);
+  mocks.api.clioraReviewReturn.mockResolvedValue(undefined);
+  mocks.api.clioraReviewForget.mockResolvedValue(undefined);
+  mocks.api.taskReview.mockImplementation(async (_worktree: string, baseline: string) => taskFor(baseline));
+  // 文件视图被切到时读取目录：给一个空仓库树。
+  mocks.api.repositoryDirectory.mockImplementation(async (_repo: string, path: string) => ({ generation: 4, path, entries: [], errors: [] }));
+  mocks.api.loadTaskDiff.mockImplementation(async (_worktree: string, _base: string, _head: string, path: string) => diffFor(path));
+}
+
+/* ------------------------------ DOM 查询 ------------------------------ */
+
+function activeViewId(): string | null {
+  return document.querySelector<HTMLElement>('.workbench-view[data-active="true"] [aria-current="page"]')?.getAttribute("data-view") ?? null;
+}
+
+function switcherItem(view: string): HTMLElement | null {
+  return document.querySelector<HTMLElement>(`.workbench-view[data-active="true"] nav[aria-label="视图"] [data-view="${view}"]`);
+}
+
+async function switchView(view: "changes" | "history" | "files" | "review"): Promise<void> {
+  const item = await waitFor(() => {
+    const found = switcherItem(view);
+    if (!found) throw new Error(`切换条上没有 ${view}`);
+    return found;
+  });
+  await fireEvent.click(item);
+  await waitFor(() => expect(activeViewId()).toBe(view));
+}
+
+function workbench(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('.workbench-view[data-view-scope="review"] .review-workbench');
+}
+
+function completionAction(id: "feedback" | "return"): HTMLButtonElement | null {
+  return document.querySelector<HTMLButtonElement>(`.workbench-view[data-active="true"] .review-completion [data-completion-action="${id}"]`);
+}
+
+/** 任务文件队列里选中的路径。 */
+function selectedTaskPath(): string | null {
+  const list = workbench()?.querySelector<HTMLElement>('[role="listbox"][aria-label="任务文件"]');
+  return list?.querySelector<HTMLElement>('[aria-selected="true"]')?.getAttribute("title") ?? null;
+}
+
+async function openSourceMenu(): Promise<HTMLElement> {
+  if (activeViewId() !== "review") await switchView("review");
+  await fireEvent.click(await screen.findByRole("button", { name: "选择 Cliora 审查来源" }));
+  return screen.findByRole("dialog", { name: "审查来源" });
+}
+
+async function composeComment(text: string): Promise<void> {
+  const bubble = await waitFor(() => {
+    const found = workbench()?.querySelector<HTMLButtonElement>("[data-comment-line]");
+    if (!found) throw new Error("差异里没有行意见入口");
+    return found;
+  }, { timeout: 8000 });
+  await fireEvent.click(bubble);
+  const form = await screen.findByRole("form", { name: "给这一行添加意见" });
+  const box = form.querySelector<HTMLTextAreaElement>('textarea[aria-label="意见正文"]')!;
+  await fireEvent.input(box, { target: { value: text } });
+  const add = [...form.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "添加意见")!;
+  await fireEvent.click(add);
+}
 
 const clipboard = { writeText: vi.fn(async (_text: string) => {}) };
 

@@ -473,18 +473,35 @@ export class ReviewActions {
     const source = clioraReview.sources.find((item) => item.reviewId === reviewId);
     if (!source || host.switchBlocked()) return;
     const wasActive = clioraReview.source?.reviewId === source.reviewId;
+    const outcome = await this.forgetSource(source.reviewId, source.sessionId);
+    if (outcome.kind === "failed") { host.showError(outcome.error); return; }
+    if (wasActive) {
+      host.closeTask();
+      host.clearTaskReview?.();
+    }
+    host.notice(outcome.kind === "expired"
+      ? "来源已失效，已从列表移除；仓库与阅读记录已保留。需要审查时从 Cliora 重新发起。"
+      : "已关闭此审查来源；仓库与阅读记录已保留。需要审查时从 Cliora 重新发起。");
+  }
+
+  /**
+   * 请原生忘记来源后清除本地记录、意见与工作台状态。原生已不认识的来源（source_expired）
+   * 没有可撤回的原生状态，仍从本地移除，否则失效页的「关闭此来源」永远无法生效；
+   * 其他失败保留来源并交给调用方报错。整个过程不做 Git 写入。
+   */
+  private async forgetSource(reviewId: string, sessionId: string): Promise<{ kind: "closed" | "expired" } | { kind: "failed"; error: unknown }> {
+    let kind: "closed" | "expired" = "closed";
     try {
-      await api.clioraReviewForget(source.reviewId, source.sessionId);
-      forgetClioraReview(source.reviewId);
-      forgetComments(source.reviewId);
-      forgetWorkbenchState(source.reviewId);
-      this.forgetLocal(source.reviewId);
-      if (wasActive) {
-        host.closeTask();
-        host.clearTaskReview?.();
-      }
-      host.notice("已关闭此审查来源；仓库与阅读记录已保留。需要审查时从 Cliora 重新发起。");
-    } catch (error) { host.showError(error); }
+      await api.clioraReviewForget(reviewId, sessionId);
+    } catch (error) {
+      if (!SOURCE_EXPIRED_CODES.has(normalizeError(error).code)) return { kind: "failed", error };
+      kind = "expired";
+    }
+    forgetClioraReview(reviewId);
+    forgetComments(reviewId);
+    forgetWorkbenchState(reviewId);
+    this.forgetLocal(reviewId);
+    return { kind };
   }
 
   /**
@@ -498,16 +515,11 @@ export class ReviewActions {
     const wasActive = Boolean(clioraReview.source);
     host.closeReviewManager(false);
     let failure: unknown = null;
+    let expired = 0;
     for (const source of sources) {
-      try {
-        await api.clioraReviewForget(source.reviewId, source.sessionId);
-        forgetClioraReview(source.reviewId);
-        forgetComments(source.reviewId);
-        forgetWorkbenchState(source.reviewId);
-        this.forgetLocal(source.reviewId);
-      } catch (error) {
-        failure ??= error;
-      }
+      const outcome = await this.forgetSource(source.reviewId, source.sessionId);
+      if (outcome.kind === "failed") failure ??= outcome.error;
+      else if (outcome.kind === "expired") expired += 1;
     }
     host.clearSourcesNotice();
     if (wasActive) {
@@ -515,7 +527,10 @@ export class ReviewActions {
       host.clearTaskReview?.();
     }
     if (failure) host.showError(failure);
-    else if (sources.length > 0) host.notice("已关闭全部审查来源；仓库与阅读记录已保留。需要审查时从 Cliora 重新发起。");
+    else if (sources.length > 0) {
+      host.notice((expired > 0 ? `已关闭全部审查来源（其中 ${expired} 个来源已失效，已从列表移除）` : "已关闭全部审查来源") +
+        "；仓库与阅读记录已保留。需要审查时从 Cliora 重新发起。");
+    }
   }
 }
 

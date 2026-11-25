@@ -48,7 +48,8 @@
   } from "./lib/review-actions.svelte";
   import { reviewCompletion, type ReviewCompletionModel, type ReviewWorktreeState } from "./lib/review-completion";
   import { relativeTime } from "./lib/ui";
-  import type { ReviewWorkbenchBlock } from "./lib/components/review/ReviewWorkbench.svelte";
+  import type { ReviewQueueControl, ReviewWorkbenchBlock } from "./lib/components/review/ReviewWorkbench.svelte";
+  import { recordRevocations } from "./lib/review-workbench.svelte";
   import { fileEditor, type EditContext } from "./lib/file-editor.svelte";
   import { normalizeError } from "./lib/errors";
   import { showMergeAbort } from "./lib/resolve";
@@ -786,6 +787,10 @@
     showError: (error) => showError(error),
     setReviewNote: (message) => (reviewNote = message),
     setTaskReviewNote: (message) => (taskReviewNote = message),
+    // 逐文件撤销原因记到当前来源的工作台状态里：队列行上说明「内容变化 / 路径消失 / 无法确认」。
+    setTaskReviewInvalidations: (items) => {
+      if (workbenchId) recordRevocations(workbenchId, items);
+    },
     confirmEditorLeave: (purpose) => confirmEditorLeave(purpose),
     refresh: () => refresh(),
     switchBlocked: () => switchBlocked(commandState),
@@ -802,6 +807,8 @@
   });
   let taskSelectedPath = $state<string | null>(null);
   let taskReviewNav = $state.raw<ReviewQueueState | null>(null);
+  /** 审查队列控制面：筛选段、可见/总计与「标记并继续」。进度只按这里的真实总数计算。 */
+  let taskQueue = $state.raw<ReviewQueueControl | null>(null);
   let changesTarget = $derived<ReviewTarget | null>(
     opened ? { worktree: opened.summary.path, scope: CHANGES_SCOPE } : null,
   );
@@ -912,8 +919,8 @@
       acceptedAt: (reviewId) => clioraSourceAcceptedAt(reviewId),
       comments: (reviewId) => ({ ...reviewActions.commentCounts(reviewId), drafts: commentDraftCount(reviewId) }),
       progress: (source) => {
-        if (source.reviewId === clioraReview.source?.reviewId && taskReviewNav) {
-          return { reviewed: taskReviewNav.total - taskReviewNav.remaining, total: taskReviewNav.total };
+        if (source.reviewId === clioraReview.source?.reviewId && taskQueue) {
+          return { reviewed: taskQueue.reviewed, total: taskQueue.total };
         }
         const baseline = source.baseline?.trim();
         if (!baseline) return { reviewed: 0, total: null };
@@ -923,7 +930,7 @@
     }),
   );
   let reviewProgress = $derived(
-    taskReviewNav && inTask ? { reviewed: taskReviewNav.total - taskReviewNav.remaining, total: taskReviewNav.total } : null,
+    taskQueue && inTask ? { reviewed: taskQueue.reviewed, total: taskQueue.total } : null,
   );
 
   /** 工作台的整页状态（外壳层面）：没有来源、未选择来源、来源失效、版本不兼容。 */
@@ -1164,6 +1171,7 @@
           remaining: activeReviewNav.remaining,
           total: activeReviewNav.total,
           scope: inTask ? "task" : "changes",
+          ...(inTask && taskQueue ? { markNextReason: taskQueue.markNextReason, filter: taskQueue.filter } : {}),
         }
       : null,
     fileStage: { path: activeFileStage.path, side: activeFileStage.side, reason: null, otherSide: activeFileStage.otherSide },
@@ -1378,6 +1386,14 @@
         return;
       case "review.toggle":
         if (activeSelectedPath) void toggleReviewed(activeSelectedPath);
+        return;
+      case "review.markNext":
+        if (inTask) taskQueue?.markNext();
+        return;
+      case "review.filter.all":
+      case "review.filter.unreviewed":
+      case "review.filter.commented":
+        if (inTask) taskQueue?.setFilter(id.slice("review.filter.".length) as ReviewQueueControl["filter"]);
         return;
       case "review.hide":
         if (inTask) taskHideReviewed = !taskHideReviewed;
@@ -2698,6 +2714,15 @@
    * 任务范围用 task_review_token（绑定 worktree、起点与这条路径的最终净内容），
    * 改动范围沿用 repository_review_token。
    */
+  /** 「标记并继续」的标记步骤：已标记的不再切换；返回当前范围里这条路径是否已审阅。 */
+  async function markTaskReviewed(path: string): Promise<boolean> {
+    const target = taskTarget;
+    if (!target) return false;
+    if (!isReviewedIn(target, path)) await toggleReviewed(path);
+    const after = taskTarget;
+    return Boolean(after && after.worktree === target.worktree && after.scope === target.scope && isReviewedIn(after, path));
+  }
+
   async function toggleReviewed(path: string): Promise<void> {
     const current = opened;
     const target = activeReviewTarget();
@@ -6012,6 +6037,8 @@
                 onSnapshot={adoptTaskScope}
                 onSelection={(path) => (taskSelectedPath = path)}
                 onReviewNav={(nav) => (taskReviewNav = nav)}
+                onQueue={(queue) => (taskQueue = queue)}
+                onMarkReviewed={markTaskReviewed}
                 onEditFile={filesViewEnabled ? (path, line) => void editInFiles(path, line, "task") : undefined}
                 comments={taskComments}
                 commentKeys={taskCommentKeys}

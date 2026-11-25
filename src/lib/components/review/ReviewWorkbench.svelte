@@ -32,7 +32,12 @@
   import {
     fileNavState,
     appendDiffPage,
+    filterQueueRows,
+    LAST_UNREVIEWED,
+    nextUnreviewedAfter,
     orderedRows,
+    QUEUE_FILTER_LABELS,
+    reviewLayoutTier,
     reviewQueue,
     sameSelection,
     selectionKey,
@@ -48,11 +53,31 @@
   import PaneResizer from "../PaneResizer.svelte";
   import { clampWidth } from "../../layout";
   import {
+    clearRevocations,
+    REVOCATION_LABELS,
+    saveWorkbenchExtras,
     saveWorkbenchState,
+    workbenchExtras,
     workbenchState,
+    type ReviewQueueFilter,
     type ReviewReadingMode,
   } from "../../review-workbench.svelte";
   import ReviewStatePanel, { type ReviewStateAction, type ReviewStateKind } from "./ReviewStatePanel.svelte";
+  import ReviewQueueBar from "./ReviewQueueBar.svelte";
+
+  /**
+   * 审查队列交给外壳的控制面：命令面板与快捷键（标记并继续、筛选段）和按钮走同一份。
+   * visible / total 区分「当前可见」与「任务真实总数」，进度只按 total 与 reviewed 计算。
+   */
+  export interface ReviewQueueControl {
+    filter: ReviewQueueFilter;
+    visible: number;
+    total: number;
+    reviewed: number;
+    markNextReason: string | null;
+    setFilter: (filter: ReviewQueueFilter) => void;
+    markNext: () => void;
+  }
 
   /** 外壳决定的整页状态（没有来源、来源失效、版本不兼容）：优先于任务读取状态显示。 */
   export interface ReviewWorkbenchBlock {
@@ -165,6 +190,13 @@
     onReturnToCliora?: () => void;
     /** 「范围内提交 N」：转到历史并按任务范围过滤。 */
     onShowCommits?: () => void;
+    /**
+     * 「标记并继续」的标记步骤：确认快照并标记，返回是否已标记成功。失败时停在当前文件，
+     * 原因由外壳在队列里就地说明。
+     */
+    onMarkReviewed?: (path: string) => Promise<boolean>;
+    /** 审查队列控制面（筛选、标记并继续、可见/总计）：交给外壳的命令与快捷键。 */
+    onQueue?: (queue: ReviewQueueControl | null) => void;
   }
 
   let {
@@ -216,6 +248,8 @@
     onShowHistory,
     onReturnToCliora,
     onShowCommits,
+    onMarkReviewed,
+    onQueue,
   }: Props = $props();
 
   /** 这些错误说明「任务范围不再成立」，要撤下结果而不是把它当成一次普通读取失败。 */
@@ -260,6 +294,17 @@
     const wanted = Math.max(MIN_TASK_FILES_WIDTH, width);
     if (total <= 0) return wanted;
     return Math.max(MIN_TASK_FILES_WIDTH, Math.min(wanted, total - MIN_TASK_DIFF_WIDTH));
+  }
+
+  /** 工作台自身宽度：栏宽收紧与响应式三档都读它（每个工作台一个观察者，重排时更新）。 */
+  function measureWidth(node: HTMLElement) {
+    const read = () => {
+      taskSplitWidth = node.clientWidth;
+    };
+    read();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(read);
+    observer?.observe(node);
+    return { destroy: () => observer?.disconnect() };
   }
 
   let taskFilesWidth = $state(readTaskFilesWidth());
@@ -354,6 +399,9 @@
       const saved = id ? workbenchState(id) : null;
       readingMode = saved?.readingMode ?? "single";
       query = saved?.query ?? "";
+      filter = saved?.filter ?? "all";
+      queueCollapsed = id ? workbenchExtras(id).queueCollapsed : false;
+      queueNote = null;
       commentsOpen = saved?.drawerOpen ?? false;
       restorePath = saved?.selectedPath ?? null;
       // 意见草稿按来源保存在草稿槽里：切换来源不丢，切回来时恢复。
@@ -382,8 +430,11 @@
       selectedSet: selectedSet.map((item) => item.path),
       readingMode,
       query,
+      filter,
       drawerOpen: commentsOpen,
+      scrollAnchor: selected ? { path: selected.path, offset: 0 } : null,
     });
+    saveWorkbenchExtras(id, { queueCollapsed });
   }
 
   // 选择、模式、搜索或意见列表变化时写回当前来源（只存界面状态，不存进度与意见）。
@@ -392,6 +443,8 @@
     void selectedSet;
     void readingMode;
     void query;
+    void filter;
+    void queueCollapsed;
     void commentsOpen;
     untrack(() => {
       if (boundId && workbenchId === boundId && task) persist(boundId);
@@ -399,8 +452,34 @@
   });
 
   let files = $derived((task?.files ?? []).map(toChange));
-  let rows = $derived(orderedRows(files, query));
-  let rowsByPath = $derived(new Map(rows.map((row) => [row.path, row])));
+  /** 队列筛选段：全部 / 未审阅 / 有意见。只决定哪些文件可见，不写进度与意见。 */
+  let filter = $state<ReviewQueueFilter>("all");
+  let queueCollapsed = $state(false);
+  /** 「标记并继续」的就地说明（如到达末尾）：换文件或换筛选时收起。 */
+  let queueNote = $state<string | null>(null);
+  let commentedPaths = $derived(new Set(comments.map((comment) => comment.anchor.path)));
+  /** 全部任务行：按路径找行（改名的原路径、编辑入口）不受搜索与筛选影响。 */
+  let allRows = $derived(orderedRows(files));
+  /** 当前可见队列：搜索、筛选段与「隐藏已审阅」之后的有序行。连续阅读与未审阅跳转都作用于它。 */
+  let queueRows = $derived(filterQueueRows(orderedRows(files, query), filter, reviewed, commentedPaths));
+  let rows = $derived(hideReviewed ? queueRows.filter((row) => !reviewed.has(row.path)) : queueRows);
+  let rowsByPath = $derived(new Map(allRows.map((row) => [row.path, row])));
+  let filterPaths = $derived(filter === "all" ? null : new Set(queueRows.map((row) => row.path)));
+  /** 失效撤销的原因：只对仍未重新标记的文件显示。 */
+  let revoked = $derived(workbenchId ? workbenchExtras(workbenchId).revoked : {});
+  let revokedNotes = $derived(
+    new Map(
+      Object.entries(revoked)
+        .filter(([path]) => !reviewed.has(path) && rowsByPath.has(path))
+        .map(([path, item]) => [path, { label: `已撤销 · ${REVOCATION_LABELS[item.kind]}`, reason: item.reason }]),
+    ),
+  );
+  // 重新标记后原因就过时了：清掉，之后再撤销时不会把旧原因翻出来。
+  $effect(() => {
+    const id = workbenchId;
+    const stale = Object.keys(revoked).filter((path) => reviewed.has(path));
+    if (id && stale.length > 0) untrack(() => clearRevocations(id, stale));
+  });
   let multiActive = $derived(selectedSet.length > 1);
   /** 连续阅读：没有多选时作用于当前可见队列的全部文件。 */
   let continuous = $derived(readingMode === "continuous" && !multiActive);
@@ -420,8 +499,99 @@
   let reviewTotal = $derived(files.length);
   let reviewReviewed = $derived(files.filter((file) => reviewed.has(file.path)).length);
   let reviewNav: ReviewQueueState | null = $derived(
-    files.length > 0 ? reviewQueue(rows, reviewed, selected, goToRow) : null,
+    files.length > 0 ? reviewQueue(queueRows, reviewed, selected, goToRow) : null,
   );
+  let marking = $state(false);
+  let markNextReason = $derived(
+    !task || task.empty
+      ? "任务范围还没有可审阅的文件"
+      : !selected
+        ? "先选择一个文件"
+        : marking || reviewBusy === selected.path
+          ? "正在确认这个文件的快照"
+          : !reviewed.has(selected.path) && !onMarkReviewed
+            ? "当前不可标记"
+            : null,
+  );
+
+  function setFilter(next: ReviewQueueFilter): void {
+    if (filter === next) return;
+    filter = next;
+    queueNote = null;
+  }
+
+  /** 清除筛选：回到完整队列（全部、无搜索、不隐藏已审阅）；进度与审阅记录不变。 */
+  function clearFilters(): void {
+    filter = "all";
+    query = "";
+    queueNote = null;
+    if (hideReviewed) onHideReviewed?.(false);
+  }
+
+  /**
+   * 标记并继续：标记当前文件，再去「当前可见队列」里排在它之后的下一个未审阅文件。
+   * 下一站在标记前按可见顺序确定（「未审阅」筛选下当前文件标记后会离开队列）；到末尾就地说明
+   * 「已是最后一个未审阅文件」并停留，不回到开头。标记失败或期间换了文件时不跳走。
+   */
+  async function markAndContinue(): Promise<void> {
+    const current = selected;
+    if (!current || markNextReason !== null) return;
+    const order = rows;
+    queueNote = null;
+    if (!reviewed.has(current.path)) {
+      marking = true;
+      let ok = false;
+      try {
+        ok = (await onMarkReviewed?.(current.path)) ?? false;
+      } finally {
+        marking = false;
+      }
+      if (!ok || selected?.path !== current.path) return;
+    }
+    const next = nextUnreviewedAfter(order, current.path, reviewed);
+    if (next && rowOf(next.path)) goToRow(next);
+    else queueNote = LAST_UNREVIEWED;
+  }
+
+  $effect(() => {
+    const visible = rows.length;
+    const control: ReviewQueueControl | null = task && !task.empty
+      ? {
+          filter,
+          visible,
+          total: reviewTotal,
+          reviewed: reviewReviewed,
+          markNextReason,
+          setFilter,
+          markNext: () => void markAndContinue(),
+        }
+      : null;
+    onQueue?.(control);
+  });
+
+  onDestroy(() => onQueue?.(null));
+
+  // 换文件后「已是最后一个」不再描述当前位置：收起。
+  let notedPath: string | null = null;
+  $effect(() => {
+    const path = selected?.path ?? null;
+    untrack(() => {
+      if (path !== notedPath) {
+        notedPath = path;
+        queueNote = null;
+      }
+    });
+  });
+
+  /* 响应式三档：宽度由工作台自身测量；窄档里文件队列收成可切换的抽屉，主区用满宽度。 */
+  let tier = $derived(reviewLayoutTier(taskSplitWidth));
+  let narrowQueueOpen = $state(false);
+  let queueHidden = $derived(tier === "narrow" ? !narrowQueueOpen : queueCollapsed);
+
+  function toggleQueue(): void {
+    if (tier === "narrow") narrowQueueOpen = !narrowQueueOpen;
+    else queueCollapsed = !queueCollapsed;
+  }
   /** 选中的这条路径是不是「工作区重建」：行数与单文件差异都按重建后的内容给。 */
   let selectedRebuilt = $derived(
     selected ? (rowsByPath.get(selected.path)?.rebuilt ?? false) : false,
@@ -486,6 +656,8 @@
   function select(item: FileSelection): void {
     selected = item;
     selectedSet = [];
+    // 窄档里文件队列是抽屉：选好文件就让出位置给差异。
+    if (tier === "narrow") narrowQueueOpen = false;
     asTextFor = null;
     void loadSelectedDiff();
   }
@@ -946,11 +1118,28 @@
 
 <!-- 后台重读不在界面上插提示或转圈：旧结果原地保留到新结果就绪，只用 aria-busy 告诉读屏。 -->
 <div class="task-detail review-workbench" aria-label="审查工作台" aria-busy={reading && task ? "true" : undefined} style:display={visible ? null : "none"}>
-  <div class="task-split review-layout" style={`--task-files:${taskFilesShown}px`} bind:clientWidth={taskSplitWidth}>
+  <div
+    class="task-split review-layout"
+    class:queue-hidden={queueHidden}
+    data-tier={tier}
+    style={`--task-files:${taskFilesShown}px`}
+    use:measureWidth
+  >
     <aside class="task-files review-side" aria-label="审查来源与任务文件">
       {@render paneHead?.()}
       {@render sourceCard?.()}
       {#if !block && task && !task.empty}
+        <div class="review-queue" id="review-queue" aria-label="审查队列">
+        <ReviewQueueBar
+          {filter}
+          visible={rows.length}
+          total={reviewTotal}
+          reviewed={reviewReviewed}
+          commented={commentedPaths.size}
+          clearable={filter !== "all" || query.trim() !== "" || hideReviewed}
+          onFilter={setFilter}
+          onClear={clearFilters}
+        />
         <FileList
           variant="task"
           searchId="task-file-search"
@@ -977,7 +1166,11 @@
           {onStageFile}
           {onUnstageFile}
           {stageSideFor}
+          visiblePaths={filterPaths}
+          filterEmpty={filter !== "all" ? { message: `「${QUEUE_FILTER_LABELS[filter]}」筛选下没有文件`, onClear: clearFilters } : null}
+          rowNotes={revokedNotes}
         />
+        </div>
       {/if}
     </aside>
     <PaneResizer
@@ -1026,6 +1219,28 @@
           {#if task}
             <div class="commit-facts review-head-actions">
               {#if !task.empty}
+                <button
+                  type="button"
+                  class="btn btn-ghost btn-sm review-queue-toggle"
+                  aria-controls="review-queue"
+                  aria-expanded={!queueHidden}
+                  aria-label={tier === "narrow" ? (queueHidden ? "打开文件队列" : "关闭文件队列") : queueHidden ? "展开左栏" : "收起左栏"}
+                  title={tier === "narrow"
+                    ? "窄窗口里文件队列是抽屉：打开选文件，选好后自动让出位置"
+                    : queueHidden ? "展开来源卡与文件队列" : "收起来源卡与文件队列，差异用满宽度；当前文件不变"}
+                  onclick={toggleQueue}
+                ><Icon name="sidebar" size={13} /><span>文件 {rows.length}</span></button>
+                <button
+                  type="button"
+                  class="btn btn-secondary btn-sm review-mark-next"
+                  disabled={markNextReason !== null}
+                  title={markNextReason ?? "标记当前文件已审阅，再前往可见队列里下一个未审阅文件（Alt+Shift+M）"}
+                  aria-label="标记并继续"
+                  aria-keyshortcuts="Alt+Shift+M"
+                  onclick={() => void markAndContinue()}
+                >
+                  {#if marking}<span class="spinner" aria-hidden="true"></span>{:else}<Icon name="check" size={13} />{/if}<span>标记并继续</span>
+                </button>
                 <div class="segmented review-mode" role="group" aria-label="阅读模式">
                   <button
                     type="button"
@@ -1075,6 +1290,10 @@
             </div>
           {/if}
         </header>
+      {/if}
+
+      {#if !block && queueNote}
+        <p class="review-queue-note review-queue-note-main" role="status"><Icon name="info" size={13} /><span>{queueNote}</span></p>
       {/if}
 
       {#if !block && commentNotice}<p class="task-comment-note review-comment-notice" role="status">{commentNotice}</p>{/if}
@@ -1127,44 +1346,7 @@
         </form>
       {/if}
 
-      {#if !block && commentsOpen}
-        <div class="task-comments-panel" aria-label="意见列表">
-          {#if comments.length === 0}
-            <p class="task-comment-note">还没有意见。点块标题上的「评论此块」一次说一整块，或用行尾气泡说某一行。</p>
-          {:else}
-            {#each comments as comment (comment.id)}
-              <article class="task-comment" data-comment-id={comment.id}>
-                <div class="task-comment-head">
-                  <span class="task-comment-path">{comment.anchor.path}</span>
-                  <span>{anchorLabel(comment.anchor)}</span>
-                </div>
-                {#if comment.anchor.quote}<p class="task-comment-quote">{comment.anchor.quote}</p>{/if}
-                {#if editingId === comment.id}
-                  <textarea
-                    class="textarea"
-                    rows={3}
-                    bind:value={editBody}
-                    aria-label={comment.anchor.path + " 的意见正文"}
-                  ></textarea>
-                  <div class="task-comment-actions">
-                    <button type="button" class="btn btn-primary btn-sm" onclick={saveEdit}>保存意见</button>
-                    <button type="button" class="btn btn-ghost btn-sm" onclick={cancelEdit}>取消</button>
-                  </div>
-                {:else}
-                  <p class="task-comment-body">{comment.body}</p>
-                  <div class="task-comment-actions">
-                    <button type="button" class="btn btn-ghost btn-sm" onclick={() => beginEdit(comment)}>编辑</button>
-                    <button type="button" class="btn btn-ghost btn-sm" onclick={() => removeComment(comment.id)}>删除</button>
-                  </div>
-                {/if}
-              </article>
-            {/each}
-            <pre class="task-comment-preview" aria-label="整批意见预览">{previewComments(comments)}</pre>
-          {/if}
-          {#if commentError && !draftAnchor}<p class="task-comment-note" role="alert">{commentError}</p>{/if}
-        </div>
-      {/if}
-
+      <div class="review-body" data-drawer={!block && commentsOpen ? "open" : undefined}>
       <div class="review-stage">
         {#if pageState}
           <ReviewStatePanel
@@ -1206,6 +1388,8 @@
                 active={detailActive}
                 {opened}
                 rows={stackRows}
+                countLabel={multiActive ? undefined : `连续阅读 · 可见 ${stackRows.length} 个文件`}
+                clearLabel={multiActive ? undefined : "回到单文件"}
                 focus={selected}
                 {nav}
                 disabled={writeLocked}
@@ -1286,10 +1470,53 @@
         {:else if task}
           <div class="empty task-placeholder" role="status">
             <span class="empty-icon"><Icon name="search" size={22} /></span>
-            <strong>没有匹配“{query.trim()}”的任务文件</strong>
-            <button type="button" class="btn btn-ghost btn-sm" onclick={() => (query = "")}>清除筛选</button>
+            {#if query.trim()}
+              <strong>没有匹配“{query.trim()}”的任务文件</strong>
+            {:else}
+              <strong>当前筛选下没有文件</strong>
+            {/if}
+            <button type="button" class="btn btn-ghost btn-sm" onclick={clearFilters}>清除筛选</button>
           </div>
         {/if}
+      </div>
+      {#if !block && commentsOpen}
+        <div class="task-comments-panel review-drawer" aria-label="意见列表">
+          {#if comments.length === 0}
+            <p class="task-comment-note">还没有意见。点块标题上的「评论此块」一次说一整块，或用行尾气泡说某一行。</p>
+          {:else}
+            {#each comments as comment (comment.id)}
+              <article class="task-comment" data-comment-id={comment.id}>
+                <div class="task-comment-head">
+                  <span class="task-comment-path">{comment.anchor.path}</span>
+                  <span>{anchorLabel(comment.anchor)}</span>
+                </div>
+                {#if comment.anchor.quote}<p class="task-comment-quote">{comment.anchor.quote}</p>{/if}
+                {#if editingId === comment.id}
+                  <textarea
+                    class="textarea"
+                    rows={3}
+                    bind:value={editBody}
+                    aria-label={comment.anchor.path + " 的意见正文"}
+                  ></textarea>
+                  <div class="task-comment-actions">
+                    <button type="button" class="btn btn-primary btn-sm" onclick={saveEdit}>保存意见</button>
+                    <button type="button" class="btn btn-ghost btn-sm" onclick={cancelEdit}>取消</button>
+                  </div>
+                {:else}
+                  <p class="task-comment-body">{comment.body}</p>
+                  <div class="task-comment-actions">
+                    <button type="button" class="btn btn-ghost btn-sm" onclick={() => beginEdit(comment)}>编辑</button>
+                    <button type="button" class="btn btn-ghost btn-sm" onclick={() => removeComment(comment.id)}>删除</button>
+                  </div>
+                {/if}
+              </article>
+            {/each}
+            <pre class="task-comment-preview" aria-label="整批意见预览">{previewComments(comments)}</pre>
+          {/if}
+          {#if commentError && !draftAnchor}<p class="task-comment-note" role="alert">{commentError}</p>{/if}
+        </div>
+      {/if}
+
       </div>
       {@render completion?.()}
     </div>

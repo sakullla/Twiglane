@@ -75,6 +75,15 @@
     variant?: "changes" | "task";
     /** 搜索框的 id：改动与任务视图同时保活，id 不能重复。 */
     searchId?: string;
+    /**
+     * 审查队列的筛选结果（未审阅 / 有意见）：只决定哪些行显示，分组数量、进度与提交范围不变。
+     * null 表示不筛选。
+     */
+    visiblePaths?: ReadonlySet<string> | null;
+    /** 筛选后没有可见文件时的说明与「清除筛选」。 */
+    filterEmpty?: { message: string; onClear: () => void } | null;
+    /** 行内附注（如失效撤销的原因）：文字 + 图标，不只靠颜色。 */
+    rowNotes?: ReadonlyMap<string, { label: string; reason: string }>;
   }
 
   type SectionSide = DiffSide | "conflicted";
@@ -122,6 +131,9 @@
     stageSideFor,
     variant = "changes",
     searchId = "file-search",
+    visiblePaths = null,
+    filterEmpty = null,
+    rowNotes,
   }: Props = $props();
   /** 任务队列的侧别：没有判定函数时退回「未暂存」，改动队列不用这一份。 */
   function taskSide(row: FileRow): DiffSide | "none" {
@@ -179,8 +191,9 @@
   }
 
   function shownRows(list: FileRow[]): FileRow[] {
-    if (!hideReviewed) return list;
-    return list.filter((row) => !reviewed.has(row.path));
+    const filter = visiblePaths;
+    if (!hideReviewed && !filter) return list;
+    return list.filter((row) => (!hideReviewed || !reviewed.has(row.path)) && (!filter || filter.has(row.path)));
   }
 
   let conflictedShown = $derived(shownRows(conflictedRows));
@@ -546,7 +559,7 @@
 {#if stageNote}
   <p class="file-tree-status" role="status">{stageNote}</p>
 {/if}
-{#if reviewNav && reviewNav.total > 0 && reviewNav.remaining === 0 && rows.length > 0}
+{#if reviewNav && reviewNav.total > 0 && reviewNav.remaining === 0 && rows.length > 0 && (!visiblePaths || reviewReviewed >= reviewTotal)}
   <!-- 队尾/全部完成的下一步：隐藏已审阅，或按真实暂存范围提交；都不改任务范围。 -->
   <p class="file-tree-status review-done" role="status">
     <Icon name="check-circle" size={13} />
@@ -555,7 +568,7 @@
       <button type="button" class="btn btn-ghost btn-sm" onclick={() => onHideReviewed?.(true)}>收起已审阅</button>
     {/if}
   </p>
-{:else if reviewNav && reviewNav.total === 0 && query.trim() === ""}
+{:else if reviewNav && reviewNav.total === 0 && query.trim() === "" && !visiblePaths}
   <p class="file-tree-status" role="status"><span>{NO_REVIEW_FILES}。</span></p>
 {/if}
 <div
@@ -573,6 +586,13 @@
     <div class="empty">
       <span class="empty-icon ok"><Icon name="check-circle" size={24} /></span>
       <strong>工作区很干净</strong>
+    </div>
+  {:else if rows.length === 0 && filterEmpty}
+    <!-- 空状态零：审查队列的筛选段没有命中。清除筛选恢复完整队列，进度与记录不变。 -->
+    <div class="empty">
+      <span class="empty-icon"><Icon name="search" size={22} /></span>
+      <strong>{filterEmpty.message}</strong>
+      <button type="button" class="btn btn-secondary btn-sm" onclick={filterEmpty.onClear}>清除筛选</button>
     </div>
   {:else if rows.length === 0 && hideReviewed}
     <!-- 空状态一：已审阅的文件被隐藏。 -->
@@ -742,6 +762,10 @@
                 <span class="fd"><bdi>{#if query.trim()}{#each matchParts(parts.dir, query) as part}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}{:else}{parts.dir}{/if}</bdi></span>
               {/if}
             </span>
+            {#if rowNotes?.get(row.path)}
+              {@const note = rowNotes.get(row.path)!}
+              <span class="file-tag revoked" title={note.reason} aria-label={`${note.label}：${note.reason}`}><Icon name="undo" size={11} />{note.label}</span>
+            {/if}
             {#if row.rebuilt}
               <span class="file-tag rebuilt" title="起点里有这个路径，工作区里现在是重建后的未跟踪文件；行数只统计重建后的内容，不是纯新增">工作区重建</span>
             {/if}

@@ -65,6 +65,8 @@ const ALT_COMMANDS: Record<string, string> = {
 const ALT_SHIFT_COMMANDS: Record<string, string> = {
   ArrowLeft: "review.prev",
   ArrowRight: "review.next",
+  /** Alt+Shift+M：标记并继续（标记当前文件，再去可见队列里下一个未审阅文件）。 */
+  m: "review.markNext",
 };
 
 /**

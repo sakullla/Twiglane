@@ -429,3 +429,54 @@ export function reviewQueue<T extends FileSelection>(
     },
   };
 }
+
+/* ---------- 审查队列（R3、R4）：筛选与「标记并继续」 ----------
+   筛选只决定「看哪些文件」：不写进度、不改意见，进度总数始终按任务真实文件数算。 */
+
+/** 「标记并继续」到达可见队列末尾时的就地说明：停在当前文件，不回到开头。 */
+export const LAST_UNREVIEWED = "已是最后一个未审阅文件";
+
+export type QueueFilter = "all" | "unreviewed" | "commented";
+
+export const QUEUE_FILTER_LABELS: Record<QueueFilter, string> = {
+  all: "全部",
+  unreviewed: "未审阅",
+  commented: "有意见",
+};
+
+/** 按筛选段过滤已排好序的行：未审阅读审阅记录，有意见读意见路径；两者都只读不写。 */
+export function filterQueueRows<T extends FileSelection>(
+  rows: readonly T[],
+  filter: QueueFilter,
+  reviewed: ReadonlySet<string>,
+  commented: ReadonlySet<string>,
+): T[] {
+  if (filter === "unreviewed") return rows.filter((row) => !reviewed.has(row.path));
+  if (filter === "commented") return rows.filter((row) => commented.has(row.path));
+  return [...rows];
+}
+
+/**
+ * 「标记并继续」的下一站：可见队列里排在当前文件之后的第一个未审阅文件（当前文件本身除外）。
+ * 当前文件不在可见队列里时从队首找；找不到返回 null，调用方说明「已是最后一个」，不循环。
+ */
+export function nextUnreviewedAfter<T extends FileSelection>(
+  rows: readonly T[],
+  current: string | null,
+  reviewed: ReadonlySet<string>,
+): T | null {
+  const index = current === null ? -1 : rows.findIndex((row) => row.path === current);
+  for (let at = index + 1; at < rows.length; at += 1) {
+    const row = rows[at];
+    if (row.path !== current && !reviewed.has(row.path)) return row;
+  }
+  return null;
+}
+
+/** 审查工作台宽度三档：≥1100 宽、720–1100 中、<720 窄（0 表示尚未测量，按宽处理）。 */
+export type ReviewLayoutTier = "wide" | "medium" | "narrow";
+
+export function reviewLayoutTier(width: number): ReviewLayoutTier {
+  if (width <= 0 || width >= 1100) return "wide";
+  return width >= 720 ? "medium" : "narrow";
+}

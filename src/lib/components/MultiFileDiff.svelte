@@ -58,6 +58,10 @@
      * 这里转到同一文件的真实未提交差异，由那边的写锁与过期保护接管。
      */
     onOpenUnstaged?: (path: string) => void;
+    /** 工具栏上的范围说明；默认「已选 N 个文件」，连续阅读时由调用方说明是可见队列。 */
+    countLabel?: string;
+    /** 退出按钮的名字与说明：多选是「退出多选」，连续阅读是「回到单文件」。 */
+    clearLabel?: string;
     /** 任务多选：批量审阅与真实索引写入，净差异本身仍保持只读。 */
     reviewed?: ReadonlySet<string>;
     onToggleReview?: (path: string) => void;
@@ -114,6 +118,8 @@
     scopeKey = "",
     readOnly = false,
     onOpenUnstaged,
+    countLabel,
+    clearLabel,
     reviewed = new Set<string>(),
     onToggleReview,
     stageSideFor,
@@ -424,7 +430,7 @@
       <FileNav {nav} />
       <div class="diff-file">
         <Icon name="layers" size={15} />
-        <strong class="multi-stack-count">已选 {rows.length} 个文件</strong>
+        <strong class="multi-stack-count">{countLabel ?? `已选 ${rows.length} 个文件`}</strong>
       </div>
     </div>
     {#if readOnly}
@@ -433,6 +439,10 @@
         {#if onToggleReview}
           <button type="button" class="btn btn-ghost btn-sm" aria-label={`标记 ${reviewPending.length} 个文件为已审阅`} title="确认这些文件的当前快照并记录人工审阅进度" disabled={disabled || reviewPending.length === 0} onclick={() => reviewSelected(true)}>
             <Icon name="check" size={13} /><span class="diff-hist-label">标记已审阅</span>
+          </button>
+          <!-- 批量撤销：只撤这批里已审阅的文件，其他文件的记录与真实索引都不动。 -->
+          <button type="button" class="btn btn-ghost btn-sm" aria-label={`撤销 ${reviewDone.length} 个文件的已审阅`} title={reviewDone.length === 0 ? "这批文件还没有已审阅标记" : "撤销这批文件的已审阅标记；只改本地审阅记录"} disabled={disabled || reviewDone.length === 0} onclick={() => reviewSelected(false)}>
+            <Icon name="undo" size={13} /><span class="diff-hist-label">撤销已审阅</span>
           </button>
         {/if}
         {#if onStageFiles}
@@ -474,7 +484,7 @@
         <button type="button" aria-pressed={mode === "unified"} title="统一视图" onclick={() => (mode = "unified")}><Icon name="rows" size={12} />统一</button>
         <button type="button" aria-pressed={mode === "split"} title="并排视图" onclick={() => (mode = "split")}><Icon name="split" size={12} />并排</button>
       </div>
-      <button type="button" class="icon-btn sm" aria-label="退出多选" title="退出多选，回到当前文件（Esc）" onclick={onClear}>
+      <button type="button" class="icon-btn sm" aria-label={clearLabel ?? "退出多选"} title={clearLabel ? `${clearLabel}，停在当前文件` : "退出多选，回到当前文件（Esc）"} onclick={onClear}>
         <Icon name="x" size={14} />
       </button>
     </div>

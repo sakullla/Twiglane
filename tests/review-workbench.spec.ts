@@ -38,6 +38,8 @@ vi.mock("../src/lib/api", () => ({
 }));
 
 import App from "../src/App.svelte";
+import ReviewWorkbench from "../src/lib/components/review/ReviewWorkbench.svelte";
+import { tick } from "svelte";
 
 /* ------------------------- 外壳夹具（本 spec 自包含） ------------------------- */
 
@@ -461,5 +463,243 @@ describe("整页状态：原因与可执行动作（R1）", () => {
     }
     await waitFor(() => expect(activeViewId()).toBe("changes"));
     expect(mocks.api.openRepository).toHaveBeenCalledTimes(1);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * T4：阅读位置在模式切换、抽屉、栏宽与窄窗口重排后保持；失效撤销逐文件说明原因。
+ * ------------------------------------------------------------------ */
+
+function workbenchProps(overrides: Record<string, unknown> = {}) {
+  return {
+    opened: openedAt(WORKTREE),
+    active: true,
+    request: { baseline: BASELINE, origin: "cliora" as const, nonce: 1 },
+    nextId: () => 7,
+    fullFile: false,
+    onFullFile: vi.fn(),
+    onGeneration: vi.fn(),
+    reviewed: new Set<string>(),
+    onToggleReview: vi.fn(),
+    onAddComment: vi.fn(),
+    onEditComment: vi.fn(),
+    onDeleteComment: vi.fn(),
+    workbenchId: REVIEW_A,
+    ...overrides,
+  };
+}
+
+function queueSelected(): string | null {
+  return document.querySelector<HTMLElement>('[role="listbox"][aria-label="任务文件"] [aria-selected="true"]')?.getAttribute("title") ?? null;
+}
+
+function queueRow(path: string): HTMLElement {
+  const row = [...document.querySelectorAll<HTMLElement>(".review-workbench .file-row")].find((item) => item.getAttribute("title") === path);
+  if (!row) throw new Error(`队列里没有 ${path}`);
+  return row;
+}
+
+/** 让工作台量到指定宽度：clientWidth 读数 + 手动触发 ResizeObserver。 */
+function stubWorkbenchWidth(initial: number) {
+  let width = initial;
+  const callbacks: ResizeObserverCallback[] = [];
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      constructor(callback: ResizeObserverCallback) {
+        callbacks.push(callback);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+  const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientWidth");
+  Object.defineProperty(HTMLElement.prototype, "clientWidth", {
+    configurable: true,
+    get(this: HTMLElement) {
+      return this.classList?.contains("review-layout") ? width : (original?.get?.call(this) ?? 0);
+    },
+  });
+  return {
+    async set(next: number) {
+      width = next;
+      const layout = document.querySelector<HTMLElement>(".review-layout");
+      for (const callback of [...callbacks]) callback(layout ? [{ target: layout } as unknown as ResizeObserverEntry] : [], {} as ResizeObserver);
+      await tick();
+    },
+    restore() {
+      if (original) Object.defineProperty(HTMLElement.prototype, "clientWidth", original);
+      vi.unstubAllGlobals();
+    },
+  };
+}
+
+describe("阅读位置与响应式重排（R3）", () => {
+  it("单文件/连续切换、意见抽屉开合、栏宽调整后当前文件仍选中，单文件滚动位置恢复", async () => {
+    // 测试环境没有布局：给差异滚动区一个可滚动的高度，滚动记忆才会保存与恢复。
+    const heights = ["scrollHeight", "clientHeight"].map((name) => [name, Object.getOwnPropertyDescriptor(HTMLElement.prototype, name)] as const);
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", { configurable: true, get(this: HTMLElement) { return this.classList?.contains("diff-scroll") ? 2000 : 0; } });
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", { configurable: true, get(this: HTMLElement) { return this.classList?.contains("diff-scroll") ? 400 : 0; } });
+    try {
+    render(ReviewWorkbench, { props: workbenchProps() });
+    await waitFor(() => expect(queueSelected()).toBe("src/a.ts"));
+    await fireEvent.click(queueRow("src/b.ts"));
+    await waitFor(() => expect(queueSelected()).toBe("src/b.ts"));
+    const scroller = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>(".review-workbench .diff-scroll");
+      if (!found) throw new Error("差异还没渲染");
+      return found;
+    });
+    // 等这次选择的位置恢复（同一会话里可能记过这个文件的位置）落定，再模拟用户滚动。
+    await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+    await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+    scroller.scrollTop = 120;
+    scroller.dispatchEvent(new Event("scroll"));
+
+    // 连续：当前文件就是堆叠里的焦点块。
+    await fireEvent.click(screen.getByRole("button", { name: "连续" }));
+    await waitFor(() => expect(document.querySelector(".multi-file.focused")?.getAttribute("data-path")).toBe("src/b.ts"));
+    expect(queueSelected()).toBe("src/b.ts");
+
+    // 回到单文件：同一文件、同一滚动位置。
+    await fireEvent.click(screen.getByRole("button", { name: "单文件" }));
+    await waitFor(() => expect(document.querySelector<HTMLElement>(".review-workbench .diff-scroll")?.scrollTop).toBe(120));
+    expect(queueSelected()).toBe("src/b.ts");
+
+    // 意见抽屉开合不卸载差异。
+    const diffNode = document.querySelector(".review-workbench .diff-scroll");
+    await fireEvent.click(screen.getByRole("button", { name: "查看意见列表" }));
+    expect(document.querySelector(".review-body")?.getAttribute("data-drawer")).toBe("open");
+    await fireEvent.click(screen.getByRole("button", { name: "收起意见列表" }));
+    expect(document.querySelector(".review-body")?.getAttribute("data-drawer")).toBeNull();
+    expect(document.querySelector(".review-workbench .diff-scroll")).toBe(diffNode);
+
+    // 栏宽调整同样不动选择与差异。
+    await fireEvent.keyDown(screen.getByRole("slider", { name: "调整任务文件栏宽度" }), { key: "ArrowRight" });
+    expect(queueSelected()).toBe("src/b.ts");
+    expect(document.querySelector(".review-workbench .diff-scroll")).toBe(diffNode);
+    globalThis.localStorage?.removeItem("twiglane.taskFilesWidth");
+    } finally {
+      for (const [name, descriptor] of heights) {
+        if (descriptor) Object.defineProperty(HTMLElement.prototype, name, descriptor);
+        else delete (HTMLElement.prototype as unknown as Record<string, unknown>)[name];
+      }
+    }
+  });
+
+  it("收起左栏只改布局：队列保活、当前文件不变，展开后原样回来", async () => {
+    render(ReviewWorkbench, { props: workbenchProps() });
+    await waitFor(() => expect(queueSelected()).toBe("src/a.ts"));
+    await fireEvent.click(queueRow("src/c.ts"));
+    const toggle = screen.getByRole("button", { name: "收起左栏" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    await fireEvent.click(toggle);
+    const layout = document.querySelector<HTMLElement>(".review-layout")!;
+    expect(layout.classList.contains("queue-hidden")).toBe(true);
+    // 队列没有卸载：选择仍在 DOM 里，差异仍是同一个文件。
+    expect(queueSelected()).toBe("src/c.ts");
+    await fireEvent.click(screen.getByRole("button", { name: "展开左栏" }));
+    expect(layout.classList.contains("queue-hidden")).toBe(false);
+    expect(queueSelected()).toBe("src/c.ts");
+  });
+
+  it("三档重排：宽 → 中 → 窄，窄档文件队列是抽屉，选好文件后收起；重排后当前文件不变", async () => {
+    const width = stubWorkbenchWidth(1280);
+    try {
+      render(ReviewWorkbench, { props: workbenchProps() });
+      await waitFor(() => expect(queueSelected()).toBe("src/a.ts"));
+      const layout = document.querySelector<HTMLElement>(".review-layout")!;
+      await waitFor(() => expect(layout.dataset.tier).toBe("wide"));
+      await fireEvent.click(queueRow("src/b.ts"));
+
+      await width.set(900);
+      await waitFor(() => expect(layout.dataset.tier).toBe("medium"));
+      expect(layout.classList.contains("queue-hidden")).toBe(false);
+      expect(queueSelected()).toBe("src/b.ts");
+
+      await width.set(640);
+      await waitFor(() => expect(layout.dataset.tier).toBe("narrow"));
+      // 窄档默认收起文件队列，主区全宽；当前文件不变。
+      expect(layout.classList.contains("queue-hidden")).toBe(true);
+      expect(queueSelected()).toBe("src/b.ts");
+      const open = screen.getByRole("button", { name: "打开文件队列" });
+      await fireEvent.click(open);
+      expect(layout.classList.contains("queue-hidden")).toBe(false);
+      await fireEvent.click(queueRow("src/c.ts"));
+      await waitFor(() => expect(layout.classList.contains("queue-hidden")).toBe(true));
+      expect(queueSelected()).toBe("src/c.ts");
+
+      // 回到宽档：队列重新常驻，选择保持。
+      await width.set(1280);
+      await waitFor(() => expect(layout.dataset.tier).toBe("wide"));
+      expect(layout.classList.contains("queue-hidden")).toBe(false);
+      expect(queueSelected()).toBe("src/c.ts");
+    } finally {
+      width.restore();
+    }
+  });
+
+  it("样式按三档声明：中/窄档意见抽屉覆盖差异，窄档队列可收起，左栏收起有专门规则", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const css = readFileSync(join(process.cwd(), "src/styles/review.css"), "utf8");
+    expect(css).toMatch(/\.review-layout\[data-tier="medium"\] \.review-body > \.review-drawer/);
+    expect(css).toMatch(/\.review-layout\[data-tier="narrow"\] \{[^}]*grid-template-columns: minmax\(0, 1fr\)/);
+    expect(css).toMatch(/\.review-layout\[data-tier="narrow"\]\.queue-hidden \.review-queue \{ display: none; \}/);
+    expect(css).toMatch(/\.review-layout\.queue-hidden \{ grid-template-columns: 0 0 minmax\(0, 1fr\); \}/);
+  });
+});
+
+describe("失效撤销逐文件说明原因（R3）", () => {
+  it("内容变化 / 路径消失 / 无法确认只撤销对应文件并在队列行说明原因；重新标记后原因消失", async () => {
+    mocks.api.taskReviewToken.mockImplementation(async (_w: string, baseline: string, _h: string, path: string) => ({
+      generation: 4,
+      path,
+      baselineOid: baseline,
+      state: "current",
+      token: `tok:${path}`,
+      status: "modified",
+      untracked: false,
+      message: "已确认当前快照。",
+    }));
+    mocks.api.taskReview.mockImplementation(async (_worktree: string, baseline: string) => taskFor(baseline, ["src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts"]));
+    await coldStart(reviewUrl(REVIEW_A, SESSION_A, BASELINE));
+    await waitFor(() => expect(selectedTaskPath()).toBe("src/a.ts"));
+    for (const path of ["src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts"]) {
+      await fireEvent.click(within(taskRow(path)).getByRole("button", { name: `标记 ${path} 已审阅` }));
+      await waitFor(() => expect(within(taskRow(path)).getByRole("button", { name: `撤销 ${path} 的已审阅标记` })).toBeTruthy());
+    }
+
+    // 重验：a 内容变了，b 不再有净改动，c 读不出快照，d 不变。
+    mocks.api.taskReviewToken.mockImplementation(async (_w: string, baseline: string, _h: string, path: string) => {
+      if (path === "src/c.ts") throw { code: "io", message: "读取失败" };
+      const base = { generation: 4, path, baselineOid: baseline, status: "modified", untracked: false };
+      if (path === "src/a.ts") return { ...base, state: "current", token: "tok:new", message: "已确认当前快照。" };
+      if (path === "src/b.ts") return { ...base, state: "unchanged", token: null, message: "这条路径相对起点没有净变化，不能标记已审阅。" };
+      return { ...base, state: "current", token: `tok:${path}`, message: "已确认当前快照。" };
+    });
+    await switchView("history");
+    await switchView("review");
+
+    await waitFor(() => expect(taskRow("src/a.ts").querySelector(".file-tag.revoked")?.textContent).toContain("内容变化"));
+    expect(taskRow("src/b.ts").querySelector(".file-tag.revoked")?.textContent).toContain("路径消失");
+    expect(taskRow("src/b.ts").querySelector(".file-tag.revoked")?.getAttribute("title")).toContain("没有净变化");
+    expect(taskRow("src/c.ts").querySelector(".file-tag.revoked")?.textContent).toContain("无法确认");
+    expect(taskRow("src/c.ts").querySelector(".file-tag.revoked")?.getAttribute("title")).toContain("读取失败");
+    // 只影响对应文件：d 仍已审阅、没有撤销说明。
+    expect(taskRow("src/d.ts").querySelector(".file-tag.revoked")).toBeNull();
+    expect(within(taskRow("src/d.ts")).getByRole("button", { name: "撤销 src/d.ts 的已审阅标记" })).toBeTruthy();
+    expect(within(workbench()!).getByLabelText("已审阅 1 个，共 4 个任务文件")).toBeTruthy();
+    // 原因带图标与文字，不只靠颜色。
+    expect(taskRow("src/a.ts").querySelector(".file-tag.revoked svg, .file-tag.revoked .icon")).toBeTruthy();
+
+    // 重新标记 a：说明消失，其他文件的说明保留。
+    mocks.api.taskReviewToken.mockImplementation(async (_w: string, baseline: string, _h: string, path: string) => ({
+      generation: 4, path, baselineOid: baseline, state: "current", token: "tok:new", status: "modified", untracked: false, message: "已确认当前快照。",
+    }));
+    await fireEvent.click(within(taskRow("src/a.ts")).getByRole("button", { name: "标记 src/a.ts 已审阅" }));
+    await waitFor(() => expect(taskRow("src/a.ts").querySelector(".file-tag.revoked")).toBeNull());
+    expect(taskRow("src/b.ts").querySelector(".file-tag.revoked")).toBeTruthy();
   });
 });

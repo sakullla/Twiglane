@@ -47,6 +47,62 @@ const store = $state({
   states: {} as Record<string, ReviewWorkbenchState>,
 });
 
+/** 失效撤销的原因分类：内容变化、路径消失（不再有净改动）、无法确认快照。 */
+export type ReviewRevocationKind = "changed" | "missing" | "unconfirmed";
+
+/** 重验时被自动撤销的已审阅标记：只说明原因，不恢复标记，也不影响其他文件。 */
+export interface ReviewRevocation {
+  kind: ReviewRevocationKind;
+  reason: string;
+}
+
+export const REVOCATION_LABELS: Record<ReviewRevocationKind, string> = {
+  changed: "内容变化",
+  missing: "路径消失",
+  unconfirmed: "无法确认",
+};
+
+/**
+ * 工作台布局与队列附注（同样按 reviewId 隔离、关闭来源时清理）：左栏是否收起，以及
+ * 按路径记录的失效撤销原因。与上面的界面状态分开存，保持那份状态的形状稳定。
+ */
+export interface ReviewWorkbenchExtras {
+  queueCollapsed: boolean;
+  revoked: Record<string, ReviewRevocation>;
+}
+
+const extras = $state({
+  states: {} as Record<string, ReviewWorkbenchExtras>,
+});
+
+export function workbenchExtras(reviewId: string): ReviewWorkbenchExtras {
+  const saved = extras.states[reviewId];
+  return { queueCollapsed: saved?.queueCollapsed ?? false, revoked: { ...(saved?.revoked ?? {}) } };
+}
+
+export function saveWorkbenchExtras(reviewId: string, patch: Partial<ReviewWorkbenchExtras>): void {
+  if (!reviewId) return;
+  const next = { ...workbenchExtras(reviewId), ...patch };
+  extras.states = { ...extras.states, [reviewId]: { queueCollapsed: next.queueCollapsed, revoked: { ...next.revoked } } };
+}
+
+/** 记录重验时被自动撤销的文件与原因（只影响这些路径）；同一路径再次失效时以最新原因为准。 */
+export function recordRevocations(reviewId: string, items: readonly ({ path: string } & ReviewRevocation)[]): void {
+  if (!reviewId || items.length === 0) return;
+  const revoked = workbenchExtras(reviewId).revoked;
+  for (const item of items) revoked[item.path] = { kind: item.kind, reason: item.reason };
+  saveWorkbenchExtras(reviewId, { revoked });
+}
+
+/** 某文件重新标记已审阅后清除它的撤销原因：之后再被撤销时不会翻出旧原因。 */
+export function clearRevocations(reviewId: string, paths: readonly string[]): void {
+  if (!reviewId || !Object.hasOwn(extras.states, reviewId)) return;
+  const revoked = workbenchExtras(reviewId).revoked;
+  if (!paths.some((path) => Object.hasOwn(revoked, path))) return;
+  for (const path of paths) delete revoked[path];
+  saveWorkbenchExtras(reviewId, { revoked });
+}
+
 function copy(state: ReviewWorkbenchState): ReviewWorkbenchState {
   return {
     ...state,
@@ -75,6 +131,11 @@ export function saveWorkbenchState(reviewId: string, patch: Partial<ReviewWorkbe
 
 /** 关闭来源时清理该来源的界面状态。 */
 export function forgetWorkbenchState(reviewId: string): void {
+  if (Object.hasOwn(extras.states, reviewId)) {
+    const rest = { ...extras.states };
+    delete rest[reviewId];
+    extras.states = rest;
+  }
   if (!Object.hasOwn(store.states, reviewId)) return;
   const states = { ...store.states };
   delete states[reviewId];
@@ -84,4 +145,5 @@ export function forgetWorkbenchState(reviewId: string): void {
 /** 测试用：清空全部界面状态。 */
 export function resetReviewWorkbench(): void {
   store.states = {};
+  extras.states = {};
 }

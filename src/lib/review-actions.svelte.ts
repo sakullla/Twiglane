@@ -77,6 +77,11 @@ export interface ReviewActionsHost {
   showError(error: unknown): void;
   setReviewNote(message: string): void;
   setTaskReviewNote(message: string): void;
+  /**
+   * 任务范围重验后被自动撤销的文件与逐文件原因：工作台在队列行上说明「内容变化 / 路径消失 /
+   * 无法确认」。可选；不接线时只有汇总说明。
+   */
+  setTaskReviewInvalidations?(items: { path: string; reason: string; kind: "changed" | "missing" | "unconfirmed" }[]): void;
   confirmEditorLeave(purpose: string): Promise<boolean>;
   refresh(): Promise<boolean>;
   switchBlocked(): boolean;
@@ -251,6 +256,8 @@ export class ReviewActions {
     if (marked.length === 0) return;
     const serial = ++this.taskReviewSerial;
     const results: { path: string; token: string | null; reason?: string }[] = [];
+    /** 逐文件的撤销分类：token 变化 = 内容变化；不再有净改动或已删除 = 路径消失；其余 = 无法确认。 */
+    const kinds = new Map<string, "changed" | "missing" | "unconfirmed">();
     for (const path of marked) {
       try {
         const result = await api.taskReviewToken(
@@ -266,10 +273,15 @@ export class ReviewActions {
           token: result.state === "current" ? result.token : null,
           reason: result.message,
         });
+        kinds.set(
+          path,
+          result.state === "current" ? "changed" : result.state === "missing" || result.state === "unchanged" ? "missing" : "unconfirmed",
+        );
       } catch (error) {
         const failure = normalizeError(error);
         if (failure.code === "stale") return;
         results.push({ path, token: null, reason: `无法确认快照：${failure.message}` });
+        kinds.set(path, "unconfirmed");
       }
       const latest = host.taskScope();
       if (
@@ -284,6 +296,9 @@ export class ReviewActions {
     const invalidations = applyReviewReverificationIn(target, results);
     if (invalidations.length > 0) {
       host.setTaskReviewNote(`${invalidations.length} 个文件的快照已变化，已撤销对应的已审阅标记。`);
+      host.setTaskReviewInvalidations?.(
+        invalidations.map((item) => ({ path: item.path, reason: item.reason, kind: kinds.get(item.path) ?? "unconfirmed" })),
+      );
     }
   }
 

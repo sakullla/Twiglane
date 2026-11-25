@@ -75,6 +75,13 @@ export interface CommandState {
     remaining: number;
     total: number;
     scope: "changes" | "task";
+    /**
+     * 审查工作台的「标记并继续」为什么不可用（null 表示可用）；缺省表示当前视图没有这个动作。
+     * 到达可见队列末尾时仍可用：标记当前文件后就地说明「已是最后一个未审阅文件」。
+     */
+    markNextReason?: string | null;
+    /** 审查队列当前的筛选段；缺省表示当前视图没有筛选段。 */
+    filter?: "all" | "unreviewed" | "commented";
   } | null;
   /**
    * 整文件真实写入：改动视图作用于索引，任务净差异里暂存的是这个路径的真实工作区内容。
@@ -309,6 +316,34 @@ const VIEW_COMMANDS: CommandSpec[] = [
     reason: (state) =>
       state.hasRepo ? (state.review ? (state.review.toggleReason ?? NO_FILE_REASON) : NO_REVIEW_QUEUE) : "先打开一个仓库",
   },
+  {
+    id: "review.markNext",
+    group: "视图",
+    title: "标记并继续",
+    hint: "标记当前文件已审阅，再前往可见队列里下一个未审阅文件；到末尾停下，不循环",
+    shortcut: `${ALT_LABEL} ⇧ M`,
+    available: (state) => hasRepo(state) && state.review?.markNextReason === null,
+    reason: (state) =>
+      !state.hasRepo
+        ? "先打开一个仓库"
+        : state.review?.markNextReason === undefined
+          ? "只在审查工作台里可用"
+          : (state.review.markNextReason ?? "当前不可用"),
+  },
+  ...(["all", "unreviewed", "commented"] as const).map((filter) => ({
+    id: `review.filter.${filter}`,
+    group: "视图" as const,
+    title: `审查队列：${filter === "all" ? "显示全部" : filter === "unreviewed" ? "只看未审阅" : "只看有意见"}`,
+    hint: "只改审查队列显示哪些文件；进度总数与审阅记录不变",
+    available: (state: CommandState) =>
+      hasRepo(state) && state.review?.filter !== undefined && state.review.filter !== filter,
+    reason: (state: CommandState) =>
+      !state.hasRepo
+        ? "先打开一个仓库"
+        : state.review?.filter === undefined
+          ? "只在审查工作台里可用"
+          : "已经是当前筛选",
+  })),
   {
     id: "review.hide",
     group: "视图",
@@ -818,6 +853,10 @@ const PALETTE_ALIASES: Record<string, string> = {
   "review.next": "review next",
   "review.toggle": "review reviewed 已读",
   "review.hide": "review reviewed 过滤已审阅",
+  "review.markNext": "mark next continue 标记并继续 下一个",
+  "review.filter.all": "filter all 全部 清除筛选",
+  "review.filter.unreviewed": "filter unreviewed 未审阅 筛选",
+  "review.filter.commented": "filter comments 有意见 筛选",
   "diff.hunk.prev": "hunk previous 上一块 改动块",
   "diff.hunk.next": "hunk next 下一块 改动块",
   "view.find": "find search filter 查找 过滤",

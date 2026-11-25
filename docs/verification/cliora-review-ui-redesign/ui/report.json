@@ -1,0 +1,59 @@
+{
+  "format": "ui_verification_report",
+  "workflow": "2026-11-25-cliora-review-ui-ux-redesign",
+  "task": "T6",
+  "createdAt": "2026-11-25T23:11:09.205Z",
+  "startedAt": "2026-11-25T23:11:09.205Z",
+  "base": "http://127.0.0.1:53263",
+  "runner": "scripts/run-ui-verification.mjs",
+  "nature": "mock",
+  "natureNote": "Chrome headless 真实 DOM 键鼠 + scripts/ui-preview mock API；不代表真实 Git、桌面 WebView、安装包或 Cliora 实机联动。",
+  "output": {
+    "dir": "docs/verification/cliora-review-ui-redesign/ui",
+    "kind": "explicit",
+    "note": "显式 --out：写入调用者目录（归档证据）"
+  },
+  "environment": {
+    "node": "v26.13.0",
+    "platform": "darwin arm64",
+    "temp": "/var/folders/vy/lszwy3c52plgsr4_19b2pxvh0000gn/T"
+  },
+  "health": {
+    "mockApi": true,
+    "resolvedApi": "scripts/ui-preview/mock-api.ts",
+    "realApi": "src/lib/api.ts"
+  },
+  "scenarios": {
+    "skipped": false,
+    "total": 61,
+    "passed": 61,
+    "failed": 0,
+    "failures": [],
+    "exitCode": 0,
+    "output": "PASS  审查：有效进入显示来源卡、任务范围与完成栏，读取过程中主要布局不跳  {\"card\":\"T 独立仓库 · twiglane 刚刚接受 已审阅 0 / 8\",\"layout\":{\"frames\":47,\"states\":[\"reading\",\"blank\",\"diff\"],\"barSpan\":0,\"leftSpan\":0,\"widthSpan\":0,\"stageSpan\":2}}\nPASS  审查：无起点不补 HEAD，给出普通历史与返回入口  \"没有任务范围 Cliora 审查链接没有携带任务起点；这里不会用 HEAD 或默认分支补缺。可以查看普通历史，或返回 Cliora 重新发起。 查看普通历史 返回 Cliora\"\nPASS  审查：空任务说明没有净改动，完成栏仍可返回  \"这个任务没有净改动 起点之后没有任何提交，也没有净改动。\"\nPASS  审查：读取失败就地说明，重新读取时完成栏与主区不跳  {\"text\":\"读取任务范围失败 起点 0004a9c3e1f2b4d6a9c3e1f2b4d6a9c3e1f2b4d6 不是当前分支的祖先，任务范围没有建立。 重新读取 详情\",\"layout\":{\"frames\":75,\"states\":[\"read-failed\"],\"barSpan\":0,\"leftSpan\":0,\"widthSpan\":0,\"stageSpan\":0}}\nPASS  审查：纯键盘连续审阅（焦点可见、Alt+M、Alt+Shift+M、Alt+Shift+→、空格暂存）  {\"hidden\":[],\"progress\":\"已审阅 2 / 8\"}\nPASS  审查：原位新增、编辑与删除意见  {\"edited\":\"旧入口删掉后补一条迁移说明。（并附上回滚步骤）\",\"feedback\":\"已删除 src/App.svelte（删除第 3 行） 的一条意见。\"}\nPASS  审查：工作区变化后意见整体失效，不再送回  \"已失效 1 条 这些意见只读：不会进入新批次，也不会重新定位到新行号。可以复制后按当前内容重写。 任务范围没变，但工作区在这次读取之后又被改过（读取代次 1 → 2），这批意见挂的行可能已经不是原来那一行，不会自动对应到新行号。 复制全部 \"\nPASS  审查：送回意见只显示已准备、等待 Cliora 确认  {\"item\":\"已准备 1 条意见，已打开 Cliora 等待确认\",\"url\":\"cliora://review-feedback?v=1&feedbackId=9b8c7d6e-5f40-4213-8495-b6c7d8e9f0a2&reviewId=6f1a2b3c-4d5e-4f60-8172-93a4b5c6d7e8&sessionId=0b1c2d3e-4f50-4172-8394-a5b6c7d8e9f0&resultRevision=0&digest=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"}\nPASS  审查：意见交接失败保留意见并给出重试  \"1 条意见 意见没有准备好，Cliora 没有被唤起；意见仍保留 本次没有提交或合入 工作区还有 13 个未提交的改动 详情 返回 Cliora 重试送回 1 条意见\"\nPASS  审查：提交后返回 Cliora，分项显示已提交与工作区仍有改动  {\"bar\":\"没有待送回的意见 已提交 abcdef1（待复核） 工作区还有 11 个未提交的改动 已返回 Cliora（第 1 次），结果待 Cliora 复核 详情 返回 Cliora\",\"url\":\"cliora://review?v=3&event=returned&reviewId=6f1a2b3c-4d5e-4f60-8172-93a4b5c6d7e8&sessionId=0b1c2d3e-4f50-4172-8394-a5b6c7d8e9f0&outcome=committed&worktreeState=dirty&headOid=abcdef1234567&resultRevision=1\"}\nPASS  审查：返回时工作区状态未知如实说明，不当成干净  \"没有待送回的意见 本次没有提交或合入 没有读到工作区状态（按未知处理） 已返回 Cliora（第 1 次），结果待 Cliora 复核 详情 返回 Cliora\"\nPASS  审查：多来源菜单切换来源并保留各自阅读进度  \"T 独立仓库 · twiglane 最新发起 刚刚接受 共 2 个来源 已审阅 1 / 8\"\nPASS  审查：关闭含未送回意见的来源先确认，取消后意见仍在  {\"dialog\":\"关闭审查来源 关闭后这些来源里 1 条未送回的意见会被丢弃，无法找回。仓库与阅读记录保留。 独立仓库 · twiglane 1 条未送回的意见 复制意见 复制意见后关闭 不会自动切换到其他来源；需要时从来源菜单选择。 取消 仍然关闭\",\"kept\":true}\nPASS  项目：60 仓持久成员、状态未知与长名称搜索  {\"members\":60,\"rendered\":1,\"overflow\":0}\nPASS  项目：A 切 B 再回 A 保留草稿与选中文件  \"项目 A 的草稿，不自动提交\"\nPASS  项目：附属 worktree 继续显示同一业务项目归属  \"北辰业务平台 · 多仓库 / demo · C:/Users/dev/project/twiglane/wt/review\"\nPASS  项目：来源失效保留快照与修复入口  {\"members\":60,\"snapshot\":true,\"foreign\":true,\"stale\":true,\"overflow\":0}\nPASS  项目：弹层首帧到位，入场动画结束后不回跳  {\"chip\":{\"frames\":35,\"sides\":[\"down\"],\"edgeSpan\":0,\"gapSpan\":0,\"gap\":6,\"first\":{\"side\":\"down\",\"top\":40,\"bottom\":179.45,\"left\":112,\"height\":139.45,\"gap\":6},\"last\":{\"side\":\"down\",\"top\":40,\"bottom\":179.45,\"left\":112,\"height\":139.45,\"gap\":6},\"heightGrew\":false},\"switcher\":{\"frames\":42,\"sides\":[\"down\"],\"edgeSpan\":0,\"gapSpan\":0,\"gap\":6,\"first\":{\"side\":\"down\",\"top\":41,\"bottom\":461,\"left\":208,\"height\":420,\"gap\":6},\"last\":{\"side\":\"down\",\"top\":41,\"bottom\":461,\"left\":208,\"height\":420,\"gap\":6},\"heightGrew\":false}}\nPASS  项目：不在项目里的仓库有标记、说明与回到全部仓库的入口  {\"chip\":\"未选择项目：仓库列表显示最近使用\",\"scope\":\"最近使用 · 独立仓库 管理项目\",\"list\":7}\nPASS  轻量编辑：工作区文件输入后手动保存  \"已保存 ｜ 行 36，列 1\"\nPASS  轻量编辑：保存冲突保留草稿且不能按旧基线再保存  \"文件在编辑期间已被外部修改，保存未写入，未覆盖外部内容。 复制草稿 放弃草稿并重新读取\"\nPASS  轻量编辑：写入失败保留草稿并可重试  \"保存失败，草稿仍保留：文件是只读的，保存未写入任何内容。 重试保存\"\nPASS  轻量编辑：混合行尾保持只读并说明原因  \"文件混用 LF 与 CRLF 行尾，保持只读，避免保存时整份改写行尾。\"\nPASS  大规模最近仓库  \"5 行渲染\"\nPASS  空最近仓库  \"还没有最近仓库，先打开或克隆一个。\"\nPASS  Git 缺失  \"没有找到 Git，请安装后重新检测\"\nPASS  文件视图：目录树与文件内容  \"7 行；assets\"\nPASS  文件视图：资源预览是当前文件  \"当前文件\"\nPASS  文件视图：按路径打开未展开的文件  \"src/utils/util.rs\"\nPASS  文件视图：全文搜索按文件分组  \"3 个文件 / 3 处匹配\"\nPASS  文件视图：仅改动树保留删除墓碑  \"old-panel.ts  已删除      D\"\nPASS  文件视图：搜索局部失败给出原因与就地恢复入口  \"搜索时有一个目录读取失败。  重试搜索 重新读取目录 ｜ 按钮：重试搜索 / 重新读取目录\"\nPASS  文件视图：仅改动与树过滤叠加只留改动路径  \"src/lib/legacy | old-panel.ts  已删除      D\"\nPASS  文件视图：树过滤补齐被截断时说明不完整  \"全仓库匹配过多，补齐结果不完整（后端已截断）。\"\nPASS  文件视图：树过滤补齐失败就地重试  \"全仓库补齐失败 无法遍历 vendor 目录。已展开的目录里也没有匹配——这不代表仓库里没有匹配的路径。 重试补齐\"\nPASS  文件视图：文件内查找失败给出重试与重读入口  \"搜索时有一个目录读取失败。 重试查找 重新读取文件 ｜ 按钮：重试查找 / 重新读取文件\"\nPASS  改动视图：标记已审阅并隐藏已审阅  \"1/13\"\nPASS  改动视图：低频差异工具收进溢出菜单  \"{\\\"lang\\\":true,\\\"opts\\\":7}\"\nPASS  文档阅读：Markdown 默认排版预览、重复标题定位与目录收起  \"{\\\"anchors\\\":[\\\"中文重复标题\\\",\\\"中文重复标题-1\\\"],\\\"positions\\\":[268,317]}\"\nPASS  文档阅读：预览与源码往返不离开这个文件  \"README.md\"\nPASS  文档阅读：相对链接留在同一阅读器里打开目标  \"docs/guide/getting-started.md\"\nPASS  文档阅读：超出排版预算时说明并给出源码  \"文档超过排版预览上限 文档超过 2 MiB 排版预览上限，请查看源码。 查看源码\"\nPASS  文档阅读：读取失败就地说明，仍能看源码  \"无法读取这个版本的文档 无法读取这个版本的正文。 重新读取 查看源码\"\nPASS  历史：提交里的 Markdown 按这个提交的版本显示差异  \"README.md\"\nPASS  同步：远程未核对时按钮自述，不把缓存计数当刚验证  \"同步状态：领先 2，落后 1，未核对远程\\n远程状态：未核对；计数只反映记录的对比\\n获取、拉取与推送都在这里\"\nPASS  同步：远程过期时按钮直接标出过期与上次核对  \"同步 领先 2，落后 1，远程状态已过期（上次检查 04:12）\"\nPASS  提交：钩子拒绝的长原因可展开读全，草稿保留  \"本地提交失败：pre-commit 钩子拒绝提交：scripts/check-commit-msg.mjs 报告提交说明首行超过 72 个字符（实际 96 个）\"\nPASS  提交：本地成功、推送失败分开说明，长原因可展开且只重试推送  \"推送失败：无法连接到远程 origin：fatal: unable to access 'https://github.com/example/twiglane\"\nPASS  历史：多选提交只显示合起来的最终结果  \"5 个文件；0004a9c..0000a9c\"\nPASS  历史：最终结果读取失败时说明原因并给出重新读取  \"最终变更没有读取成功，无法确认文件范围：无法读取提交中的文件： git 命令返回非零状态。\"\nPASS  工作区总览：分组、未知、缺失与过期逐项登记  \"1 个分组；未知 2 项；缺失 1 项；过期 1 项\"\nPASS  终端：展开、输入回显与退出码  \"已退出 · 退出码 0 ｜ \"\nPASS  终端：启动失败就地说明并保留重试  \"无法启动终端 shell：预览 mock 模拟启动失败。 重试启动\"\nPASS  终端：已退出会话可重新启动  \"运行中\"\nPASS  终端：写入失败保留输出并说明原因  \"无法写入终端：预览 mock 模拟写入失败。\"\nPASS  文件视图：右键新建文件并刷新目录树  \"新行：notes.md｜提示：新建文件完成：notes.md（mock 内存，不代表真实磁盘）\"\nPASS  文件视图：新建重名保留输入并说明原因  \"保留输入：notes.md｜原因：目标已存在：notes.md，没有写入任何内容。请换一个名称。\"\nPASS  文件视图：特殊类型不提供可执行的文件操作  \"特殊文件：重命名或移动…：特殊文件不参与文件操作 | 复制到…：特殊文件不参与文件操作 | 删除…：特殊文件不参与文件操作｜符号链接：重命名或移动…：符号链接不参与文件操作 | 复制到…：符号链接不参与文件操作 | 删除…：符号链接不参与文件操作\"\nPASS  文件视图：回收站不可用时保留文件并说明原因  \"原因：未完成：无法把 README.md 移入系统回收站：系统回收站不可用，文件仍在原处。（mock 场景，不是真实系统回收站）\"\nPASS  文件视图：过期结果不写入目录树  \"原因：仓库状态已被其它操作更新（代次过期），这次新建没有执行；请按最新状态重试。｜目录树行数：7\"\nPASS  默认起始页  \"5 行渲染\"\n场景自检：61/61 通过"
+  },
+  "shots": {
+    "manifest": "docs/verification/cliora-review-ui-redesign/ui/manifest.json",
+    "workflow": "2026-11-25-cliora-review-ui-ux-redesign",
+    "task": "T6",
+    "nature": "mock",
+    "capturedAt": "2026-11-25T23:13:21.058Z",
+    "fresh": true,
+    "groups": {
+      "baseline": 7,
+      "review": 12,
+      "failure": 14,
+      "projects": 4,
+      "markdown": 1
+    },
+    "files": 38,
+    "exitCode": 0
+  },
+  "limits": [
+    "浏览器 + mock 数据：不代表真实 Git 行为、桌面 WebView、安装包或其它平台。",
+    "审查场景的 Cliora 深链、回执、意见交接与返回都由 scripts/ui-preview/mock-deep-link.ts 与 mock-api.ts 模拟（只写 window.__clioraPreviewEvidence），只证明界面接线、状态与文案；系统 scheme 路由、原生协议与两端实机联动不在这里验证，由 tests/cliora-integration.spec.ts、Rust 测试与实机记录覆盖。",
+    "截图与场景都跑在 Chrome headless，与 Tauri 窗口的标题栏/原生弹层存在差异。"
+  ],
+  "failures": [],
+  "status": "passed"
+}

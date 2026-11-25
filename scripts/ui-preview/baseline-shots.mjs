@@ -1,5 +1,6 @@
 // 界面证据截图：用 Chrome DevTools Protocol 驱动真实浏览器打开 mock 预览，
 // 逐个流程截图；正常情况下按「起始页/改动/历史/合并/设置」× 深色/浅色 × 1280×840/900×600 截图，
+// 审查工作台（group: "review"：工作台、原位意见编辑展开态、多来源菜单）与它的失败态在四种组合里都采，
 // Markdown 阅读样例另存为 files-markdown / files-markdown-toc 两张（group: "markdown"），
 // 再用同一套 mock 参数截关键失败状态（group: "failure"，见 FAILURE_STATES）。
 //
@@ -65,11 +66,13 @@ const SIZES = [
   { label: "1280x840", width: 1280, height: 840 },
   { label: "900x600", width: 900, height: 600 },
 ];
+/** 审查工作台（group "review"）与它的关键失败态在四种主题 × 尺寸里都采：R2 要求深浅 × 双尺寸都有证据。 */
+const REVIEW_VIEWS = ["review", "review-comment", "review-sources", "review-error", "review-feedback-error"];
 const representative = {
-  "dark:1280x840": ["changes", "task", "worktree", "sync-stale", "commit-push-error"],
-  "light:1280x840": ["history", "composer", "settings", "files-markdown-toc", "doc-large"],
-  "dark:900x600": ["start", "task-error"],
-  "light:900x600": ["merge", "search-error"],
+  "dark:1280x840": ["changes", "worktree", "sync-stale", "commit-push-error", "review-return-unknown", ...REVIEW_VIEWS],
+  "light:1280x840": ["history", "composer", "settings", "files-markdown-toc", "doc-large", ...REVIEW_VIEWS],
+  "dark:900x600": ["start", "review-return-unknown", ...REVIEW_VIEWS],
+  "light:900x600": ["merge", "search-error", ...REVIEW_VIEWS],
 };
 
 function chromePath() {
@@ -265,6 +268,28 @@ async function openReadme(cdp, sessionId, ready, label) {
   await waitFor(cdp, sessionId, ready, label);
 }
 
+const REVIEW_ACTIVE = '.workbench-view[data-active="true"][data-view-scope="review"]';
+
+/** 等审查视图读完任务并显示第一个文件的净差异。 */
+async function openReviewWorkbench(cdp, sessionId) {
+  await waitFor(
+    cdp,
+    sessionId,
+    `Boolean(document.querySelector(${JSON.stringify(REVIEW_ACTIVE + " .review-workbench [data-diff-row]")})) && Boolean(document.querySelector('.review-completion'))`,
+    "审查工作台的任务净差异",
+  );
+}
+
+/** 在当前文件第 3 个可评论行上展开原位意见编辑器并写入正文；save 为真时保存。 */
+async function writeInlineComment(cdp, sessionId, body, save) {
+  await evaluate(cdp, sessionId, `(() => { const button = document.querySelectorAll(${JSON.stringify(REVIEW_ACTIVE + " .line-comment")})[2]; if (!button) return false; button.click(); return true; })()`);
+  await waitFor(cdp, sessionId, "Boolean(document.querySelector('.diff-inline-comment .inline-comment-editor textarea'))", "原位意见编辑器");
+  await evaluate(cdp, sessionId, typeIntoArea(".diff-inline-comment .inline-comment-editor textarea", body));
+  if (!save) return;
+  await evaluate(cdp, sessionId, click(".diff-inline-comment .inline-comment-editor button[type=submit]"));
+  await waitFor(cdp, sessionId, "Boolean(document.querySelector('.line-comment.commented'))", "意见已保存");
+}
+
 /**
  * 同一 mock 数据上的关键失败/未知状态（R3、R4、R6）：每一项都通过 mock 的查询参数进入，
  * 界面证据因此能和具体参数一一对应，不再只靠合成断言。
@@ -396,13 +421,35 @@ const FAILURE_STATES = [
     },
   },
   {
-    // T5：cliora 任务起点不可用时的失败态（历史里任务行标出失败，详情就地说明并给出重新读取，不摆出旧结果）。
-    view: "task-error",
+    // 审查工作台：任务范围读取失败时整页状态就地说明原因并给出重新读取，不摆出旧结果；完成栏仍在原位。
+    view: "review-error",
     query: "cliora=1&task=error",
-    state: "任务起点不可用：历史任务行标出失败，详情就地说明并给出重新读取",
+    state: "审查工作台读取失败：整页状态说明原因、给出重新读取与错误码详情，完成栏不移位",
     run: async (cdp, sessionId) => {
-      await waitFor(cdp, sessionId, "Boolean(document.querySelector('.history-task-row'))", "任务净差异行");
-      await waitFor(cdp, sessionId, "Boolean(document.querySelector('.task-failure'))", "任务读取失败");
+      await waitFor(cdp, sessionId, `Boolean(document.querySelector('${REVIEW_ACTIVE} [data-review-state="read-failed"]'))`, "审查读取失败");
+    },
+  },
+  {
+    // 意见交接准备失败：完成栏标出失败分项与「重试送回」，意见与原任务都保留，Cliora 没有被唤起。
+    view: "review-feedback-error",
+    query: "cliora=1&feedback=fail",
+    state: "意见交接失败：完成栏错误分项与重试送回，差异里的意见标记仍在",
+    run: async (cdp, sessionId) => {
+      await openReviewWorkbench(cdp, sessionId);
+      await writeInlineComment(cdp, sessionId, "交接失败时这条意见不能丢。", true);
+      await evaluate(cdp, sessionId, click('.review-completion [data-completion-action="feedback"]'));
+      await waitFor(cdp, sessionId, "Boolean(document.querySelector('.review-completion-item[data-status=\"handoff\"][data-tone=\"error\"]'))", "交接失败分项");
+    },
+  },
+  {
+    // 返回时原生读不到工作区状态：如实写「按未知处理」，不当成干净。
+    view: "review-return-unknown",
+    query: "cliora=1&return=unknown",
+    state: "返回 Cliora 后工作区状态未知：完成栏分项写明按未知处理，返回结果待 Cliora 复核",
+    run: async (cdp, sessionId) => {
+      await openReviewWorkbench(cdp, sessionId);
+      await evaluate(cdp, sessionId, click('.review-completion [data-completion-action="return"]'));
+      await waitFor(cdp, sessionId, "Boolean(document.querySelector('.review-completion-item[data-status=\"return\"][data-tone=\"success\"]'))", "已返回 Cliora");
     },
   },
   {
@@ -512,6 +559,9 @@ async function main() {
       platform: os.platform(),
       node: process.version,
     },
+    // 证据性质：全部来自浏览器 + mock API（含 mock 深链与 mock 交接/返回），不是桌面应用或真实 Cliora 联动。
+    nature: "mock",
+    natureNote: "浏览器 Chrome headless + scripts/ui-preview mock API：不代表真实 Git、桌面 WebView、系统深链或 Cliora 实机联动。",
     page: {
       url: base,
       build: "scripts/ui-preview/vite.config.mjs（mock API）",
@@ -520,11 +570,12 @@ async function main() {
     },
     groups: {
       ...(projectsOnly || !full ? { projects: "桌面展示项目管理和项目外仓库，窄窗口展示候选选择和来源失效；每个状态采集一次" } : {}),
-      baseline: "start/changes/history/task/worktree/composer/merge/settings：与 01 基线同数据、同主题、同尺寸",
+      baseline: "start/changes/history/worktree/composer/merge/settings：与 01 基线同数据、同主题、同尺寸",
+      review: "review/review-comment/review-sources：顶级「审查」视图（mock 深链进入），深浅主题 × 1280×840 与 900×600 各一张",
       markdown: "files-markdown/files-markdown-toc：Markdown 排版预览与目录工具行，单独成组，不参与优化前后对照",
       failure:
         "关键失败/未知状态：sync-unchecked/sync-stale/commit-error/commit-push-error/doc-error/doc-large/" +
-        "search-error/filter-error/find-error/task-error/history-final-error，逐张对应需求",
+        "search-error/filter-error/find-error/review-error/review-feedback-error/review-return-unknown/history-final-error，逐张对应需求",
     },
     profile: full && !projectsOnly ? "full" : "curated",
     shots: [],
@@ -688,14 +739,18 @@ async function main() {
           await shot("history", "baseline", "历史列表与选中提交的文件");
         }
 
-        if (["task", "worktree", "composer"].some(wants)) {
+        if (["review", "review-comment", "worktree", "composer"].some(wants)) {
+          // cliora 深链（mock）进入顶级「审查」视图：来源卡、文件队列、任务净差异与完成栏。
           await navigate(cdp, sessionId, base + "/?cliora=1");
-          await waitFor(cdp, sessionId, "Boolean(document.querySelector('.history-task-row[aria-pressed=true]'))", "历史里的任务净差异");
-          await waitFor(cdp, sessionId, "document.querySelectorAll('.task-detail .file-list .file-row').length > 0", "任务文件队列");
-          if (wants("task")) {
-            await evaluate(cdp, sessionId, click('.task-detail .file-list .file-row'));
-            await waitFor(cdp, sessionId, "Boolean(document.querySelector('.task-detail [data-diff-row]'))", "任务净差异正文");
-            await shot("task", "baseline", "历史里的任务净差异");
+          await openReviewWorkbench(cdp, sessionId);
+          if (wants("review")) await shot("review", "review", "审查工作台：来源卡与进度、任务文件队列、只读任务净差异与底部完成栏");
+          if (wants("review-comment")) {
+            await writeInlineComment(cdp, sessionId, "旧入口删掉后补一条迁移说明，并附上回滚步骤。", false);
+            await shot("review-comment", "review", "原位意见编辑展开态：锚点行下方的引用、正文、保存/取消与草稿未保存提示");
+            // 不保存草稿：放弃后继续采后面的视图，避免草稿确认框挡住切换。
+            await evaluate(cdp, sessionId, typeIntoArea(".diff-inline-comment .inline-comment-editor textarea", ""));
+            await evaluate(cdp, sessionId, `(() => { const cancel = [...document.querySelectorAll('.diff-inline-comment .inline-comment-editor button')].find((button) => button.textContent.trim() === '取消'); cancel?.click(); return true; })()`);
+            await waitFor(cdp, sessionId, "!document.querySelector('.diff-inline-comment .inline-comment-editor')", "收起意见编辑器");
           }
           if (wants("worktree")) {
             await evaluate(cdp, sessionId, click('[aria-label^="当前仓库"]'));
@@ -713,6 +768,17 @@ async function main() {
           }
         }
 
+        if (wants("review-sources")) {
+          await navigate(cdp, sessionId, base + "/?cliora=multi");
+          await waitFor(cdp, sessionId, `(document.querySelector('${REVIEW_ACTIVE} .review-source-card')?.innerText || '').includes('共 2 个来源')`, "两个审查来源");
+          await openReviewWorkbench(cdp, sessionId);
+          await evaluate(cdp, sessionId, click(".review-source-trigger"));
+          await waitFor(cdp, sessionId, "Boolean(document.querySelector('.review-source-menu[role=dialog]'))", "来源菜单");
+          await shot("review-sources", "review", "多来源菜单：当前/最新发起/较早发起标签、阅读进度与关闭入口");
+          // 来源菜单是 role=dialog：收起后再采后面的弹窗，免得「关闭弹窗」的等待把它算进去。
+          await evaluate(cdp, sessionId, pressEscape);
+          await waitFor(cdp, sessionId, "!document.querySelector('.review-source-menu')", "收起来源菜单");
+        }
         if (wants("merge")) {
           await openCommand(cdp, sessionId, "分支合并", "#merge-modal-title");
           await waitFor(cdp, sessionId, "Boolean(document.querySelector('.merge-check[aria-busy=false] .merge-verdict:not(.idle)'))", "合并检查完成");
@@ -777,10 +843,10 @@ async function main() {
     return `<figure><a href="${href}"><img loading="lazy" src="${href}" alt="${label}"></a><figcaption>${label}</figcaption></figure>`;
   });
   fs.writeFileSync(path.join(path.dirname(manifestPath), "index.html"),
-    `<!doctype html><meta charset="utf-8"><title>Twiglane UI 捕获</title><style>body{font:14px system-ui;margin:2rem;background:#16181c;color:#eee}main{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:1rem}figure{margin:0}img{display:block;width:100%;height:auto}</style><h1>Twiglane UI 捕获</h1><p>${manifest.shots.length} 张 · 浏览器合成数据</p><main>${figures.join("")}</main>`);
+    `<!doctype html><meta charset="utf-8"><title>Twiglane UI 捕获</title><style>body{font:14px system-ui;margin:2rem;background:#16181c;color:#eee}main{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:1rem}figure{margin:0}img{display:block;width:100%;height:auto}</style><h1>Twiglane UI 捕获</h1><p>${manifest.shots.length} 张 · 浏览器 + mock 数据（不代表真实 Git、桌面应用或 Cliora 实机联动）</p><main>${figures.join("")}</main>`);
 
   console.log(
-    `完成：${manifest.shots.length} 张截图（对照 ${counts("baseline")} / Markdown ${counts("markdown")} / 失败态 ${counts("failure")}），` +
+    `完成：${manifest.shots.length} 张截图（对照 ${counts("baseline")} / 审查 ${counts("review")} / Markdown ${counts("markdown")} / 失败态 ${counts("failure")}），` +
       `输出目录 ${outDir}，manifest ${manifestPath}`,
   );
 }

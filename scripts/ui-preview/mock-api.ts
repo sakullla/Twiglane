@@ -1,4 +1,4 @@
-import type { ClioraReviewSource, ClioraSourceSnapshot } from "../../src/lib/cliora-review.svelte";
+import { captureClioraReview, recordClioraCommit, type ClioraReviewSource, type ClioraSourceSnapshot } from "../../src/lib/cliora-review.svelte";
 import type { Projects, WorkspacePreview, WorkspaceManifest, WorkspaceCandidate } from "../../src/lib/workspaces";
 // 仅用于浏览器里预览界面（npm run preview:ui）。不会进入 Tauri 构建，也不代表真实 Git 行为。
 import type {
@@ -56,6 +56,10 @@ const now = Math.floor(Date.now() / 1000);
  * （复现「旧批次挂住、换选择还要能读」），?history=detail-error 让多选详情全部失败。
  * 轻量编辑：?edit=conflict 让保存一律返回 edit_conflict（草稿保留），?edit=fail 让保存写入失败，
  * ?edit=mixed 让编辑快照判为混合行尾只读。保存成功只改写 mock 内存，不代表真实文件写入。
+ * 审查（cliora）：?cliora=1 / nobase / multi 由 mock-deep-link 给出一条、无起点或两条审查链接；
+ * ?feedback=fail 让意见交接准备失败，?return=unknown 让返回时工作区状态如实为 unknown。
+ * 来源快照带 acceptedAt（只在接受时记录）；提交成功后按当前来源记一个待复核的提交结果，
+ * 与 src/lib/api.ts 的包装一致。全部只是浏览器 mock，不代表原生协议、真实 Git 或 Cliora。
  */
 const previewParams = new URLSearchParams(location.search);
 const healthyGit = { available: true, path: "git", version: "2.49.0", overridden: false, belowBaseline: false, message: "Git 2.49.0 可用" };
@@ -524,7 +528,7 @@ if (previewParams.get("projects") === "many") {
   }
 }
 // Synthetic scheme records for the double-product capture; never loaded by the native app.
-const previewSources = new Map<string, { version: string; sessionId: string; revision: number; request?: ClioraReviewSource; accepted?: boolean; lastReturn?: ClioraSourceSnapshot["lastReturn"] }>();
+const previewSources = new Map<string, { version: string; sessionId: string; revision: number; request?: ClioraReviewSource; accepted?: boolean; acceptedAt?: number; result?: ClioraSourceSnapshot["result"]; lastReturn?: ClioraSourceSnapshot["lastReturn"] }>();
 const previewReviewEvidence = {
   receipts: [] as string[],
   returns: [] as { url: string; uncommitted: number }[],
@@ -891,12 +895,19 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
   },
   stageHunks: () => ok(snapshot()),
   saveDraft: (path: string, message: string) => { commitDrafts.set(path, message); return ok(undefined); },
-  commitChanges: (_repo: string, message: string) => {
+  commitChanges: async (repo: string, message: string) => {
     if (previewParams.get("commit") === "error") {
       return Promise.reject({ code: "commit_hook", generation, message: COMMIT_FAILURE });
     }
+    // 与 src/lib/api.ts 的包装一致：提交开始时捕获当前来源，成功后只给这条来源记一个待复核的提交结果。
+    const reviewId = captureClioraReview(repo);
     applyLocalCommit();
-    return ok({ oid: "abcdef1234567", generation, branch: branch.name, summary: `已提交 abcdef1：${message.split("\n")[0]}`, files: [], pushed: false, snapshot: snapshot() }, 400);
+    const result = await ok({ oid: "abcdef1234567", generation, branch: branch.name, summary: `已提交 abcdef1：${message.split("\n")[0]}`, files: [], pushed: false, snapshot: snapshot() }, 400);
+    recordClioraCommit(repo, result.oid, reviewId);
+    // 原生侧随提交命令登记同一条结果，之后的来源快照（返回后会重读）也带着它。
+    const source = reviewId ? previewSources.get(reviewId) : undefined;
+    if (source) source.result = { outcome: "committed", headOid: result.oid, recordedAt: Date.now() };
+    return result;
   },
   commitAndPush: () => {
     if (previewParams.get("commit") === "error") {
@@ -1167,22 +1178,27 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     if (!source || source.sessionId !== sessionId) return Promise.reject({ code: "source_expired", message: "审查来源已失效，请重新发起。" });
     const params = new URLSearchParams({ v: source.version, event: accepted ? "accepted" : "rejected", reviewId, sessionId });
     source.accepted = accepted;
+    // 与原生一致：只在接受时记录 acceptedAt，用来显示「刚刚接受 / 最新发起」。
+    if (accepted) source.acceptedAt = Date.now();
     if (!accepted) { params.set("reason", reason ?? "open_failed"); previewSources.delete(reviewId); }
     previewReviewEvidence.receipts.push("cliora://review?" + params.toString());
     return ok(undefined);
   },
-  clioraReviewSources: () => ok({ sources: [...previewSources.values()].filter((entry) => entry.accepted && entry.request).map((entry) => ({ source: entry.request!, result: null, lastReturn: entry.lastReturn ?? null })), expiredPending: 0 }),
+  clioraReviewSources: () => ok({ sources: [...previewSources.values()].filter((entry) => entry.accepted && entry.request).map((entry) => ({ source: entry.request!, result: entry.result ?? null, lastReturn: entry.lastReturn ?? null, acceptedAt: entry.acceptedAt ?? null })), expiredPending: 0 }),
   clioraReviewForget: (reviewId: string) => { previewSources.delete(reviewId); return ok(undefined); },
   clioraReviewReturn: (reviewId: string, sessionId: string, outcome: string, headOid: string | null) => {
     const source = previewSources.get(reviewId);
     if (!source || source.sessionId !== sessionId) return Promise.reject({ code: "source_expired", message: "审查来源已失效，请重新发起。" });
+    // ?return=unknown：原生读不到来源工作树状态时如实回送 unknown（不当成干净）。
+    const unknown = previewParams.get("return") === "unknown";
     const uncommitted = snapshot().files.length;
-    const params = new URLSearchParams({ v: source.version, event: "returned", reviewId, sessionId, outcome, worktreeState: uncommitted ? "dirty" : "clean" });
+    const worktreeState = unknown ? "unknown" : uncommitted ? "dirty" : "clean";
+    const params = new URLSearchParams({ v: source.version, event: "returned", reviewId, sessionId, outcome, worktreeState });
     if (headOid) params.set("headOid", headOid);
     if (source.version === "3") params.set("resultRevision", String(++source.revision));
-    source.lastReturn = { revision: source.revision, declaration: { reviewId, sessionId, outcome: outcome as "reviewed" | "committed" | "merged", headOid, worktreeState: uncommitted ? "dirty" : "clean", meta: [] } };
-    previewReviewEvidence.returns.push({ url: "cliora://review?" + params.toString(), uncommitted });
-    return ok({ worktreeState: uncommitted ? "dirty" : "clean", uncommitted });
+    source.lastReturn = { revision: source.revision, declaration: { reviewId, sessionId, outcome: outcome as "reviewed" | "committed" | "merged", headOid, worktreeState, meta: [] } };
+    previewReviewEvidence.returns.push({ url: "cliora://review?" + params.toString(), uncommitted: unknown ? -1 : uncommitted });
+    return ok(unknown ? { worktreeState, uncommitted: null } : { worktreeState, uncommitted });
   },
   /**
    * feedback-v1 的准备路径：?feedback=fail 模拟原生校验/写入失败。成功时只返回标识与 digest，

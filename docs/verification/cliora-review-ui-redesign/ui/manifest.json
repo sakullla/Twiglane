@@ -1,0 +1,417 @@
+{
+  "workflow": "2026-11-25-cliora-review-ui-ux-redesign",
+  "task": "T6",
+  "identity": {
+    "source": "cli",
+    "note": "由调用方传入：身份只有一处来源（run-ui-verification.mjs），本脚本不维护默认工作流。",
+    "workflow": "2026-11-25-cliora-review-ui-ux-redesign",
+    "task": "T6"
+  },
+  "capturedAt": "2026-11-25T23:13:21.058Z",
+  "environment": {
+    "browser": "Chrome 158.0.8127.38（DevTools 协议驱动）",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/158.0.0.0 Safari/537.36",
+    "devicePixelRatio": 1,
+    "platform": "darwin",
+    "node": "v26.13.0"
+  },
+  "nature": "mock",
+  "natureNote": "浏览器 Chrome headless + scripts/ui-preview mock API：不代表真实 Git、桌面 WebView、系统深链或 Cliora 实机联动。",
+  "page": {
+    "url": "http://127.0.0.1:53263",
+    "build": "scripts/ui-preview/vite.config.mjs（mock API）",
+    "data": "scripts/ui-preview/mock-api.ts + mock-files.ts + samples.ts（与 01 基线同一组数据）",
+    "worker": "预览页的 Markdown 解析在工作线程里进行；失败态由 ?remote= / ?commit= / ?doc= / ?search= 参数进入"
+  },
+  "groups": {
+    "projects": "桌面展示项目管理和项目外仓库，窄窗口展示候选选择和来源失效；每个状态采集一次",
+    "baseline": "start/changes/history/worktree/composer/merge/settings：与 01 基线同数据、同主题、同尺寸",
+    "review": "review/review-comment/review-sources：顶级「审查」视图（mock 深链进入），深浅主题 × 1280×840 与 900×600 各一张",
+    "markdown": "files-markdown/files-markdown-toc：Markdown 排版预览与目录工具行，单独成组，不参与优化前后对照",
+    "failure": "关键失败/未知状态：sync-unchecked/sync-stale/commit-error/commit-push-error/doc-error/doc-large/search-error/filter-error/find-error/review-error/review-feedback-error/review-return-unknown/history-final-error，逐张对应需求"
+  },
+  "profile": "curated",
+  "shots": [
+    {
+      "file": "after/dark-1280x840-changes.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "changes",
+      "group": "baseline",
+      "state": "改动视图",
+      "bytes": 96071,
+      "sha256": "1776ec914deee1bce4f68c28c4fa53e62fec724fd1906e9059a6237cc8a249a6"
+    },
+    {
+      "file": "after/dark-1280x840-review.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "review",
+      "group": "review",
+      "state": "审查工作台：来源卡与进度、任务文件队列、只读任务净差异与底部完成栏",
+      "bytes": 211976,
+      "sha256": "88d43171398d63a63d6825e5c1bf19fdc0d45f7f246b85e31af9ad16cb4a57ff"
+    },
+    {
+      "file": "after/dark-1280x840-review-comment.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "review-comment",
+      "group": "review",
+      "state": "原位意见编辑展开态：锚点行下方的引用、正文、保存/取消与草稿未保存提示",
+      "bytes": 207353,
+      "sha256": "385a99d0183389a877aaeb4dd2655e4cf178b04d0fe3fa480801bb806581c01b"
+    },
+    {
+      "file": "after/dark-1280x840-worktree.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "worktree",
+      "group": "baseline",
+      "state": "按主仓库分组的工作区总览",
+      "bytes": 241318,
+      "sha256": "69e460f4f765a98b3ce7e27efc0ab818bdc983b2c3c25091e87f97c0d76a8d6f"
+    },
+    {
+      "file": "after/dark-1280x840-review-sources.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "review-sources",
+      "group": "review",
+      "state": "多来源菜单：当前/最新发起/较早发起标签、阅读进度与关闭入口",
+      "bytes": 225789,
+      "sha256": "44dd342f363b2b19e32be964ec725dd9a677c4decb37df7a2b44836d73157bdd"
+    },
+    {
+      "file": "after/dark-1280x840-sync-stale.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "sync-stale",
+      "group": "failure",
+      "state": "远程已过期：折叠的同步按钮显示「过期」并带上次核对时间",
+      "bytes": 97323,
+      "sha256": "1cc22fef83e0f451b4b19f95f8ee2db996f27702e0932e3362943e3be90a61cc"
+    },
+    {
+      "file": "after/dark-1280x840-commit-push-error.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "commit-push-error",
+      "group": "failure",
+      "state": "本地提交成功、推送失败：两个阶段分开说明，长原因展开且只重试推送",
+      "bytes": 244355,
+      "sha256": "2b470be7686b9cbae7e704200ccf9b67bd03c44bc3ebb494db3dd9ed915ae2e7"
+    },
+    {
+      "file": "after/dark-1280x840-review-error.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "review-error",
+      "group": "failure",
+      "state": "审查工作台读取失败：整页状态说明原因、给出重新读取与错误码详情，完成栏不移位",
+      "bytes": 75986,
+      "sha256": "37eae1c1271ee312a523603c72e7b379373180ef8bdf54f2c6e10bc2f8537f11"
+    },
+    {
+      "file": "after/dark-1280x840-review-feedback-error.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "review-feedback-error",
+      "group": "failure",
+      "state": "意见交接失败：完成栏错误分项与重试送回，差异里的意见标记仍在",
+      "bytes": 242356,
+      "sha256": "420a521b111d4286abe9e10d6324bf9e8fd16927425ce966854f25e751472b75"
+    },
+    {
+      "file": "after/dark-1280x840-review-return-unknown.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "review-return-unknown",
+      "group": "failure",
+      "state": "返回 Cliora 后工作区状态未知：完成栏分项写明按未知处理，返回结果待 Cliora 复核",
+      "bytes": 236837,
+      "sha256": "5fb2bc11bd36bf1bc004a34b395373829bdc4a6c0b57ee17b30bdb8a0e603aac"
+    },
+    {
+      "file": "after/dark-1280x840-project-outside.png",
+      "theme": "dark",
+      "size": "1280x840",
+      "view": "project-outside",
+      "group": "projects",
+      "state": "当前仓库不属于所选项目：标题栏「项目外」标签与仓库弹层顶部的范围说明、改看全部仓库入口",
+      "bytes": 194001,
+      "sha256": "b0ccbc09d5ec2d7950749c73522ce3a6468d4a9e87e504a3404bf8727dd042fc"
+    },
+    {
+      "file": "after/dark-900x600-start.png",
+      "theme": "dark",
+      "size": "900x600",
+      "view": "start",
+      "group": "baseline",
+      "state": "起始页",
+      "bytes": 139023,
+      "sha256": "bc428bc43fa22efcd827a038bc5a433ee6a2b19053c8a9a3812f1bd6cbe703d4"
+    },
+    {
+      "file": "after/dark-900x600-review.png",
+      "theme": "dark",
+      "size": "900x600",
+      "view": "review",
+      "group": "review",
+      "state": "审查工作台：来源卡与进度、任务文件队列、只读任务净差异与底部完成栏",
+      "bytes": 153029,
+      "sha256": "eaa57bc86ed75289d580e29b7afc957c43573cb4fd9988bff95e3466f035c120"
+    },
+    {
+      "file": "after/dark-900x600-review-comment.png",
+      "theme": "dark",
+      "size": "900x600",
+      "view": "review-comment",
+      "group": "review",
+      "state": "原位意见编辑展开态：锚点行下方的引用、正文、保存/取消与草稿未保存提示",
+      "bytes": 149932,
+      "sha256": "4f44f60cd8fa1e0195f02b2a2e658c1a05d55b825471f95c343fc426d22e6cef"
+    },
+    {
+      "file": "after/dark-900x600-review-sources.png",
+      "theme": "dark",
+      "size": "900x600",
+      "view": "review-sources",
+      "group": "review",
+      "state": "多来源菜单：当前/最新发起/较早发起标签、阅读进度与关闭入口",
+      "bytes": 167250,
+      "sha256": "f174e54345d3a329b0e20e622f35b4747d5b6d60b17bb9d115e140423f4a0c6c"
+    },
+    {
+      "file": "after/dark-900x600-review-error.png",
+      "theme": "dark",
+      "size": "900x600",
+      "view": "review-error",
+      "group": "failure",
+      "state": "审查工作台读取失败：整页状态说明原因、给出重新读取与错误码详情，完成栏不移位",
+      "bytes": 70120,
+      "sha256": "9f179936880c8a0f7b320792f9d296c3b61a221e47a540ca29b22f7eab6c346c"
+    },
+    {
+      "file": "after/dark-900x600-review-feedback-error.png",
+      "theme": "dark",
+      "size": "900x600",
+      "view": "review-feedback-error",
+      "group": "failure",
+      "state": "意见交接失败：完成栏错误分项与重试送回，差异里的意见标记仍在",
+      "bytes": 168236,
+      "sha256": "f6616bba55013f661c1ffbef674d3c719b1de2f31e44af72ee46bafbf997d758"
+    },
+    {
+      "file": "after/dark-900x600-review-return-unknown.png",
+      "theme": "dark",
+      "size": "900x600",
+      "view": "review-return-unknown",
+      "group": "failure",
+      "state": "返回 Cliora 后工作区状态未知：完成栏分项写明按未知处理，返回结果待 Cliora 复核",
+      "bytes": 173179,
+      "sha256": "9bb7ef129e7320c730acfa45434581b1d00df2e40375e3991b812af081fbe4a3"
+    },
+    {
+      "file": "after/dark-900x600-project-source-missing.png",
+      "theme": "dark",
+      "size": "900x600",
+      "view": "project-source-missing",
+      "group": "projects",
+      "state": "来源失效仍显示快照与修复入口",
+      "bytes": 104137,
+      "sha256": "e9183c617d895a599d7f94ad4567adffbf9a6e1c6c380cb4446ac0cfe44364e0"
+    },
+    {
+      "file": "after/light-1280x840-history.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "history",
+      "group": "baseline",
+      "state": "历史列表与选中提交的文件",
+      "bytes": 187662,
+      "sha256": "ba3eee1e5eb092ed0c96913ceb1358f9c8377cd6df689fa25b3268be230928e2"
+    },
+    {
+      "file": "after/light-1280x840-review.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "review",
+      "group": "review",
+      "state": "审查工作台：来源卡与进度、任务文件队列、只读任务净差异与底部完成栏",
+      "bytes": 210500,
+      "sha256": "f1b6f201c4b55e01c357101e1f7eccab03e904dd6720439090bf4ca2958c1cc4"
+    },
+    {
+      "file": "after/light-1280x840-review-comment.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "review-comment",
+      "group": "review",
+      "state": "原位意见编辑展开态：锚点行下方的引用、正文、保存/取消与草稿未保存提示",
+      "bytes": 206428,
+      "sha256": "6b8edee4328c79f698e799c0e1b46d6ddad90369c61335663427deb938152c0f"
+    },
+    {
+      "file": "after/light-1280x840-composer.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "composer",
+      "group": "baseline",
+      "state": "真实暂存范围与提交草稿",
+      "bytes": 191683,
+      "sha256": "6e34d2d1078ed3bd50f1e6ead5cfe8ff84498502233e5dc0c7ef3a5904fc4075"
+    },
+    {
+      "file": "after/light-1280x840-review-sources.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "review-sources",
+      "group": "review",
+      "state": "多来源菜单：当前/最新发起/较早发起标签、阅读进度与关闭入口",
+      "bytes": 222479,
+      "sha256": "4db17e1b825544c21c1f9e5a27b67ae95b4f95b128ca08a0740e7cd4936671c4"
+    },
+    {
+      "file": "after/light-1280x840-settings.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "settings",
+      "group": "baseline",
+      "state": "设置弹窗",
+      "bytes": 200957,
+      "sha256": "783799405bd1da070a65d39d92d0b6cf1520449574725b2f495bb1fd8b9ec613"
+    },
+    {
+      "file": "after/light-1280x840-files-markdown-toc.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "files-markdown-toc",
+      "group": "markdown",
+      "state": "Markdown 正文与展开的标题目录",
+      "bytes": 115921,
+      "sha256": "f9b3069cfe7bcacf478b7f655697adf85c86c617136834b3eb4453adfab15d22"
+    },
+    {
+      "file": "after/light-1280x840-doc-large.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "doc-large",
+      "group": "failure",
+      "state": "文档超过排版预览上限：给出真实状态与查看源码的退路",
+      "bytes": 63919,
+      "sha256": "4c64dfa30114b3b8579224ea6b125c3b8270d27c26bd53b8328a2bb4141cbd70"
+    },
+    {
+      "file": "after/light-1280x840-review-error.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "review-error",
+      "group": "failure",
+      "state": "审查工作台读取失败：整页状态说明原因、给出重新读取与错误码详情，完成栏不移位",
+      "bytes": 75056,
+      "sha256": "31d4f66c6e9b0eee6cb446981a2e726ae70f7ebb344ea7d33e74aa9621bb3b4f"
+    },
+    {
+      "file": "after/light-1280x840-review-feedback-error.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "review-feedback-error",
+      "group": "failure",
+      "state": "意见交接失败：完成栏错误分项与重试送回，差异里的意见标记仍在",
+      "bytes": 239167,
+      "sha256": "d55a67b645b4ca8a122c8a854e1cd42634a70f15c40bf86cc55d37db11cf4e26"
+    },
+    {
+      "file": "after/light-1280x840-project-manager.png",
+      "theme": "light",
+      "size": "1280x840",
+      "view": "project-manager",
+      "group": "projects",
+      "state": "60 仓名单、批量纳入与目录修复入口",
+      "bytes": 168785,
+      "sha256": "adfffcf181bdf561aea0b750f91de6f69ba5ae1e006ddcdd685acd963d7b70dc"
+    },
+    {
+      "file": "after/light-900x600-review.png",
+      "theme": "light",
+      "size": "900x600",
+      "view": "review",
+      "group": "review",
+      "state": "审查工作台：来源卡与进度、任务文件队列、只读任务净差异与底部完成栏",
+      "bytes": 151953,
+      "sha256": "fd5280d3e7959a66fd0a1085d15ca4fdb186093d7614c5dd17f2d521ff9740e9"
+    },
+    {
+      "file": "after/light-900x600-review-comment.png",
+      "theme": "light",
+      "size": "900x600",
+      "view": "review-comment",
+      "group": "review",
+      "state": "原位意见编辑展开态：锚点行下方的引用、正文、保存/取消与草稿未保存提示",
+      "bytes": 148749,
+      "sha256": "3eff2019486838e05a79b4fd8b8c70af4d98e0d4888446a8976d2693570f1099"
+    },
+    {
+      "file": "after/light-900x600-review-sources.png",
+      "theme": "light",
+      "size": "900x600",
+      "view": "review-sources",
+      "group": "review",
+      "state": "多来源菜单：当前/最新发起/较早发起标签、阅读进度与关闭入口",
+      "bytes": 163866,
+      "sha256": "f639c42d972050529622a6a941fce8562c5a8f3f4266cb7e4907a896abece293"
+    },
+    {
+      "file": "after/light-900x600-merge.png",
+      "theme": "light",
+      "size": "900x600",
+      "view": "merge",
+      "group": "baseline",
+      "state": "合并弹窗",
+      "bytes": 104726,
+      "sha256": "a65e7caa745c84e93f5112b513a88324b3fadbddad32561ef56eaf0dfe6f7e0e"
+    },
+    {
+      "file": "after/light-900x600-search-error.png",
+      "theme": "light",
+      "size": "900x600",
+      "view": "search-error",
+      "group": "failure",
+      "state": "搜索局部失败：显示失败原因而不是「没有匹配」，原因旁就地给出「重试搜索 / 重新读取目录」",
+      "bytes": 58960,
+      "sha256": "2895542447e8ac81b485ca708e06a8b05556a6d6a873462583f7a321c81eecfc"
+    },
+    {
+      "file": "after/light-900x600-review-error.png",
+      "theme": "light",
+      "size": "900x600",
+      "view": "review-error",
+      "group": "failure",
+      "state": "审查工作台读取失败：整页状态说明原因、给出重新读取与错误码详情，完成栏不移位",
+      "bytes": 69099,
+      "sha256": "a1e6afbe4c8441d7b433a23d6beac399a75d375c8e40224f17db0e24bc46ebed"
+    },
+    {
+      "file": "after/light-900x600-review-feedback-error.png",
+      "theme": "light",
+      "size": "900x600",
+      "view": "review-feedback-error",
+      "group": "failure",
+      "state": "意见交接失败：完成栏错误分项与重试送回，差异里的意见标记仍在",
+      "bytes": 166007,
+      "sha256": "b6f87d183a90d186cd419a80c14ae8121ada3429997eff04f172cad7bae1b791"
+    },
+    {
+      "file": "after/light-900x600-project-candidates.png",
+      "theme": "light",
+      "size": "900x600",
+      "view": "project-candidates",
+      "group": "projects",
+      "state": "60 个发现候选名称/完整路径搜索，取消匹配项后仍保留筛选外的 59 项选择",
+      "bytes": 113157,
+      "sha256": "5833f972b3afb83b58b1ff2f0a782a3fcd28bbd252c4e09b66db7f9ce3134c36"
+    }
+  ],
+  "skipped": []
+}

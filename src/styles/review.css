@@ -9,8 +9,15 @@
 .review-side { gap: 0; padding-top: 0; overflow: hidden; }
 .review-side > .pane-head { flex: none; }
 .review-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--surface); }
-.review-head { flex: none; }
-.review-head-actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-6); }
+/* 头部：标题与动作同一行，范围说明独占下一行。动作列按剩余宽度折行，不把标题或范围挤成零宽
+   （提交详情的两列网格在审查主区较窄时会让动作吃掉整行）。 */
+.review-main { container-type: inline-size; container-name: review-main; }
+/* 第一行先按按钮高度占位：任务读到后动作按钮出现，差异区不被往下推。 */
+.review-head { flex: none; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: minmax(26px, auto); align-items: center; row-gap: var(--space-4); }
+.review-head > .commit-head-main { display: contents; }
+.review-head .commit-title { grid-column: 1; grid-row: 1; white-space: nowrap; }
+.review-head .task-byline, .review-head .task-context-note { grid-column: 1 / -1; }
+.review-head-actions { grid-column: 2; grid-row: 1; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: var(--space-6); min-width: 0; }
 .review-mode button { height: 24px; padding: 0 var(--space-8); font-size: var(--text-xs); }
 .review-comments-toggle .count { height: 16px; min-width: 16px; padding: 0 var(--space-4); font-size: var(--text-xs); }
 .review-comment-notice { flex: none; margin: 0; padding: var(--space-4) var(--space-12); border-top: 1px solid var(--border); }
@@ -85,6 +92,10 @@
 .review-completion-item[data-tone="error"] > .icon { color: var(--danger-text); }
 .review-completion-actions { display: flex; align-items: center; gap: var(--space-6); flex: none; margin-left: auto; }
 .review-completion-details { flex: 1 0 100%; margin: 0; padding: var(--space-4) 0 0 var(--space-16); color: var(--fg-muted); font-size: var(--text-xs); line-height: var(--leading-normal); }
+
+/* 审查视图里提示条升到完成栏上方：失败提示不能盖住「重试送回 / 返回 Cliora」。完成栏窄窗口会折成两行，
+   这里按两行留位；有弹窗时仍按弹窗的位置规则。 */
+:root:has(.workbench-view[data-active="true"] .review-completion):not(:has([data-modal-backdrop])):not(:has(.modal-fill)) .toasts { bottom: calc(44px + 64px); }
 
 /* 关闭确认里的复制动作 */
 .review-close-copy { display: flex; flex-wrap: wrap; gap: var(--space-8); margin-top: var(--space-8); }

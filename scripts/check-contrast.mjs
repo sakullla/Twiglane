@@ -144,7 +144,7 @@ const COMPOSITE_TEXT_PAIRS = [
 ];
 
 /** 被扫描的样式层文件：令牌层以外所有可能声明 `color:` 的地方。 */
-const STYLE_LAYERS = ["base.css", "components.css", "layout.css"];
+const STYLE_LAYERS = ["base.css", "components.css", "layout.css", "review.css"];
 
 /**
  * 已标定的 alpha 淡化位点 —— 「默认拒绝」门禁的事实清单。
@@ -304,6 +304,37 @@ const CODE_CHROME_STACKS = [
   { fg: "warning-text", layers: ["surface", "warning-soft", "warning-soft"], site: ".cr-origin.base" },
   { fg: "success-text", layers: ["surface", "success-softer", "success-soft"], site: ".cr-origin.custom" },
   { fg: "fg-muted", layers: ["surface", "success-softer", "surface-2"], site: ".cr-origin.both" },
+];
+
+/**
+ * 审查工作台（review.css）的文字叠层：完成栏落在 --surface-2；来源菜单的当前行是 --accent-softer，
+ * 行内的标签再叠一层 --accent-soft；意见草稿提示、失效分区与队列说明各有自己的浅底。
+ * 状态除颜色外都配图标或文字（tests/ui-polish.spec.ts），这里只管文字可读。
+ */
+const REVIEW_STACKS = [
+  { fg: "fg-muted", layers: ["surface-2"], site: ".review-completion-item" },
+  { fg: "info-text", layers: ["surface-2"], site: '.review-completion-item[data-tone="info"]' },
+  { fg: "success-text", layers: ["surface-2"], site: '.review-completion-item[data-tone="success"]' },
+  { fg: "warning-text", layers: ["surface-2"], site: '.review-completion-item[data-tone="warn"]' },
+  { fg: "danger-text", layers: ["surface-2"], site: '.review-completion-item[data-tone="error"]' },
+  { fg: "fg", layers: ["surface", "accent-softer"], site: ".review-source-menu li.current strong" },
+  { fg: "fg-subtle", layers: ["surface", "accent-softer"], site: ".review-source-menu li.current small" },
+  { fg: "fg-muted", layers: ["surface", "accent-softer"], site: ".review-source-menu li.current .review-source-order" },
+  { fg: "accent-text", layers: ["surface", "accent-softer"], site: '.review-source-menu li.current .review-source-order[data-order="最新发起"]' },
+  { fg: "accent-text", layers: ["surface", "accent-softer", "accent-soft"], site: '.review-source-menu li.current .review-source-tag' },
+  { fg: "accent-text", layers: ["surface-2", "accent-soft"], site: ".review-source-badge（左栏来源卡）" },
+  { fg: "accent-text", layers: ["surface", "accent-soft"], site: ".review-source-badge（来源菜单）" },
+  { fg: "warning-text", layers: ["surface", "warning-soft"], site: ".review-draft-away" },
+  { fg: "info-text", layers: ["surface", "info-soft"], site: ".review-queue-note" },
+  { fg: "success-text", layers: ["surface"], site: ".review-comment-feedback" },
+  { fg: "warning-text", layers: ["surface", "warning-soft"], site: ".review-stale-tag" },
+  { fg: "fg-muted", layers: ["surface", "surface-2"], site: ".review-comment-card.stale .task-comment-body" },
+  { fg: "warning-text", layers: ["surface", "warning-soft"], site: ".inline-comment-confirm" },
+  { fg: "danger-text", layers: ["surface"], site: ".inline-comment-error" },
+  { fg: "accent-text", layers: ["surface"], site: ".inline-comment-line" },
+  { fg: "fg-muted", layers: ["surface", "surface-3"], site: ".inline-comment-quote" },
+  { fg: "warning-text", layers: ["surface-2", "warning-soft"], site: '.view-review-dot[data-tone="warn"]' },
+  { fg: "warning-text", layers: ["surface-2", "warning-soft"], site: ".file-tag.revoked" },
 ];
 
 /** 叠层比例的唯一来源：这些声明必须引用令牌，写死百分比门禁就和渲染脱节了。 */
@@ -823,6 +854,9 @@ function main() {
     }
     for (const { site, fg, layers } of CODE_CHROME_STACKS) {
       judgeStack(`${theme}/code ${site} --${fg} on ${layerName(layers[layers.length - 1])}`, fg, layers, MIN_TEXT, "code");
+    }
+    for (const { site, fg, layers } of REVIEW_STACKS) {
+      judgeStack(`${theme}/review ${site} --${fg} on ${layerName(layers[layers.length - 1])}`, fg, layers, MIN_TEXT, "review");
     }
     for (const pair of COMPOSITE_TEXT_PAIRS) {
       const label = `${theme}/composite --${pair.fg}@${pair.opacity} on --${pair.bg}`;

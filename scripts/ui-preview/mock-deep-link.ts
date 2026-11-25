@@ -24,6 +24,11 @@ export async function getCurrent(): Promise<string[] | null> {
   if (!mode || mode === "external") return null;
   const query = new URLSearchParams({ v: "3", reviewId: "6f1a2b3c-4d5e-4f60-8172-93a4b5c6d7e8", sessionId: "0b1c2d3e-4f50-4172-8394-a5b6c7d8e9f0", worktreePath: "C:/Users/dev/project/twiglane" });
   if (mode === "nobase") query.set("nobase", "1");
+  // ?cliora=multi：先后两条审查链接（附属 worktree 在前，主检出在后），用来看多来源菜单与切换。
+  if (mode === "multi") {
+    const earlier = new URLSearchParams({ v: "3", reviewId: "7a2b3c4d-5e6f-4071-8293-a4b5c6d7e8f9", sessionId: "1c2d3e4f-5061-4283-94a5-b6c7d8e9f0a1", worktreePath: "C:/Users/dev/project/twiglane/wt/review" });
+    return ["twiglane://review?" + earlier.toString(), "twiglane://review?" + query.toString()];
+  }
   return ["twiglane://review?" + query.toString()];
 }
 export async function onOpenUrl(handler: (urls: string[]) => void): Promise<() => void> {

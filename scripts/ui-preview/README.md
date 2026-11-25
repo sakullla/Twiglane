@@ -26,16 +26,23 @@ curl -s http://127.0.0.1:1430/__ui-preview/health
   - `?terminal=error` / `?terminal=exited` / `?terminal=write`：底部终端的启动失败、打开时已退出（可重新启动）与写入失败。默认 mock 只在内存里回显输入，输入 `exit` 回车后给出退出码 0；它不执行真实命令，也不代表桌面 PTY 行为；
   - `?recent=many`、`?recent=empty`、`?git=missing`、`?merge=conflict`、`?filter=truncated`、`?filter=error`、`?search=error` 等按异常状态展开。`?filter=error` 让树过滤的全仓补齐整体失败（说明里给「重试补齐」），`?search=error` 让全仓库文本搜索与文件内查找都失败（各自给出「重试搜索 / 重新读取目录」与「重试查找 / 重新读取文件」）。
 - `mock-files.ts` / `samples.ts`：目录、文档与差异样例。`README.md` 覆盖中文标题、同名重复标题、GFM 表格、只读任务列表、相对/缺失/外链、本地图片与远程图片占位。
-- `baseline-shots.mjs` 驱动 Chrome 截取精选图集，包含起始页、改动、历史、任务净差异、工作区、提交、合并、设置、Markdown、项目与关键失败状态。覆盖深浅主题和 1280×840、900×600 两种窗口。加 `--full` 复跑原来的主题尺寸矩阵，或用 `--failure-targets dark:1280x840,light:900x600` 指定失败态组合。输出 `index.html` 与逐图记录尺寸和 SHA-256 的 `manifest.json`。
+- `baseline-shots.mjs` 驱动 Chrome 截取精选图集，包含起始页、改动、历史、审查工作台、工作区、提交、合并、设置、Markdown、项目与关键失败状态。审查组（`review`：工作台、原位意见编辑展开态、多来源菜单）与审查失败态（`review-error`、`review-feedback-error`）在深浅 × 1280×840/900×600 四种组合里都采。覆盖深浅主题和 1280×840、900×600 两种窗口。加 `--full` 复跑原来的主题尺寸矩阵，或用 `--failure-targets dark:1280x840,light:900x600` 指定失败态组合。输出 `index.html` 与逐图记录尺寸和 SHA-256 的 `manifest.json`。
+- 审查（cliora）来源：`?cliora=1` 由 `mock-deep-link.ts` 模拟一条带起点的审查深链，`?cliora=nobase` 不带起点，
+  `?cliora=multi` 先后给出两条（附属 worktree 与主检出），用来看来源菜单与切换。`?feedback=fail` 让意见交接准备失败，
+  `?return=unknown` 让返回时工作区状态为 unknown。来源快照带 `acceptedAt`；提交成功后按当前来源记一个待复核的提交结果。
+  回执、交接与返回只写进 `window.__clioraPreviewEvidence`，不注册系统 scheme，也不代表原生协议或 Cliora 实机。
 - 任务、工作区总览与历史取消（T5 新增，全部只用于界面呈现）：
-  - `?task=error`：起点校验失败——任务页就地说明「起点不是当前分支的祖先」，并给出重新读取与重选起点；
+  - `?task=error`：起点校验失败——审查工作台整页状态就地说明「起点不是当前分支的祖先」，并给出重新读取；
   - `?task=empty`：成功读取但任务为空（空任务只在完整读取成功后才出现）；
   - `?worktree=stale`：主仓库的远程状态标为「过期」，其余项仍按真实状态逐项显示；
   - `?worktree=error`：整批工作区状态读取失败（界面必须说明整批失败，不能把旧数字当新鲜结果）；
   - `?history=hang`：最新的两条提交详情永不返回，用来复现「旧批次在途请求挂住、换一批选择还要能读」；
   - `?history=detail-error`：多选详情全部失败，界面给失败说明与「重新读取所选提交」。
 - `check-scenarios.mjs` 的键鼠场景用 CDP `Input.dispatchKeyEvent` / `Input.dispatchMouseEvent` / `Input.insertText`
-  发真实输入（不是 `element.click()` 或直接改 value）：任务打开、连续审阅（Alt+M / Alt+Shift+→）、空格整文件暂存、
+  发真实输入（不是 `element.click()` 或直接改 value）。「审查：」一组覆盖有效进入、无起点、空任务、读取失败、
+  纯键盘连续审阅（Tab 焦点可见、Alt+M / Alt+Shift+M / Alt+Shift+→、空格整文件暂存）、原位意见增改删、意见失效、
+  交接成功/失败、返回结果（提交后 committed+dirty、unknown）、多来源切换与含意见关闭保护；这组场景固定窗口为
+  1280×840 或 900×600，逐项核对没有页面级横向溢出，读取/失败态按帧核对完成栏与主区不跳动。其余键鼠场景覆盖
   提交区提交、历史换选择后的加载结束，以及工作区总览的分组/未知/缺失/过期。滚动定位关掉了平滑滚动，并对候选点做
   `elementFromPoint` 命中测试，避免点到吸顶标题上。
 - `check-scenarios.mjs`：异常、大规模、提交/同步失败与 Markdown 阅读场景的可复跑自检（含轻量编辑的保存/冲突/写入失败/混合行尾只读、文档预览、目录、源码往返、相对链接、超限退路、读取失败、历史提交里的 Markdown 差异、远程未核/过期、提交失败展开，以及终端的展开/输入退出、启动失败、已退出重启与写入失败）。其中 Markdown 场景在同一会话验证默认预览、两个同名标题的独立锚点和滚动位置，以及收起目录后正文仍可读。三个查找失败场景（全文搜索、树过滤补齐、文件内查找）会实际点击恢复按钮并核对同一条失败重新出现，确认恢复入口可执行。
@@ -70,7 +77,8 @@ node scripts/run-ui-verification.mjs --shots-only
 1. 用 `scripts/ui-preview/vite.config.mjs` 启动本次独立的 mock 预览。默认由操作系统分配空闲端口，`--base` 可显式指定端口；
 2. 监听就绪后通过 `/__ui-preview/health` 核对 `mockApi: true`；
 3. 跑 `check-scenarios.mjs`（场景自检，含键鼠闭环）；
-4. 按界面就绪、主题、字体及绘制状态生成图集，校验每张图的路径、字节数和 SHA-256。默认 18 张，包含 4 张项目图。
+4. 按界面就绪、主题、字体及绘制状态生成图集，校验每张图的路径、字节数和 SHA-256。默认 38 张，包含 12 张审查图、
+   审查失败态与 4 张项目图。manifest 与 report 都写 `nature: "mock"`，runner 校验 manifest 的这个标注。
 
 可选参数：`--skip-shots` 只跑场景，`--full` 展开截图矩阵，`--only <场景名片段>` 只跑匹配的场景、`--base` 换地址、`--out <目录>` 归档证据（例如 `--out /tmp/twiglane-ai-coding-ui`）、`--workflow <id>`/`--task <id>` 覆盖 manifest 身份（跨 task 的交付图集用 `--task delivery`）。runner 会核对场景与截图两个子进程的退出码、本次新写出的 `capturedAt`、manifest 的 workflow 身份与逐张截图文件；零场景、子失败或沿用旧 manifest 都判为 failed 并非 0 退出。
 

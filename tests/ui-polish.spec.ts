@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { fireEvent, render, screen, waitFor } from "@testing-library/svelte";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../src/lib/api";
@@ -5,7 +7,28 @@ import BranchSwitcher from "../src/lib/components/BranchSwitcher.svelte";
 import CommandPalette from "../src/lib/components/CommandPalette.svelte";
 import DiffView from "../src/lib/components/DiffView.svelte";
 import FileList from "../src/lib/components/FileList.svelte";
+import InlineCommentEditor from "../src/lib/components/review/InlineCommentEditor.svelte";
+import ReviewCommentsDrawer from "../src/lib/components/review/ReviewCommentsDrawer.svelte";
+import ReviewCompletionBar from "../src/lib/components/review/ReviewCompletionBar.svelte";
+import ReviewSourceCard from "../src/lib/components/review/ReviewSourceCard.svelte";
+import ReviewStatePanel from "../src/lib/components/review/ReviewStatePanel.svelte";
+import type { ReviewSourceEntry } from "../src/lib/review-actions.svelte";
+import type { ReviewComment, StaleCommentBatch } from "../src/lib/review-comments.svelte";
+import { reviewCompletion } from "../src/lib/review-completion";
 import type { DiffResponse, FileChange, OpenedRepository } from "../src/lib/types";
+
+const styles = path.resolve(__dirname, "../src/styles");
+/** 去掉注释后的样式文本：只按真实规则判定。 */
+const css = (name: string) => readFileSync(path.join(styles, name), "utf8").replace(/\r\n/g, "\n").replace(/\/\*[\s\S]*?\*\//g, "");
+/** 选择器对应的全部声明块（同一选择器可能出现在多条规则或逗号列表里），合并后返回。 */
+function declarations(sheet: string, selector: string): string {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const bodies = [...sheet.matchAll(new RegExp(`(?:^|[}\\n,])\\s*${escaped}\\s*(?:,[^{]*)?\\{([^}]*)\\}`, "g"))].map((match) => match[1]);
+  if (bodies.length === 0) throw new Error(`缺少样式规则：${selector}`);
+  return bodies.join(";");
+}
+/** svg 图标的路径签名：同一个图标名渲染出同一组 path。 */
+const iconOf = (node: Element | null) => [...(node?.querySelectorAll("svg.icon path") ?? [])].map((item) => item.getAttribute("d")).join("|");
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -201,5 +224,132 @@ describe("UI/UX 交互与视觉细节", () => {
     await fireEvent.keyDown(scroller, { key: "[" });
     expect(scroller.scrollTop).toBe(0);
     expect(toolbar.classList.contains("scrolled")).toBe(false);
+  });
+
+  describe("审查工作台：状态除颜色外都有图标、文字或形状提示", () => {
+    const entry = (overrides: Partial<ReviewSourceEntry>): ReviewSourceEntry => ({
+      reviewId: "6f1a2b3c-4d5e-4f60-8172-93a4b5c6d7e8",
+      repoName: "twiglane",
+      projectLabel: "独立仓库",
+      active: false,
+      inCurrentRepo: true,
+      order: null,
+      acceptedLabel: "刚刚",
+      acceptedAt: 1,
+      comments: 0,
+      unsent: 0,
+      drafts: 0,
+      reviewed: 0,
+      total: null,
+      hue: 238,
+      badge: "T",
+      details: [],
+      ...overrides,
+    });
+
+    it("完成栏的警告、错误与成功分项各有不同图标与文字，不只是换颜色", () => {
+      const model = reviewCompletion({
+        source: "local",
+        commentCount: 2,
+        draftCount: 1,
+        staleCount: 1,
+        handoff: { state: "failed", message: "无法写入意见交接文件" },
+        gitResult: { kind: "committed", oid: "abcdef1234567890" },
+        worktree: { state: "unknown" },
+        returnState: { state: "returned", revision: 1 },
+        writeLocked: false,
+        canFeedback: true,
+      });
+      render(ReviewCompletionBar, { props: { model } });
+      const items = [...document.querySelectorAll(".review-completion-item")];
+      for (const item of items) {
+        expect(item.querySelector("svg.icon"), item.textContent ?? "").not.toBeNull();
+        expect(item.textContent?.trim().length ?? 0).toBeGreaterThan(2);
+      }
+      const byTone = (tone: string) => items.filter((item) => item.getAttribute("data-tone") === tone);
+      const neutral = iconOf(byTone("neutral")[0]);
+      const warn = iconOf(byTone("warn")[0]);
+      const error = iconOf(byTone("error")[0]);
+      const success = iconOf(byTone("success")[0]);
+      expect(new Set([neutral, warn, error, success]).size).toBe(4);
+      expect(byTone("warn").map((item) => item.textContent?.trim())).toEqual(
+        expect.arrayContaining(["1 条草稿未保存", "1 条意见已失效，不会送回", "没有读到工作区状态（按未知处理）"]),
+      );
+      expect(byTone("error")[0].textContent).toContain("没有被唤起");
+      expect(document.querySelector(".review-completion")?.getAttribute("data-tone")).toBe("error");
+    });
+
+    it("整页错误态是 alert 并带错误图标，警告态与正常态的图标不同", () => {
+      const { unmount } = render(ReviewStatePanel, { props: { kind: "read-failed", title: "读取任务范围失败", message: "起点不可用。", detail: "错误码 baseline_missing" } });
+      const failed = document.querySelector("[data-review-state=read-failed]");
+      expect(failed?.getAttribute("role")).toBe("alert");
+      expect(failed?.querySelector(".empty-icon.err svg.icon")).not.toBeNull();
+      const errorIcon = iconOf(failed);
+      unmount();
+      render(ReviewStatePanel, { props: { kind: "source-expired", title: "审查来源已失效", message: "请重新发起。" } });
+      const expired = document.querySelector("[data-review-state=source-expired]");
+      expect(expired?.getAttribute("role")).toBe("status");
+      expect(expired?.querySelector(".empty-icon.warn svg.icon")).not.toBeNull();
+      expect(iconOf(expired)).not.toBe(errorIcon);
+    });
+
+    it("来源菜单用文字标出当前来源与最新/较早发起，当前项带 aria-current", async () => {
+      render(ReviewSourceCard, {
+        props: {
+          entries: [
+            entry({ active: true, order: "最新发起" }),
+            entry({ reviewId: "7a2b3c4d-5e6f-4071-8293-a4b5c6d7e8f9", repoName: "review", badge: "R", order: "较早发起", comments: 2, unsent: 1 }),
+          ],
+          onChoose: vi.fn(),
+          onClose: vi.fn(),
+        },
+      });
+      await fireEvent.click(screen.getByRole("button", { name: "选择 Cliora 审查来源" }));
+      const rows = [...document.querySelectorAll(".review-source-menu li")];
+      expect(rows[0].querySelector("[data-tag=current]")?.textContent).toBe("当前");
+      expect(rows[0].querySelector(".review-source-switch")?.getAttribute("aria-current")).toBe("true");
+      expect(rows[0].querySelector("[data-order]")?.textContent).toBe("最新发起");
+      expect(rows[1].querySelector("[data-tag=current]")).toBeNull();
+      expect(rows[1].querySelector("[data-order]")?.textContent).toBe("较早发起");
+      expect(rows[1].textContent).toContain("2 条意见（1 条未送回）");
+    });
+
+    it("意见编辑器的错误带图标与 alert，失效意见带「已失效」文字标签", () => {
+      const anchor = { path: "src/App.svelte", hunkIndex: 0, kind: "del" as const, oldNo: 3, newNo: null, quote: "import x" };
+      const { unmount } = render(InlineCommentEditor, { props: { anchor, body: "", error: "意见正文不能为空。", onInput: vi.fn(), onSave: vi.fn(), onCancel: vi.fn() } });
+      const error = document.querySelector(".inline-comment-error");
+      expect(error?.getAttribute("role")).toBe("alert");
+      expect(error?.querySelector("svg.icon")).not.toBeNull();
+      expect(document.querySelector(".inline-comment-editor textarea")?.getAttribute("aria-invalid")).toBe("true");
+      unmount();
+      const comment: ReviewComment = { id: "c1", anchor, body: "旧意见", createdAt: 1, updatedAt: 1 };
+      const stale: StaleCommentBatch[] = [{
+        scope: { reviewId: "r", sessionId: "s", worktree: "/w", baselineOid: "a", headOid: "b", rangeVersion: "v", generation: 1 },
+        comments: [comment],
+        reason: "任务范围已经变化。",
+      }];
+      render(ReviewCommentsDrawer, { props: { comments: [], stale } });
+      const section = document.querySelector(".review-comment-stale");
+      expect(section?.querySelector(".review-comment-group-head svg.icon")).not.toBeNull();
+      expect(section?.querySelector(".review-stale-tag")?.textContent).toContain("已失效");
+      expect(section?.querySelector(".review-comment-card.stale")).not.toBeNull();
+    });
+
+    it("当前选择、已审阅与已有意见在样式上有形状提示（选中条、描边、常显）", () => {
+      const components = css("components.css");
+      // 当前选择：选中行左侧的实心条。
+      expect(declarations(components, '.file-row[aria-selected="true"]::before')).toMatch(/content:\s*""/);
+      expect(declarations(components, '.file-row[aria-selected="true"]::before')).toMatch(/width:\s*2\.5px/);
+      // 已审阅：勾选按钮多一圈描边，选中行上的未审阅勾只有图标没有描边。
+      expect(declarations(components, ".review-toggle.on")).toMatch(/box-shadow:\s*inset 0 0 0 1px currentColor/);
+      // 已有意见：行标记与块标记都有描边，行标记常显、未挂意见的只在悬停/聚焦时出现。
+      expect(declarations(components, ".hunk-btn.line-comment.commented")).toMatch(/box-shadow:\s*inset 0 0 0 1px currentColor/);
+      expect(declarations(components, ".hunk-btn.hunk-comment.commented")).toMatch(/box-shadow:\s*inset 0 0 0 1px currentColor/);
+      expect(components).toMatch(/\.diff-line \.line-comment:not\(\.commented\)[^{]*\{[^}]*opacity:\s*0/);
+      // 审查视图的状态点：警告时从圆点换成方块（形状），不只换颜色。
+      const review = css("review.css");
+      expect(declarations(review, ".view-review-dot")).toMatch(/border-radius:\s*50%/);
+      expect(declarations(review, '.view-review-dot[data-tone="warn"]')).toMatch(/border-radius:\s*3px/);
+    });
   });
 });

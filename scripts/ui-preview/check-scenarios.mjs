@@ -98,24 +98,11 @@ async function clickMenuItem(d, label, depth = 0) {
   await d.until("!document.querySelector('[role=\"menu\"]')", "菜单关闭");
 }
 
-async function clickSubmenuItem(d, parentLabel, childLabel) {
-  const parentSelector = '[role="menu"][data-depth="0"] .context-item';
-  const parentIndex = await d.evaluate(
-    `[...document.querySelectorAll(${JSON.stringify(parentSelector)})].findIndex((item) => (item.getAttribute('aria-label') || item.textContent || '').includes(${JSON.stringify(parentLabel)}))`,
-  );
-  if (parentIndex < 0) throw new Error("菜单里没有父级：" + parentLabel);
-  await d.clickNth(parentSelector, parentIndex);
-  await d.until(
-    "Boolean(document.querySelector('[role=\"menu\"][data-depth=\"1\"]:not([style*=\"visibility:hidden\"])'))",
-    parentLabel + " 子菜单展开",
-  );
-  await clickMenuItem(d, childLabel, 1);
-}
-
-/** 右键 README.md → 新建 ▸ 文件… → 填名字 → 提交；失败分支由页面的 ?entry= 决定。 */
+/** 目录树空白处右键 → 新建文件…（仓库根目录）→ 填名字 → 提交；失败分支由页面的 ?entry= 决定。 */
 async function createFileFlow(d, name) {
-  await rightClickRow(d, "README.md");
-  await clickSubmenuItem(d, "新建", "文件…");
+  await d.rightClickBlank(".files-view .file-tree", ".file-tree-row");
+  await d.until("Boolean(document.querySelector('[role=\"menu\"]'))", "目录树空白处右键菜单出现");
+  await clickMenuItem(d, "新建文件…");
   await d.until("Boolean(document.querySelector('[data-entry-form=\"createFile\"]'))", "新建文件表单出现");
   await d.typeInto("#entry-name", name);
   // 仓库仍在读取时提交按钮是禁用的：等它可用再点，避免把「点不动」误判成失败。
@@ -212,7 +199,415 @@ async function collectPopoverFrames(d, key) {
   })()`);
 }
 
+/* ---------- 审查工作台（cliora 审查）场景的公共步骤 ----------
+ * 全部跑在浏览器 + mock 上：?cliora=1/nobase/multi 由 mock-deep-link 模拟系统深链，
+ * 回执、交接与返回只写进 window.__clioraPreviewEvidence，不代表原生协议、真实 Git 或 Cliora。
+ * 操作一律走 CDP 真实键鼠（driver.click / press / typeText），不调用 element.click()。 */
+const REVIEW_ACTIVE = ".workbench-view[data-active=\"true\"][data-view-scope=\"review\"]";
+const NO_PAGE_OVERFLOW = "document.documentElement.scrollWidth <= innerWidth + 1";
+/**
+ * 页面里判断「焦点可见」：元素命中 :focus-visible，且实际画出了指示——自身的描边或阴影、
+ * 伪元素上的焦点条（分隔条），或输入框外壳在 :focus-within 时的描边/阴影（搜索框）。
+ */
+const FOCUS_PROBE = `(el) => {
+  if (!el || el === document.body || !el.matches(':focus-visible')) return false;
+  const drawn = (style) => (style.outlineStyle !== 'none' && parseFloat(style.outlineWidth) > 0) || (style.boxShadow && style.boxShadow !== 'none');
+  if (drawn(getComputedStyle(el))) return true;
+  for (const pseudo of ['::after', '::before']) {
+    const style = getComputedStyle(el, pseudo);
+    if (style.content !== 'none' && style.backgroundColor !== 'rgba(0, 0, 0, 0)' && style.display !== 'none' && style.opacity !== '0') return true;
+  }
+  for (let node = el.parentElement, depth = 0; node && depth < 2; node = node.parentElement, depth += 1) {
+    if (node.matches(':focus-within') && drawn(getComputedStyle(node))) return true;
+  }
+  return false;
+}`;
+
+async function openReview(d, label = "审查工作台出现任务净差异") {
+  await d.until(
+    `Boolean(document.querySelector(${JSON.stringify(REVIEW_ACTIVE + " .review-workbench [data-diff-row]")})) && Boolean(document.querySelector('.review-completion'))`,
+    label,
+  );
+}
+
+/** 按文字找第 n 个匹配元素并真实点击。 */
+async function clickText(d, selector, text) {
+  const index = await d.evaluate(
+    `[...document.querySelectorAll(${JSON.stringify(selector)})].findIndex((item) => (item.getAttribute('aria-label') || '').includes(${JSON.stringify(text)}) || (item.textContent || '').includes(${JSON.stringify(text)}))`,
+  );
+  if (index < 0) throw new Error("找不到「" + text + "」：" + selector);
+  await d.clickNth(selector, index);
+}
+
+/** 在当前文件第 index 个可评论行上原位写一条意见并保存。 */
+async function addInlineComment(d, body, index = 2) {
+  await d.clickNth(REVIEW_ACTIVE + " .line-comment", index);
+  await d.until(`Boolean(document.querySelector(${JSON.stringify(REVIEW_ACTIVE + " .diff-inline-comment .inline-comment-editor textarea")}))`, "原位意见编辑器展开");
+  await d.until("document.activeElement?.matches('.inline-comment-editor textarea')", "编辑器拿到焦点");
+  await d.typeText(body);
+  await d.click(REVIEW_ACTIVE + " .diff-inline-comment .inline-comment-editor button[type=submit]");
+  await d.until(`(document.querySelector('.review-comment-feedback')?.textContent || '').includes('已添加意见')`, "意见已添加的就地反馈");
+}
+
+/** 按帧记录主要布局盒子：完成栏上沿、主区左沿与宽度、差异/状态区上沿。 */
+async function startLayoutFrames(d) {
+  await d.evaluate(`(() => {
+    window.__layout = [];
+    window.__layoutOn = true;
+    const tick = () => {
+      const bar = document.querySelector('${REVIEW_ACTIVE} .review-completion');
+      const main = document.querySelector('${REVIEW_ACTIVE} .review-main');
+      const stage = document.querySelector('${REVIEW_ACTIVE} .review-stage');
+      if (bar && main && stage) {
+        const b = bar.getBoundingClientRect(), m = main.getBoundingClientRect(), s = stage.getBoundingClientRect();
+        window.__layout.push({ bar: b.top, barH: b.height, left: m.left, width: m.width, stage: s.top, state: document.querySelector('${REVIEW_ACTIVE} [data-review-state]')?.dataset.reviewState || (document.querySelector('${REVIEW_ACTIVE} [data-diff-row]') ? 'diff' : 'blank') });
+      }
+      if (window.__layoutOn) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+    return true;
+  })()`);
+}
+
+async function collectLayoutFrames(d, key) {
+  await d.evaluate("window.__layoutOn = false");
+  await d.evaluate(`(() => {
+    const frames = window.__layout || [];
+    const span = (values) => values.length ? Math.round((Math.max(...values) - Math.min(...values)) * 100) / 100 : 0;
+    window[${JSON.stringify(key)}] = {
+      frames: frames.length,
+      states: [...new Set(frames.map((frame) => frame.state))],
+      barSpan: span(frames.map((frame) => frame.bar)),
+      leftSpan: span(frames.map((frame) => frame.left)),
+      widthSpan: span(frames.map((frame) => frame.width)),
+      stageSpan: span(frames.map((frame) => frame.stage)),
+    };
+    return window[${JSON.stringify(key)}];
+  })()`);
+}
+
+/**
+ * 审查工作台场景（R1–R9 的浏览器 mock 证据）：有效进入、无起点、空任务、读取失败、纯键盘连续审阅、
+ * 原位意见增改删、意见失效、交接成功/失败、返回结果（committed+dirty、unknown）、多来源切换、含意见关闭保护。
+ * 每个场景都核对没有页面级横向溢出；读取/失败态核对完成栏与主区不跳动；键盘场景核对焦点可见。
+ */
+const REVIEW_SCENARIOS = [
+  {
+    name: "审查：有效进入显示来源卡、任务范围与完成栏，读取过程中主要布局不跳",
+    url: "/?cliora=1",
+    viewport: { width: 1280, height: 840 },
+    steps: async (d) => {
+      await d.until(`Boolean(document.querySelector(${JSON.stringify(REVIEW_ACTIVE + " .review-completion")}))`, "审查视图与完成栏出现");
+      await startLayoutFrames(d);
+      await openReview(d);
+      await d.pause(400);
+      await collectLayoutFrames(d, "__enterLayout");
+    },
+    check: `(() => {
+      const card = document.querySelector('${REVIEW_ACTIVE} .review-source-card')?.innerText || '';
+      const layout = window.__enterLayout;
+      const receipts = window.__clioraPreviewEvidence?.receipts || [];
+      return card.includes('接受') && card.includes('已审阅 0 / 8')
+        && Boolean(document.querySelector('${REVIEW_ACTIVE} .task-byline'))
+        && Boolean(document.querySelector('${REVIEW_ACTIVE} .review-completion [data-completion-action="return"]'))
+        && document.querySelectorAll('${REVIEW_ACTIVE} .review-queue .file-row').length === 8
+        && receipts.length === 1 && receipts[0].includes('event=accepted')
+        && layout && layout.frames >= 2 && layout.barSpan <= 1 && layout.leftSpan <= 1 && layout.widthSpan <= 1 && layout.stageSpan <= 4
+        && !layout.states.includes('no-baseline')
+        && ${NO_PAGE_OVERFLOW};
+    })()`,
+    detail: "({ card: (document.querySelector('.review-source-card')?.innerText || '').replace(/\\s+/g, ' '), layout: window.__enterLayout })",
+  },
+  {
+    name: "审查：无起点不补 HEAD，给出普通历史与返回入口",
+    url: "/?cliora=nobase",
+    viewport: { width: 900, height: 600 },
+    steps: async (d) => {
+      await d.until(`Boolean(document.querySelector('${REVIEW_ACTIVE} [data-review-state="no-baseline"]'))`, "无起点整页状态");
+    },
+    check: `(() => {
+      const panel = document.querySelector('${REVIEW_ACTIVE} [data-review-state="no-baseline"]');
+      const actions = [...panel.querySelectorAll('[data-review-state-action]')].map((button) => button.dataset.reviewStateAction);
+      return panel.innerText.includes('不会用 HEAD') && actions.includes('history') && actions.includes('return')
+        && !document.querySelector('${REVIEW_ACTIVE} [data-diff-row]') && ${NO_PAGE_OVERFLOW};
+    })()`,
+    detail: "(document.querySelector('[data-review-state=\"no-baseline\"]')?.innerText || '').replace(/\\s+/g, ' ').slice(0, 120)",
+  },
+  {
+    name: "审查：空任务说明没有净改动，完成栏仍可返回",
+    url: "/?cliora=1&task=empty",
+    viewport: { width: 1280, height: 840 },
+    steps: async (d) => {
+      await d.until(`Boolean(document.querySelector('${REVIEW_ACTIVE} [data-review-state="empty"]'))`, "空任务整页状态");
+    },
+    check: `(() => {
+      const panel = document.querySelector('${REVIEW_ACTIVE} [data-review-state="empty"]');
+      const ret = document.querySelector('${REVIEW_ACTIVE} .review-completion [data-completion-action="return"]');
+      return panel.innerText.includes('没有净改动') && Boolean(ret) && !ret.disabled
+        && !document.querySelector('${REVIEW_ACTIVE} .review-queue') && ${NO_PAGE_OVERFLOW};
+    })()`,
+    detail: "(document.querySelector('[data-review-state=\"empty\"]')?.innerText || '').replace(/\\s+/g, ' ').slice(0, 120)",
+  },
+  {
+    name: "审查：读取失败就地说明，重新读取时完成栏与主区不跳",
+    url: "/?cliora=1&task=error",
+    viewport: { width: 900, height: 600 },
+    steps: async (d) => {
+      await d.until(`Boolean(document.querySelector('${REVIEW_ACTIVE} [data-review-state="read-failed"]'))`, "读取失败整页状态");
+      await startLayoutFrames(d);
+      await d.click(`${REVIEW_ACTIVE} [data-review-state-action="reload"]`);
+      await d.pause(900);
+      await d.until(`Boolean(document.querySelector('${REVIEW_ACTIVE} [data-review-state="read-failed"]'))`, "重新读取后仍如实失败");
+      await collectLayoutFrames(d, "__failLayout");
+    },
+    check: `(() => {
+      const panel = document.querySelector('${REVIEW_ACTIVE} [data-review-state="read-failed"]');
+      const layout = window.__failLayout;
+      return panel.getAttribute('role') === 'alert' && panel.innerText.includes('读取任务范围失败') && panel.innerText.includes('不是当前分支的祖先')
+        && Boolean(panel.querySelector('details')) && layout.frames >= 10 && layout.barSpan <= 1 && layout.stageSpan <= 1 && layout.widthSpan <= 1
+        && ${NO_PAGE_OVERFLOW};
+    })()`,
+    detail: "({ text: (document.querySelector('[data-review-state=\"read-failed\"]')?.innerText || '').replace(/\\s+/g, ' ').slice(0, 80), layout: window.__failLayout })",
+  },
+  {
+    name: "审查：纯键盘连续审阅（焦点可见、Alt+M、Alt+Shift+M、Alt+Shift+→、空格暂存）",
+    url: "/?cliora=1",
+    viewport: { width: 1280, height: 840 },
+    steps: async (d) => {
+      await openReview(d);
+      // 从页面起点按 Tab 走一遍：每个拿到焦点的控件都必须画出可见焦点。
+      await d.evaluate("document.activeElement?.blur(); window.__focusTrail = []; true");
+      for (let step = 0; step < 40; step += 1) {
+        await d.press("Tab");
+        await d.evaluate(`(() => { const el = document.activeElement; window.__focusTrail.push({ label: (el?.getAttribute('aria-label') || el?.textContent || el?.tagName || '').trim().slice(0, 24), visible: (${FOCUS_PROBE})(el) }); return true; })()`);
+      }
+      // 键盘进入文件队列：搜索框 ↓ 把焦点交给列表。
+      await d.until("Boolean(document.getElementById('task-file-search'))", "任务文件搜索框");
+      await d.evaluate("document.getElementById('task-file-search').focus(); true");
+      await d.press("ArrowDown");
+      await d.until("document.activeElement?.closest('.review-queue') !== null", "焦点进入文件队列");
+      await d.evaluate(`window.__listFocus = (${FOCUS_PROBE})(document.activeElement) || Boolean(document.querySelector('.review-queue .file-row[aria-selected=true]')); true`);
+      const selectedIs = (name) => `(document.querySelector('.review-queue .file-row[aria-selected=true]')?.textContent || '').includes(${JSON.stringify(name)})`;
+      // 搜索框里按 ↓：焦点进列表并前进一行（App.svelte → FileList.svelte）。
+      await d.until(selectedIs("FileList"), "↓ 选中下一个文件");
+      await d.press("m", ["Alt"]);
+      await d.until("document.querySelectorAll('.review-queue .review-toggle.on').length === 1", "Alt+M 标记当前文件已审阅");
+      // 当前文件已审阅时 Alt+Shift+→ 去队列里第一个未审阅文件（App.svelte）。
+      await d.press("ArrowRight", ["Alt", "Shift"]);
+      await d.until(selectedIs("App.svelte"), "Alt+Shift+→ 到未审阅文件");
+      await d.press("m", ["Alt", "Shift"]);
+      await d.until("document.querySelectorAll('.review-queue .review-toggle.on').length === 2", "Alt+Shift+M 标记并继续");
+      await d.until(selectedIs("TaskReview"), "标记后前往下一个未审阅");
+      // 回到 App.svelte 按空格：只写真实索引（整文件暂存），任务净差异与队列都还在。
+      for (let step = 0; step < 2; step += 1) await d.press("ArrowUp");
+      await d.until(selectedIs("App.svelte"), "↑ 回到 App.svelte");
+      await d.press(" ");
+      await d.pause(700);
+    },
+    check: `(() => {
+      const trail = window.__focusTrail || [];
+      const focused = trail.filter((item) => item.label);
+      const progress = document.querySelector('${REVIEW_ACTIVE} .review-source-progress-text')?.textContent || '';
+      return focused.length >= 30 && focused.every((item) => item.visible) && window.__listFocus === true
+        && progress.includes('2 / 8') && document.querySelectorAll('${REVIEW_ACTIVE} .review-queue .file-row').length === 8
+        && ${NO_PAGE_OVERFLOW};
+    })()`,
+    detail: "({ hidden: (window.__focusTrail || []).filter((item) => !item.visible).map((item) => item.label), progress: document.querySelector('.review-source-progress-text')?.textContent })",
+  },
+  {
+    name: "审查：原位新增、编辑与删除意见",
+    url: "/?cliora=1",
+    viewport: { width: 1280, height: 840 },
+    steps: async (d) => {
+      await openReview(d);
+      await addInlineComment(d, "旧入口删掉后补一条迁移说明。");
+      await d.until("document.querySelector('.review-completion [data-completion-action=\"feedback\"]')?.textContent.includes('送回 1 条意见')", "完成栏出现送回动作");
+      // 点已有意见的标记：打开线程，编辑并保存。
+      await d.click(`${REVIEW_ACTIVE} .line-comment.commented`);
+      await d.until(`Boolean(document.querySelector('${REVIEW_ACTIVE} .inline-comment-thread'))`, "意见线程展开");
+      await clickText(d, `${REVIEW_ACTIVE} .inline-comment-thread .inline-comment-item button`, "编辑");
+      await d.until(`document.activeElement?.matches('.inline-comment-thread textarea')`, "编辑框拿到焦点");
+      await d.typeText("（并附上回滚步骤）");
+      await d.press("Enter", [process.platform === "darwin" ? "Meta" : "Ctrl"]);
+      await d.until("(document.querySelector('.review-comment-feedback')?.textContent || '').includes('已保存')", "修改已保存");
+      await d.until(`(document.querySelector('${REVIEW_ACTIVE} .inline-comment-thread .inline-comment-body')?.textContent || '').includes('回滚步骤')`, "线程显示修改后的正文");
+      await d.evaluate("window.__edited = document.querySelector('.inline-comment-thread .inline-comment-body')?.textContent; true");
+      await clickText(d, `${REVIEW_ACTIVE} .inline-comment-thread .inline-comment-item button`, "删除");
+      await d.until("(document.querySelector('.review-comment-feedback')?.textContent || '').includes('已删除')", "删除反馈");
+    },
+    check: `(() => window.__edited.includes('迁移说明') && window.__edited.includes('回滚步骤')
+      && !document.querySelector('${REVIEW_ACTIVE} .line-comment.commented')
+      && !document.querySelector('.review-completion [data-completion-action="feedback"]')
+      && (document.querySelector('.review-completion')?.innerText || '').includes('没有待送回的意见')
+      && ${NO_PAGE_OVERFLOW})()`,
+    detail: "({ edited: window.__edited, feedback: document.querySelector('.review-comment-feedback')?.textContent })",
+  },
+  {
+    name: "审查：工作区变化后意见整体失效，不再送回",
+    url: "/?cliora=1",
+    viewport: { width: 1280, height: 840 },
+    steps: async (d) => {
+      await openReview(d);
+      await addInlineComment(d, "这条意见会随工作区变化失效。");
+      // 键盘在文件队列里按空格：真实索引变化让任务按新代次重读，旧意见不映射到新行号。
+      await d.evaluate("document.getElementById('task-file-search').focus(); true");
+      await d.press("ArrowDown");
+      await d.press("ArrowUp");
+      await d.until("(document.querySelector('.review-queue .file-row[aria-selected=true]')?.textContent || '').includes('App.svelte') && document.activeElement?.closest('.review-queue') !== null", "键盘回到 App.svelte");
+      await d.press(" ");
+      await d.until("(document.querySelector('.review-completion')?.innerText || '').includes('已失效')", "完成栏标出失效意见");
+      await d.click(`${REVIEW_ACTIVE} .review-comments-toggle`);
+      await d.until("Boolean(document.querySelector('.review-comment-stale'))", "抽屉里出现已失效分区");
+    },
+    check: `(() => {
+      const stale = document.querySelector('.review-comment-stale')?.innerText || '';
+      const bar = document.querySelector('.review-completion');
+      return stale.includes('会随工作区变化失效') && bar.dataset.tone === 'warn'
+        && bar.innerText.includes('1 条意见已失效，不会送回') && !bar.querySelector('[data-completion-action="feedback"]')
+        && ${NO_PAGE_OVERFLOW};
+    })()`,
+    detail: "(document.querySelector('.review-comment-stale')?.innerText || '').replace(/\\s+/g, ' ').slice(0, 120)",
+  },
+  {
+    name: "审查：送回意见只显示已准备、等待 Cliora 确认",
+    url: "/?cliora=1",
+    viewport: { width: 1280, height: 840 },
+    steps: async (d) => {
+      await openReview(d);
+      await addInlineComment(d, "请把旧入口的调用方一起改掉。");
+      await d.click('.review-completion [data-completion-action="feedback"]');
+      await d.until("Boolean(document.querySelector('.review-completion-item[data-status=\"handoff\"][data-tone=\"success\"]'))", "交接已准备");
+    },
+    check: `(() => {
+      const item = document.querySelector('.review-completion-item[data-status="handoff"]')?.textContent || '';
+      const sent = window.__clioraPreviewEvidence.feedback;
+      const again = document.querySelector('.review-completion [data-completion-action="feedback"]')?.textContent || '';
+      return item.includes('已准备 1 条意见') && item.includes('等待确认') && !/已发送|已执行|已修复/.test(document.querySelector('.review-completion').innerText)
+        && sent.length === 1 && sent[0].count === 1 && !sent[0].url.includes(encodeURIComponent('调用方')) && again.includes('再次送回')
+        && ${NO_PAGE_OVERFLOW};
+    })()`,
+    detail: "({ item: document.querySelector('.review-completion-item[data-status=\"handoff\"]')?.textContent, url: window.__clioraPreviewEvidence.feedback[0]?.url })",
+  },
+  {
+    name: "审查：意见交接失败保留意见并给出重试",
+    url: "/?cliora=1&feedback=fail",
+    viewport: { width: 900, height: 600 },
+    steps: async (d) => {
+      await openReview(d);
+      await addInlineComment(d, "交接失败时这条意见不能丢。");
+      await d.click('.review-completion [data-completion-action="feedback"]');
+      await d.until("Boolean(document.querySelector('.review-completion-item[data-status=\"handoff\"][data-tone=\"error\"]'))", "交接失败分项");
+    },
+    check: `(() => {
+      const bar = document.querySelector('.review-completion');
+      const retry = bar.querySelector('[data-completion-action="feedback"]');
+      return bar.dataset.tone === 'error' && bar.innerText.includes('Cliora 没有被唤起') && Boolean(retry) && retry.textContent.includes('重试送回 1 条意见') && !retry.disabled
+        && Boolean(document.querySelector('${REVIEW_ACTIVE} .line-comment.commented')) && window.__clioraPreviewEvidence.feedback.length === 0
+        && ${NO_PAGE_OVERFLOW};
+    })()`,
+    detail: "(document.querySelector('.review-completion')?.innerText || '').replace(/\\s+/g, ' ').slice(0, 140)",
+  },
+  {
+    name: "审查：提交后返回 Cliora，分项显示已提交与工作区仍有改动",
+    url: "/?cliora=1",
+    viewport: { width: 1280, height: 840 },
+    steps: async (d) => {
+      await openReview(d);
+      await d.click('[aria-label="回到改动视图提交"]');
+      await d.until("Boolean(document.querySelector('.workbench-view[data-active=\"true\"] .composer textarea'))", "提交区");
+      await d.typeInto('.workbench-view[data-active="true"] .composer textarea', "审阅任务范围并提交");
+      await d.click('.workbench-view[data-active="true"] .composer-commit');
+      await d.until("(document.querySelector('.workbench-view[data-active=\"true\"] .composer textarea')?.value || '') === ''", "提交完成后草稿清空");
+      await d.click('.workbench-view[data-active="true"] [data-view="review"]');
+      await openReview(d, "回到审查视图");
+      await d.until("(document.querySelector('.review-completion')?.innerText || '').includes('已提交')", "完成栏记下提交结果");
+      await d.click('.review-completion [data-completion-action="return"]');
+      await d.until("Boolean(document.querySelector('.review-completion-item[data-status=\"return\"][data-tone=\"success\"]'))", "已返回 Cliora");
+    },
+    check: `(() => {
+      const bar = document.querySelector('.review-completion').innerText;
+      const sent = window.__clioraPreviewEvidence.returns.at(-1)?.url || '';
+      return bar.includes('已提交 abcdef1（待复核）') && /工作区还有 \\d+ 个未提交的改动/.test(bar) && bar.includes('结果待 Cliora 复核')
+        && document.querySelector('.review-completion-item[data-status="worktree"]')?.dataset.tone === 'warn'
+        && sent.includes('outcome=committed') && sent.includes('worktreeState=dirty') && ${NO_PAGE_OVERFLOW};
+    })()`,
+    detail: "({ bar: (document.querySelector('.review-completion')?.innerText || '').replace(/\\s+/g, ' '), url: window.__clioraPreviewEvidence.returns.at(-1)?.url })",
+  },
+  {
+    name: "审查：返回时工作区状态未知如实说明，不当成干净",
+    url: "/?cliora=1&return=unknown",
+    viewport: { width: 900, height: 600 },
+    steps: async (d) => {
+      await openReview(d);
+      await d.click('.review-completion [data-completion-action="return"]');
+      await d.until("Boolean(document.querySelector('.review-completion-item[data-status=\"return\"][data-tone=\"success\"]'))", "已返回 Cliora");
+    },
+    check: `(() => {
+      const item = document.querySelector('.review-completion-item[data-status="worktree"]');
+      const bar = document.querySelector('.review-completion').innerText;
+      return item.textContent.includes('没有读到工作区状态（按未知处理）') && item.dataset.tone === 'warn'
+        && !bar.includes('没有未提交的改动') && bar.includes('本次没有提交或合入')
+        && (window.__clioraPreviewEvidence.returns.at(-1)?.url || '').includes('worktreeState=unknown') && ${NO_PAGE_OVERFLOW};
+    })()`,
+    detail: "(document.querySelector('.review-completion')?.innerText || '').replace(/\\s+/g, ' ')",
+  },
+  {
+    name: "审查：多来源菜单切换来源并保留各自阅读进度",
+    url: "/?cliora=multi",
+    viewport: { width: 1280, height: 840 },
+    steps: async (d) => {
+      await d.until(`(document.querySelector('${REVIEW_ACTIVE} .review-source-card')?.innerText || '').includes('共 2 个来源')`, "两个来源都已接受");
+      await openReview(d);
+      await d.press("m", ["Alt"]);
+      await d.until("(document.querySelector('.review-source-progress-text')?.textContent || '').includes('1 / 8')", "当前来源标记一个文件");
+      await d.click(`${REVIEW_ACTIVE} .review-source-trigger`);
+      await d.until("Boolean(document.querySelector('.review-source-menu[role=dialog]'))", "来源菜单");
+      await d.until("document.activeElement?.matches('.review-source-switch')", "菜单打开后焦点在第一个来源");
+      await clickText(d, ".review-source-menu .review-source-switch", "review");
+      await d.until("(document.querySelector('.review-source-card')?.innerText || '').includes('较早发起') && (document.querySelector('[aria-label^=\"当前仓库\"]')?.getAttribute('aria-label') || '').includes('review')", "切到较早的来源与它的工作树");
+      await openReview(d, "较早来源的任务净差异");
+      await d.click(`${REVIEW_ACTIVE} .review-source-trigger`);
+      await d.until("Boolean(document.querySelector('.review-source-menu[role=dialog]'))", "再次打开来源菜单");
+      await d.press("Escape");
+      await d.until("!document.querySelector('.review-source-menu') && document.activeElement?.matches('.review-source-trigger')", "Esc 收起菜单并把焦点还给来源卡");
+      await d.click(`${REVIEW_ACTIVE} .review-source-trigger`);
+      await clickText(d, ".review-source-menu .review-source-switch", "twiglane");
+      await d.until("(document.querySelector('.review-source-card')?.innerText || '').includes('最新发起')", "切回最新来源");
+      await openReview(d, "最新来源的任务净差异");
+    },
+    check: `(() => (document.querySelector('.review-source-progress-text')?.textContent || '').includes('1 / 8')
+      && document.querySelectorAll('${REVIEW_ACTIVE} .review-queue .review-toggle.on').length === 1 && ${NO_PAGE_OVERFLOW})()`,
+    detail: "(document.querySelector('.review-source-card')?.innerText || '').replace(/\\s+/g, ' ')",
+  },
+  {
+    name: "审查：关闭含未送回意见的来源先确认，取消后意见仍在",
+    url: "/?cliora=1",
+    viewport: { width: 1280, height: 840 },
+    steps: async (d) => {
+      await openReview(d);
+      await addInlineComment(d, "关闭来源前必须确认这条意见。");
+      await d.click(`${REVIEW_ACTIVE} .review-source-trigger`);
+      await d.until("Boolean(document.querySelector('.review-source-menu[role=dialog]'))", "来源菜单");
+      await clickText(d, ".review-source-menu-foot button", "关闭此审查来源");
+      await d.until("Boolean(document.getElementById('review-close-title'))", "关闭确认框");
+      await d.evaluate("window.__closeDialog = document.querySelector('.modal-card')?.innerText || ''; true");
+      await d.press("Escape");
+      await d.until("!document.getElementById('review-close-title')", "Esc 取消关闭");
+      await d.evaluate("window.__keptAfterCancel = Boolean(document.querySelector('.line-comment.commented')) && (document.querySelector('.review-source-card')?.innerText || '').includes('twiglane'); true");
+      await d.click(`${REVIEW_ACTIVE} .review-source-trigger`);
+      await clickText(d, ".review-source-menu-foot button", "关闭此审查来源");
+      await d.until("Boolean(document.getElementById('review-close-title'))", "再次出现关闭确认框");
+      await clickText(d, ".modal-card .modal-foot button", "仍然关闭");
+      await d.until(`Boolean(document.querySelector('${REVIEW_ACTIVE} [data-review-state="no-source"]')) || !document.querySelector('${REVIEW_ACTIVE}')`, "来源关闭后不自动切到别的来源");
+    },
+    check: `(() => window.__closeDialog.includes('1 条未送回的意见') && window.__closeDialog.includes('复制意见') && window.__keptAfterCancel === true
+      && !document.querySelector('.review-source-trigger') && ${NO_PAGE_OVERFLOW})()`,
+    detail: "({ dialog: (window.__closeDialog || '').replace(/\\s+/g, ' ').slice(0, 120), kept: window.__keptAfterCancel })",
+  },
+];
+
 const SCENARIOS = [
+  ...REVIEW_SCENARIOS,
 
   {
     name: "项目：60 仓持久成员、状态未知与长名称搜索",
@@ -452,8 +847,7 @@ const SCENARIOS = [
     url: "/",
     steps: async (d) => {
       await openFilesView(d);
-      await rightClickRow(d, "README.md");
-      await clickSubmenuItem(d, "文件树", "全仓库搜索");
+      await d.click('.files-view [aria-label="搜索文件内容"]');
       await d.until("Boolean(document.querySelector('#file-content-search'))", "全文搜索输入出现");
       await d.typeInto("#file-content-search", "import");
       await d.until("document.querySelectorAll('.file-search-group').length > 0", "全文搜索分组出现");
@@ -467,8 +861,9 @@ const SCENARIOS = [
     url: "/",
     steps: async (d) => {
       await openFilesView(d);
-      await rightClickRow(d, "README.md");
-      await clickSubmenuItem(d, "文件树", "只看有改动的文件");
+      await d.click(".files-view .file-tree-options");
+      await d.until("Boolean(document.querySelector('[role=\"menu\"]'))", "文件树选项菜单");
+      await clickMenuItem(d, "只看有改动的文件");
       await d.until(
         "[...document.querySelectorAll('.file-tree-row')].some((row) => row.textContent.includes('old-panel.ts'))",
         "删除墓碑出现",
@@ -484,8 +879,7 @@ const SCENARIOS = [
     url: "/?search=error",
     steps: async (d) => {
       await openFilesView(d);
-      await rightClickRow(d, "README.md");
-      await clickSubmenuItem(d, "文件树", "全仓库搜索");
+      await d.click('.files-view [aria-label="搜索文件内容"]');
       await d.until("Boolean(document.querySelector('#file-content-search'))", "全文搜索输入出现");
       await d.typeInto("#file-content-search", "import");
       await d.until("Boolean(document.querySelector('.file-search-note.danger'))", "搜索失败原因出现");
@@ -513,8 +907,9 @@ const SCENARIOS = [
     url: "/",
     steps: async (d) => {
       await openFilesView(d);
-      await rightClickRow(d, "README.md");
-      await clickSubmenuItem(d, "文件树", "只看有改动的文件");
+      await d.click(".files-view .file-tree-options");
+      await d.until("Boolean(document.querySelector('[role=\"menu\"]'))", "文件树选项菜单");
+      await clickMenuItem(d, "只看有改动的文件");
       await d.typeInto('.files-view [aria-label="过滤文件树"]', "old");
       await d.until(
         "[...document.querySelectorAll('.file-tree-row')].some((row) => row.textContent.includes('old-panel.ts'))",
@@ -614,7 +1009,7 @@ const SCENARIOS = [
       "if (!document.querySelector('.file-list .file-row')) return false; " +
       "if (!window.__diffRow) { const row = [...document.querySelectorAll('.file-list .file-row')].find((item) => item.textContent.includes('repo.rs')); if (!row) return false; window.__diffRow = true; row.click(); return false; } " +
       "return Boolean(document.querySelector('.diff-toolbar')) && document.querySelectorAll('.diff-scroll .diff-line').length > 0; })()",
-    // 主行只留路径/统计/上下文动作与布局切换；语言、空白偏好、文件历史与完整文件都在溢出菜单里。
+    // 主行只留路径/统计/上下文动作与布局切换；语言、空白偏好（「忽略纯空白」在「比对规则」里）、文件历史与完整文件都在溢出菜单里。
     check:
       "(async () => { const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)); " +
       "const bar = document.querySelector('.diff-toolbar'); if (!bar) return false; " +
@@ -626,7 +1021,7 @@ const SCENARIOS = [
       "const opts = [...dialog.querySelectorAll('[role=option]')].map((item) => item.textContent || ''); " +
       "const lang = Boolean(dialog.querySelector('.diff-tool-language .lang-chip')); " +
       "window.__toolOpts = { opts, lang }; " +
-      "return lang && opts.some((text) => text.includes('显示空白字符')) && opts.some((text) => text.includes('忽略纯空白')) && opts.some((text) => text.includes('完整文件')) && opts.some((text) => text.includes('此文件历史')); })()",
+      "return lang && opts.some((text) => text.includes('显示空白字符')) && opts.some((text) => text.includes('比对规则')) && opts.some((text) => text.includes('完整文件')) && opts.some((text) => text.includes('此文件历史')); })()",
     detail:
       "(() => { const result = window.__toolOpts; if (!result) return '(未记录)'; if (result.leak) return '主行漏出低频控件：' + result.leak.join(' / '); return JSON.stringify({ lang: result.lang, opts: result.opts.length }); })()",
   },
@@ -792,50 +1187,6 @@ const SCENARIOS = [
     detail: "(document.querySelector('[data-push-error] [role=status]')?.textContent || '').trim().slice(0, 80)",
   },
   {
-    // T5 键鼠闭环（真实 DOM 键鼠，不是 element.click()）：cliora 跳转 → 历史里的任务净差异 → 连续审阅 → 空格暂存。
-    name: "任务：cliora 跳转进入历史的任务净差异，连续审阅与空格整文件暂存",
-    url: "/?cliora=1",
-    steps: async (drv) => {
-      await drv.until("Boolean(document.querySelector('.history-task-row[aria-pressed=true]'))", "cliora 跳转后历史选中任务净差异");
-      await drv.until("document.querySelectorAll('.task-detail .file-list .file-row').length > 0", "任务文件队列");
-      await drv.click('.task-detail .file-list .file-row');
-      // Alt+M 标记已审阅；Alt+Shift+→ 走下一个未审阅（与工具条、命令面板同一份判定）。
-      await drv.press("m", ["Alt"]);
-      await drv.until("document.querySelectorAll('.review-toggle.on').length >= 1", "已审阅标记");
-      await drv.press("ArrowRight", ["Alt", "Shift"]);
-      // 空格只写真实索引：任务净差异本身不被暂存。
-      await drv.press(" ", []);
-      await drv.until("document.querySelectorAll('.task-detail .file-list .file-row').length > 0", "暂存后任务队列仍在");
-    },
-    check:
-      "document.querySelectorAll('.review-toggle.on').length >= 1 && Boolean(document.querySelector('.task-byline')) && document.querySelectorAll('.workbench-view[data-active=true] .view-switcher button').length === 3",
-    detail:
-      "(document.querySelector('.history-task-row')?.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 80)",
-  },
-  {
-    name: "任务：从任务净差异回到提交区提交真实暂存",
-    url: "/?cliora=1",
-    steps: async (drv) => {
-      await drv.until("Boolean(document.querySelector('.history-task-row[aria-pressed=true]'))", "cliora 跳转后历史选中任务净差异");
-      await drv.until("document.querySelectorAll('.task-detail .file-list .file-row').length > 0", "任务文件队列");
-      await drv.click('.task-detail .file-list .file-row');
-      await drv.press(" ", []);
-      // 暂存后任务范围会按新 generation 重读，入口在重读期间可能暂时不在，等它回来再点。
-      await drv.until("Boolean(document.querySelector('[aria-label=\"回到改动视图提交\"]'))", "回到提交区入口");
-      await drv.click("[aria-label=\"回到改动视图提交\"]");
-      await drv.until("Boolean(document.querySelector('.composer textarea'))", "提交区");
-      await drv.typeInto(".composer textarea", "审阅任务范围并提交");
-      await drv.until("(document.querySelector('.composer textarea')?.value || '').length > 0", "提交说明草稿");
-      // 焦点在文本框里时快捷键不抢输入（isTextEntry），提交走真实鼠标点击提交按钮。
-      await drv.click(".composer-commit");
-      await drv.until("(document.querySelector('.composer textarea')?.value || '') === ''", "提交完成后草稿清空");
-    },
-    check:
-      "(document.querySelector('.composer textarea')?.value || '') === '' && /暂存区为空|0 个文件/.test(document.querySelector('.composer-scope')?.textContent || '')",
-    detail:
-      "document.querySelector('.composer-scope')?.textContent?.trim() || ''",
-  },
-  {
     // 多选只看最终结果：两端之间一份净文件清单和一份差异，不按提交堆叠。
     name: "历史：多选提交只显示合起来的最终结果",
     url: "/",
@@ -874,18 +1225,6 @@ const SCENARIOS = [
       "Boolean([...document.querySelectorAll('.commit-files button')].find((b) => b.textContent.includes('重新读取'))) && !document.body.textContent.includes('这些提交合起来没有文件变化')",
     detail:
       "(document.querySelector('.commit-files-empty')?.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 80)",
-  },
-  {
-    name: "任务：起点不可用时就地说明，可重新读取",
-    url: "/?cliora=1&task=error",
-    steps: async (drv) => {
-      await drv.until("Boolean(document.querySelector('.history-task-row'))", "任务净差异行");
-      await drv.until("Boolean(document.querySelector('.task-failure[role=alert]'))", "任务读取失败说明");
-    },
-    check:
-      "(document.querySelector('.task-failure[role=alert]')?.innerText || '').includes('读取任务范围失败') && Boolean([...document.querySelectorAll('.task-failure button')].find((b) => b.textContent.includes('重新读取'))) && (document.querySelector('.history-task-row')?.textContent || '').includes('读取失败')",
-    detail:
-      "(document.querySelector('.task-failure')?.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 120)",
   },
   {
     name: "工作区总览：分组、未知、缺失与过期逐项登记",
@@ -1066,7 +1405,7 @@ const SCENARIOS = [
       await rightClickRow(d, "socket");
     },
     check: `(() => {
-      const labels = ['新建', '复制到…', '移动或重命名…', '删除…'];
+      const labels = ['重命名或移动…', '复制到…', '删除…'];
       const rows = [...document.querySelectorAll('[role="menuitem"]')];
       const find = (label) => rows.find((node) => (node.getAttribute('aria-label') || '') === label);
       const special = labels.every((label) => {
@@ -1320,6 +1659,28 @@ async function main() {
         }
         await pause(220);
       };
+      /** 容器里不落在任何行上的空白处右键（例如目录树根目录菜单）：从底部往上找第一个空白点。 */
+      const rightClickBlank = async (selector, rowSelector) => {
+        const point = await evaluate(
+          `(() => {
+            const box = document.querySelector(${JSON.stringify(selector)});
+            if (!box) return null;
+            const r = box.getBoundingClientRect();
+            for (let y = r.bottom - 8; y > r.top + 4; y -= 12) {
+              const x = Math.round(r.left + r.width / 2);
+              const hit = document.elementFromPoint(x, y);
+              if (hit && box.contains(hit) && !hit.closest(${JSON.stringify(rowSelector)})) return { x, y: Math.round(y) };
+            }
+            return null;
+          })()`,
+          sessionId,
+        );
+        if (!point) throw new Error("找不到空白处：" + selector);
+        for (const type of ["mousePressed", "mouseReleased"]) {
+          await send("Input.dispatchMouseEvent", { type, x: point.x, y: point.y, button: "right", clickCount: 1 }, sessionId);
+        }
+        await pause(220);
+      };
       const typeInto = async (selector, value) => {
         await click(selector);
         await evaluate(`document.querySelector(${JSON.stringify(selector)})?.focus()`, sessionId);
@@ -1351,7 +1712,7 @@ async function main() {
         const tail = await evaluate("(document.body.innerText || '').replace(/\\s+/g, ' ').slice(0, 160)", sessionId);
         throw new Error("等待超时：" + label + "｜当前界面：" + tail);
       };
-      return { press, click, clickNth, rightClick, clickUntil, typeInto, typeText, until, evaluate: (expression) => evaluate(expression, sessionId), pause };
+      return { press, click, clickNth, rightClick, rightClickBlank, clickUntil, typeInto, typeText, until, evaluate: (expression) => evaluate(expression, sessionId), pause };
     };
 
     const onlyIndex = args.indexOf("--only");
@@ -1364,6 +1725,10 @@ async function main() {
       const sessionId = attached.sessionId;
       await send("Page.enable", {}, sessionId);
       await send("Runtime.enable", {}, sessionId);
+      // 审查场景固定窗口尺寸（1280×840 / 900×600）：横向溢出与布局稳定都按真实窗口判定。
+      if (scenario.viewport) {
+        await send("Emulation.setDeviceMetricsOverride", { width: scenario.viewport.width, height: scenario.viewport.height, deviceScaleFactor: 1, mobile: false }, sessionId);
+      }
       await send("Page.navigate", { url: base + scenario.url }, sessionId);
 
       let ready = false;

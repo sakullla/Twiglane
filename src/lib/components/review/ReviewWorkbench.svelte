@@ -1097,6 +1097,9 @@
       return;
     }
     reading = true;
+    // 刚拿到起点（来源先于起点请求到达，或从无起点切到有起点）：说「正在读取」，
+    // 不让上一刻的「没有任务范围」在读取期间继续冒充结论。失败态保留到新结果出来，避免闪动。
+    if (phase === "no-baseline") phase = "reading";
     try {
       let result: TaskReview;
       try {

@@ -84,6 +84,9 @@ const report = {
   startedAt: startedAt.toISOString(),
   base,
   runner: "scripts/run-ui-verification.mjs",
+  // 证据性质：浏览器 + mock，不是桌面应用、真实 Git 或 Cliora 实机结果（manifest 里同样标注）。
+  nature: "mock",
+  natureNote: "Chrome headless 真实 DOM 键鼠 + scripts/ui-preview mock API；不代表真实 Git、桌面 WebView、安装包或 Cliora 实机联动。",
   output: {
     dir: show(outDir),
     kind: explicitOut ? "explicit" : "temp",
@@ -96,10 +99,10 @@ const report = {
   },
   health: null,
   scenarios: { skipped: shotsOnly, total: 0, passed: 0, failed: 0, failures: [], exitCode: null, output: "" },
-  shots: { manifest: null, workflow: null, task: null, capturedAt: null, fresh: false, groups: {}, files: 0, exitCode: null },
+  shots: { manifest: null, workflow: null, task: null, nature: null, capturedAt: null, fresh: false, groups: {}, files: 0, exitCode: null },
   limits: [
     "浏览器 + mock 数据：不代表真实 Git 行为、桌面 WebView、安装包或其它平台。",
-    has("--projects") ? "项目模式只验证项目导航、草稿和关联快照；不验证审查协议或系统深链往返。" : "mock 不注册系统 Cliora 深链协议；返回来源按「手动起点 + 回到提交区」路径验证，深链路径由 tests/cliora-integration.spec.ts 与真实 Git 脚本覆盖。",
+    has("--projects") ? "项目模式只验证项目导航、草稿和关联快照；不验证审查协议或系统深链往返。" : "审查场景的 Cliora 深链、回执、意见交接与返回都由 scripts/ui-preview/mock-deep-link.ts 与 mock-api.ts 模拟（只写 window.__clioraPreviewEvidence），只证明界面接线、状态与文案；系统 scheme 路由、原生协议与两端实机联动不在这里验证，由 tests/cliora-integration.spec.ts、Rust 测试与实机记录覆盖。",
     "截图与场景都跑在 Chrome headless，与 Tauri 窗口的标题栏/原生弹层存在差异。",
   ],
   failures,
@@ -207,6 +210,8 @@ try {
         failures.push("manifest task 是 " + JSON.stringify(manifest.task ?? null) + "，不是本次 " + JSON.stringify(IDENTITY.task));
       }
       if (report.shots.files === 0) failures.push("manifest 里没有任何截图");
+      report.shots.nature = manifest.nature ?? null;
+      if (manifest.nature !== "mock") failures.push("manifest 没有标注 mock 性质（nature 应为 \"mock\"）");
       const files = new Set();
       for (const shot of manifest.shots ?? []) {
         if (typeof shot.file !== "string" || !/^after\/(dark|light)-\d+x\d+-[a-z0-9-]+\.png$/.test(shot.file) || files.has(shot.file)) {

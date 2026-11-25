@@ -57,6 +57,17 @@ describe("主题与无障碍契约", () => {
     }
   });
 
+  it("审查工作台的来源卡、来源菜单、意见线程与意见卡保留焦点环，审查样式也进对比度扫描", () => {
+    const review = read("review.css");
+    for (const selector of [".review-source-trigger:focus-visible", ".review-source-switch:focus-visible", ".inline-comment-thread:focus-visible", ".review-comment-card:focus-visible"]) {
+      expect(rule(review, selector), selector).toMatch(/outline:\s*[^;]*var\(--focus\)/);
+    }
+    // color-mix 淡化位点的默认拒绝扫描覆盖 review.css，审查叠层（完成栏、来源菜单当前行等）逐项登记。
+    const contrast = readFileSync(path.join(root, "scripts/check-contrast.mjs"), "utf8");
+    expect(contrast).toMatch(/const STYLE_LAYERS = \[[^\]]*"review\.css"/);
+    expect(contrast).toMatch(/const REVIEW_STACKS = \[/);
+  });
+
   it("禁用按钮采用柔和无框槽位，不再绘制抢眼的硬线框", () => {
     expect(rule(components, ".btn:disabled")).toMatch(/border-color:\s*transparent/);
     expect(rule(components, ".btn-secondary:disabled")).toMatch(/border-color:\s*transparent/);

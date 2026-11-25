@@ -607,6 +607,36 @@ describe("草稿跨文件、视图与来源保留", () => {
     await waitFor(() => expect(textbox(inlineRow()!).value).toBe("跨视图与来源"));
   });
 
+  it("连续阅读里草稿所在文件块不在眼前（收起/移出虚拟窗口）：给出「继续编辑」，正文还在", async () => {
+    await mount();
+    await fireEvent.click(bubble(3));
+    await fireEvent.input(textbox(inlineRow()!), { target: { value: "连续阅读离屏的草稿" } });
+    await waitFor(() => expect(commentDraft(REVIEW)?.body).toBe("连续阅读离屏的草稿"));
+
+    await fireEvent.click(screen.getByRole("button", { name: "连续" }));
+    await waitFor(() => expect(document.querySelector('.multi-file[data-path="src/app.ts"] .diff-inline-comment')).toBeTruthy());
+    expect(document.querySelector(".review-draft-away")).toBeNull();
+
+    // 收起草稿所在的文件块：块里不再挂载差异，意见行无处可放。
+    await fireEvent.click(screen.getByRole("button", { name: "收起 src/app.ts" }));
+    await waitFor(() => expect(document.querySelector(".multi-file .diff-inline-comment")).toBeNull());
+    const away = await screen.findByText(/1 条意见草稿未保存：src\/app\.ts/);
+    const bar = away.closest<HTMLElement>(".review-draft-away")!;
+    await fireEvent.click(within(bar).getByRole("button", { name: "继续编辑" }));
+    const detached = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>(".review-draft-detached");
+      expect(found).toBeTruthy();
+      return found!;
+    });
+    expect(textbox(detached).value).toBe("连续阅读离屏的草稿");
+
+    // 再展开：意见行回到块里，入口消失。
+    await fireEvent.click(screen.getByRole("button", { name: "展开 src/app.ts" }));
+    await waitFor(() => expect(document.querySelector('.multi-file[data-path="src/app.ts"] .diff-inline-comment')).toBeTruthy());
+    await waitFor(() => expect(document.querySelector(".review-draft-away")).toBeNull());
+    expect(commentDraft(REVIEW)?.body).toBe("连续阅读离屏的草稿");
+  });
+
   it("在另一行新开草稿会丢掉写了内容的草稿：先确认，取消则原样保留", async () => {
     await mount();
     await fireEvent.click(bubble(3));

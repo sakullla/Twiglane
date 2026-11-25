@@ -256,6 +256,9 @@ async function composeComment(text: string): Promise<void> {
     return found;
   }, { timeout: 8000 });
   await fireEvent.click(bubble);
+  // 已有意见的行点开的是该锚点的意见线程：在同一位置「添加另一条」才开新草稿。
+  const thread = workbench()?.querySelector<HTMLElement>('section[aria-label="这一行的意见"]');
+  if (thread) await fireEvent.click(within(thread).getByRole("button", { name: "添加另一条" }));
   const form = await screen.findByRole("form", { name: "给这一行添加意见" });
   const box = form.querySelector<HTMLTextAreaElement>('textarea[aria-label="意见正文"]')!;
   await fireEvent.input(box, { target: { value: text } });

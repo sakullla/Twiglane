@@ -166,6 +166,22 @@
   // 只保留视口及预读区内展开的差异，浏览过的文件不随选中数量无限累积。
   let retained = $derived(new Set(active ? shown.filter((row) => !collapsed.has(selectionKey(row))).map(selectionKey) : []));
   let allCollapsed = $derived(keys.every((key) => collapsed.has(key)));
+  /**
+   * 意见行放置结果由这里统一上报：锚点文件块被虚拟化移出、滚远或收起时没有 DiffView 可放，
+   * 报告 false 让调用方给出「继续编辑」入口；块挂载时沿用该块 DiffView 的结果。
+   */
+  let childPlaced = $state<boolean | null>(null);
+  let inlineHosted = $derived(
+    inlineComment !== null && shown.some((row) => row.path === inlineComment.path && !collapsed.has(selectionKey(row))),
+  );
+  let placedReport = $derived<boolean | null>(!inlineComment || !inlinePanel ? null : inlineHosted ? childPlaced : false);
+  $effect(() => {
+    const report = onInlinePlaced;
+    if (!report) return;
+    const placed = placedReport;
+    untrack(() => report(placed));
+    return () => untrack(() => report(null));
+  });
   let noneCollapsed = $derived(collapsed.size === 0);
   let reviewPending = $derived([...new Set(rows.map((row) => row.path))].filter((path) => !reviewed.has(path)));
   let reviewDone = $derived([...new Set(rows.map((row) => row.path))].filter((path) => reviewed.has(path)));
@@ -582,7 +598,7 @@
                 {onCommentLine}
                 inlineComment={inlineComment?.path === row.path ? inlineComment : null}
                 inlinePanel={inlineComment?.path === row.path ? inlinePanel : undefined}
-                onInlinePlaced={inlineComment?.path === row.path ? onInlinePlaced : undefined}
+                onInlinePlaced={inlineComment?.path === row.path ? (placed) => (childPlaced = placed) : undefined}
               />
             </div>
           {/if}

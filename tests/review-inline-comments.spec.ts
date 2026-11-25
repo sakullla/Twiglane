@@ -637,6 +637,230 @@ describe("草稿跨文件、视图与来源保留", () => {
   });
 });
 
+/* ------------------------------ 抽屉里的编辑走草稿槽 ------------------------------ */
+
+describe("抽屉里的编辑与唯一草稿槽", () => {
+  async function openDrawerEdit(body: string): Promise<{ id: string; drawer: HTMLElement }> {
+    const comment = addComment(scope, anchorAt(3), "抽屉里的原意见");
+    addComment(scope, { ...anchorAt(7), path: "src/other.ts", quote: " line src/other.ts 7" }, "other 的意见");
+    await mount();
+    await fireEvent.click(screen.getByRole("button", { name: "查看意见列表" }));
+    const drawer = await screen.findByLabelText("意见列表");
+    const card = drawer.querySelector<HTMLElement>(`[data-comment-id="${comment.id}"]`)!;
+    await fireEvent.click(within(card).getByRole("button", { name: "编辑" }));
+    const box = within(card).getByRole("textbox", { name: "src/app.ts 的意见正文" }) as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: body } });
+    // 抽屉里的修改写进了当前来源的草稿槽：关闭来源、切换来源、返回与送回的确认都能看到。
+    await waitFor(() => expect(commentDraft(REVIEW)).toMatchObject({ editingId: comment.id, body }));
+    expect(commentDraftCount(REVIEW)).toBe(1);
+    // 抽屉里的编辑不同时在差异里展开线程。
+    expect(inlineRow()).toBeNull();
+    return { id: comment.id, drawer };
+  }
+
+  function drawerBox(id: string): HTMLTextAreaElement | null {
+    return document.querySelector<HTMLTextAreaElement>(`[data-comment-id="${id}"] textarea`);
+  }
+
+  it("抽屉编辑后收起抽屉：先确认，取消则抽屉与修改都在；确认后放弃修改、原意见不变", async () => {
+    const { id } = await openDrawerEdit("抽屉里改了一半");
+    await fireEvent.click(screen.getByRole("button", { name: "收起意见列表" }));
+    const dialog = await screen.findByRole("dialog", { name: "放弃未保存的意见草稿？" });
+    await fireEvent.click(within(dialog).getByRole("button", { name: "继续编辑草稿" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "放弃未保存的意见草稿？" })).toBeNull());
+    expect(screen.getByLabelText("意见列表")).toBeTruthy();
+    expect(drawerBox(id)?.value).toBe("抽屉里改了一半");
+    expect(commentDraft(REVIEW)?.body).toBe("抽屉里改了一半");
+
+    await fireEvent.click(screen.getByRole("button", { name: "收起意见列表" }));
+    await fireEvent.click(within(await screen.findByRole("dialog", { name: "放弃未保存的意见草稿？" })).getByRole("button", { name: "放弃草稿并继续" }));
+    await waitFor(() => expect(screen.queryByLabelText("意见列表")).toBeNull());
+    expect(commentDraft(REVIEW)).toBeNull();
+    expect(commentsIn(scope).find((comment) => comment.id === id)?.body).toBe("抽屉里的原意见");
+  });
+
+  it("抽屉编辑没改动时收起不打扰；保存走同一个草稿槽并有反馈", async () => {
+    const comment = addComment(scope, anchorAt(3), "原文");
+    await mount();
+    await fireEvent.click(screen.getByRole("button", { name: "查看意见列表" }));
+    const drawer = await screen.findByLabelText("意见列表");
+    let card = drawer.querySelector<HTMLElement>(`[data-comment-id="${comment.id}"]`)!;
+    await fireEvent.click(within(card).getByRole("button", { name: "编辑" }));
+    expect(commentDraft(REVIEW)).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "收起意见列表" }));
+    expect(screen.queryByRole("dialog", { name: "放弃未保存的意见草稿？" })).toBeNull();
+    await waitFor(() => expect(screen.queryByLabelText("意见列表")).toBeNull());
+
+    await fireEvent.click(screen.getByRole("button", { name: "查看意见列表" }));
+    card = (await screen.findByLabelText("意见列表")).querySelector<HTMLElement>(`[data-comment-id="${comment.id}"]`)!;
+    expect(card.querySelector("textarea")).toBeNull();
+    await fireEvent.click(within(card).getByRole("button", { name: "编辑" }));
+    const box = card.querySelector<HTMLTextAreaElement>("textarea")!;
+    await fireEvent.input(box, { target: { value: "改好了" } });
+    await fireEvent.keyDown(box, { key: "Enter", ctrlKey: true });
+    await waitFor(() => expect(commentsIn(scope)[0].body).toBe("改好了"));
+    expect(commentDraft(REVIEW)).toBeNull();
+    expect(feedback()).toContain("已保存");
+  });
+
+  it("抽屉编辑后定位到另一张卡：先确认，取消则留在抽屉继续改", async () => {
+    const { id, drawer } = await openDrawerEdit("改到一半去定位");
+    const other = within(drawer).getByRole("region", { name: "src/other.ts 的意见" });
+    await fireEvent.click(within(other).getByRole("button", { name: "定位" }));
+    const dialog = await screen.findByRole("dialog", { name: "放弃未保存的意见草稿？" });
+    await fireEvent.click(within(dialog).getByRole("button", { name: "继续编辑草稿" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "放弃未保存的意见草稿？" })).toBeNull());
+    expect(drawerBox(id)?.value).toBe("改到一半去定位");
+    expect(screen.queryByRole("region", { name: "这一行的意见" })).toBeNull();
+  });
+
+  it("抽屉编辑后切换来源：先确认，取消则停在当前来源且修改仍在；确认切走再切回，修改恢复", async () => {
+    beginClioraReview({ reviewId: OTHER_REVIEW, sessionId: "s-b", worktreePath: WORKTREE, baseline: BASE });
+    beginClioraReview({ reviewId: REVIEW, sessionId: "s-a", worktreePath: WORKTREE, baseline: BASE });
+    mocks.api.clioraReviewSources.mockResolvedValue(null);
+    const { id } = await openDrawerEdit("切来源前改的");
+    const confirmCommentDraft = vi.fn(async () => false);
+    const actions = createReviewActions({
+      opened: () => opened,
+      taskScope: () => null,
+      taskTarget: () => null,
+      commentScope: () => scope,
+      commentScopeOutdated: () => false,
+      nextId: () => 1,
+      notice: vi.fn(),
+      showError: vi.fn(),
+      setReviewNote: vi.fn(),
+      setTaskReviewNote: vi.fn(),
+      confirmEditorLeave: async () => true,
+      refresh: async () => true,
+      switchBlocked: () => false,
+      openRecent: async () => undefined,
+      openTaskReview: vi.fn(),
+      closeTask: vi.fn(),
+      closeReviewManager: vi.fn(),
+      clearSourcesNotice: vi.fn(),
+      confirmCommentDraft,
+    } as unknown as ReviewActionsHost);
+
+    await actions.chooseClioraReview(OTHER_REVIEW);
+    expect(confirmCommentDraft).toHaveBeenCalledWith("switch");
+    expect(clioraReview.source?.reviewId).toBe(REVIEW);
+    expect(drawerBox(id)?.value).toBe("切来源前改的");
+
+    confirmCommentDraft.mockResolvedValue(true);
+    await actions.chooseClioraReview(OTHER_REVIEW);
+    expect(clioraReview.source?.reviewId).toBe(OTHER_REVIEW);
+    workbenchId = OTHER_REVIEW;
+    nonce += 1;
+    await sync();
+    await waitFor(() => expect(drawerBox(id)).toBeNull());
+    expect(commentDraft(REVIEW)).toMatchObject({ editingId: id, body: "切来源前改的" });
+
+    workbenchId = REVIEW;
+    nonce += 1;
+    await sync();
+    // 切回来：编辑中的意见回到它在差异里的线程，修改还在。
+    const thread = await screen.findByRole("region", { name: "这一行的意见" }, { timeout: 4000 });
+    expect((within(thread).getByRole("textbox", { name: /意见正文/ }) as HTMLTextAreaElement).value).toBe("切来源前改的");
+  });
+});
+
+/* ------------------------------ 意见行打开时的键盘导航 ------------------------------ */
+
+describe("意见行打开时的差异键盘导航", () => {
+  /** 块标题在第 0、30、40、80 行，共 120 行：30 与 40 相隔很近，用来验证不跳过。 */
+  const HUNK_ROWS = [0, 30, 40, 80];
+  const TOTAL = 120;
+
+  function multiHunkDiff(path: string): DiffResponse {
+    const lines: DiffLine[] = [];
+    let hunk = -1;
+    let no = 1;
+    for (let index = 0; index < TOTAL; index += 1) {
+      if (HUNK_ROWS.includes(index)) {
+        hunk += 1;
+        lines.push({ kind: "hunk", text: `@@ -${no},9 +${no},9 @@`, oldNo: null, newNo: null, hunkIndex: hunk });
+      } else if (index === HUNK_ROWS[hunk] + 1) {
+        lines.push({ kind: "add", text: `+add ${path} ${index}`, oldNo: null, newNo: no++, hunkIndex: hunk });
+      } else {
+        lines.push({ kind: "context", text: ` line ${path} ${index}`, oldNo: no, newNo: no++, hunkIndex: hunk });
+      }
+    }
+    const hunks = HUNK_ROWS.map((start, index) => ({
+      index,
+      header: lines[start].text,
+      complete: true,
+      stageable: true,
+      startLine: start,
+      lineCount: (HUNK_ROWS[index + 1] ?? TOTAL) - start,
+    }));
+    return { ...longDiff(path), lines, hunks, totalLines: lines.length };
+  }
+
+  function gap(): number {
+    const space = document.querySelector<HTMLElement>(".review-stage .virtual-space")!;
+    return Number.parseFloat(space.style.height) - TOTAL * ROW;
+  }
+
+  async function key(name: string): Promise<number> {
+    await fireEvent.keyDown(scroller(), { key: name });
+    return scroller().scrollTop;
+  }
+
+  it("面板打开时 ]/[ 逐块前后跳、不跳过相邻块；End 到达最后一行；方向键不会被拉回", async () => {
+    mocks.api.loadTaskDiff.mockImplementation(async (_w: string, _b: string, _h: string, path: string) => multiHunkDiff(path));
+    await mount();
+    await fireEvent.click(bubble(3));
+    await waitFor(() => expect(inlineRow()?.dataset.inlineAfter).toBe("3"));
+    const extra = gap();
+    expect(extra).toBeGreaterThan(0);
+
+    // 向下：30 → 40 → 80，块标题都在意见行之后，落点要加上意见行的高度。
+    expect(await key("]")).toBe(30 * ROW + extra);
+    expect(await key("]")).toBe(40 * ROW + extra);
+    expect(await key("]")).toBe(80 * ROW + extra);
+    // 向上：80 → 40 → 30 → 0，每次都真的移动。
+    expect(await key("[")).toBe(40 * ROW + extra);
+    expect(await key("[")).toBe(30 * ROW + extra);
+    expect(await key("[")).toBe(0);
+
+    // End：滚动上限包含意见行的高度，最后一行能到达。
+    const end = await key("End");
+    expect(end).toBe(TOTAL * ROW + extra);
+    // 方向键与 j/k 的上限同样包含意见行高度：在底部按下不会被拉回。
+    expect(await key("ArrowDown")).toBe(end);
+    expect(await key("j")).toBe(end);
+    expect(await key("ArrowUp")).toBe(end - ROW);
+    // 编辑器仍开着。
+    expect(inlineRow()).toBeTruthy();
+  });
+});
+
+/* ------------------------------ 草稿放不进差异时的入口 ------------------------------ */
+
+describe("锚点行不在差异里时的草稿入口", () => {
+  it("文件在眼前但锚点行没读到：给出「继续编辑」，就地展开编辑器且正文还在", async () => {
+    setCommentDraft(REVIEW, { anchor: anchorAt(500, { quote: "很远的一行" }), body: "锚点行还没读到", editingId: null });
+    await mount();
+    const away = await screen.findByText(/这一行当前不在差异里显示/);
+    expect(inlineRow()).toBeNull();
+    const bar = away.closest<HTMLElement>(".review-draft-away")!;
+    await fireEvent.click(within(bar).getByRole("button", { name: "继续编辑" }));
+    const detached = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>(".review-draft-detached");
+      expect(found).toBeTruthy();
+      return found!;
+    });
+    const box = textbox(detached);
+    expect(box.value).toBe("锚点行还没读到");
+    await fireEvent.input(box, { target: { value: "锚点行还没读到（补充）" } });
+    await fireEvent.keyDown(box, { key: "Enter", ctrlKey: true });
+    await waitFor(() => expect(commentsIn(scope)).toHaveLength(1));
+    expect(commentsIn(scope)[0].body).toBe("锚点行还没读到（补充）");
+    expect(commentDraft(REVIEW)).toBeNull();
+  });
+});
+
 /* ------------------------------ 来源级关卡 ------------------------------ */
 
 describe("切换来源、返回 Cliora、送回意见前的草稿关卡", () => {

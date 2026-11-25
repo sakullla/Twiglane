@@ -719,6 +719,10 @@
   let drawerFocus = $state<string | null>(null);
   /** 等待确认的「换掉草稿」动作。 */
   let replacing = $state<{ message: string; run: () => void } | null>(null);
+  /** 差异是否已把意见行放到锚点处：false 表示读到了差异却找不到锚点行（没读到或被筛选隐藏）。 */
+  let inlinePlaced = $state<boolean | null>(null);
+  /** 锚点行不在差异里时，在提示条下就地展开的草稿编辑器。 */
+  let detachedOpen = $state(false);
 
   let commenting = $derived(Boolean(onAddComment || onEditComment || onDeleteComment));
   let editingOriginal = $derived(draftEditingId ? (comments.find((comment) => comment.id === draftEditingId)?.body ?? null) : null);
@@ -763,6 +767,7 @@
     draftBody = "";
     draftEditingId = null;
     commentError = null;
+    detachedOpen = false;
   }
 
   /** 会换掉写了内容的草稿时先确认；取消则草稿原样保留。 */
@@ -833,6 +838,7 @@
       draftEditingId = null;
       threadAnchor = null;
       commentError = null;
+      detachedOpen = false;
     });
   }
 
@@ -881,6 +887,46 @@
     });
   }
 
+  /**
+   * 抽屉卡片上的「编辑」：同样走唯一的草稿槽（不打开差异里的线程），
+   * 关闭来源、切换来源、返回与送回前的草稿确认因此都能看到这次修改。
+   */
+  function beginDrawerEdit(comment: ReviewComment): void {
+    if (draftEditingId === comment.id && threadAnchor === null) return;
+    guardDraft(() => {
+      draftAnchor = comment.anchor;
+      draftBody = comment.body;
+      draftEditingId = comment.id;
+      threadAnchor = null;
+      commentError = null;
+    });
+  }
+
+  /** 抽屉里的编辑：编辑中的意见在草稿槽里，且没有对应的线程（不在差异里显示）。 */
+  let drawerEditing = $derived(draftEditingId !== null && threadAnchor === null);
+
+  /** 收起抽屉：抽屉里改过的意见先确认，取消则抽屉与修改都保留；没改过就直接收起编辑。 */
+  function closeDrawer(): void {
+    if (!drawerEditing) {
+      commentsOpen = false;
+      return;
+    }
+    if (!draftDirty) {
+      resetDraft();
+      commentsOpen = false;
+      return;
+    }
+    guardDraft(() => {
+      resetDraft();
+      commentsOpen = false;
+    });
+  }
+
+  function toggleDrawer(): void {
+    if (commentsOpen) closeDrawer();
+    else commentsOpen = true;
+  }
+
   function removeComment(comment: ReviewComment): void {
     if (!onDeleteComment) return;
     onDeleteComment(comment.id);
@@ -897,11 +943,23 @@
 
   /** 抽屉卡片的「定位」：切到意见所在文件并在锚点处展开线程。 */
   function locateInDiff(comment: ReviewComment): void {
-    const row = rowOf(comment.anchor.path);
-    if (row && selected?.path !== row.path) goToRow(row);
-    // 中、窄档抽屉覆盖在差异上：让出位置。
-    if (tier !== "wide") commentsOpen = false;
-    openThread(comment.anchor);
+    const go = () => {
+      const row = rowOf(comment.anchor.path);
+      if (row && selected?.path !== row.path) goToRow(row);
+      // 中、窄档抽屉覆盖在差异上：让出位置。
+      if (tier !== "wide") commentsOpen = false;
+      openThread(comment.anchor);
+    };
+    // 抽屉里有改了一半的意见：先确认再离开，取消则留在抽屉里继续改。
+    if (draftEditingId && draftEditingId !== comment.id) {
+      guardDraft(() => {
+        resetDraft();
+        go();
+      });
+      return;
+    }
+    if (draftEditingId && !draftDirty) resetDraft();
+    go();
   }
 
   /** 草稿不在眼前（在别的文件，或被线程盖住）：给一条「继续编辑」的入口。 */
@@ -910,12 +968,26 @@
     if (!anchor || draftEditingId || draftBody.trim() === "") return null;
     if (threadAnchor) return anchor;
     const shown = multiActive || continuous ? stackRows.some((row) => row.path === anchor.path) : selected?.path === anchor.path;
+    // 文件在眼前，但差异里找不到锚点行（还没读到、被空白筛选隐藏）：编辑器放不进去，同样给入口。
+    if (shown && inlinePlaced === false) return anchor;
     return shown ? null : anchor;
   });
+  /** 草稿所在文件就在眼前，只是锚点行不在差异里：「继续编辑」改为就地展开编辑器。 */
+  let draftDetached = $derived.by(() => {
+    const anchor = draftAway;
+    if (!anchor || threadAnchor || inlinePlaced !== false) return false;
+    return multiActive || continuous ? stackRows.some((row) => row.path === anchor.path) : selected?.path === anchor.path;
+  });
+  /** 抽屉收起（或被让出）后抽屉里改了一半的意见：给回到抽屉的入口。 */
+  let editAway = $derived(drawerEditing && draftDirty && !commentsOpen && !editOrphan ? draftAnchor : null);
 
   function resumeDraft(): void {
     const anchor = draftAnchor;
     if (!anchor) return;
+    if (draftDetached) {
+      detachedOpen = !detachedOpen;
+      return;
+    }
     threadAnchor = null;
     const row = rowOf(anchor.path);
     if (row && selected?.path !== row.path) goToRow(row);
@@ -1444,7 +1516,7 @@
                   aria-expanded={commentsOpen}
                   aria-label={commentsOpen ? "收起意见列表" : "查看意见列表"}
                   title={comments.length > 0 ? `${comments.length} 条意见` : "还没有意见"}
-                  onclick={() => (commentsOpen = !commentsOpen)}
+                  onclick={toggleDrawer}
                 >
                   <Icon name="list" size={13} /><span>意见</span>{#if comments.length > 0}<span class="count">{comments.length}</span>{/if}
                 </button>
@@ -1476,8 +1548,37 @@
       {#if !block && draftAway}
         <p class="review-draft-away" role="status">
           <Icon name="pencil" size={13} />
-          <span class="truncate">1 条意见草稿未保存：{draftAway.path}（{anchorLabel(draftAway)}）</span>
-          <button type="button" class="btn btn-ghost btn-sm" title="回到草稿所在的位置继续写" onclick={resumeDraft}>继续编辑</button>
+          <span class="truncate">1 条意见草稿未保存：{draftAway.path}（{anchorLabel(draftAway)}）{#if draftDetached}· 这一行当前不在差异里显示{/if}</span>
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm"
+            aria-expanded={draftDetached ? detachedOpen : undefined}
+            title={draftDetached ? "锚点行还没读到或被筛选隐藏：在这里继续写" : "回到草稿所在的位置继续写"}
+            onclick={resumeDraft}
+          >继续编辑</button>
+        </p>
+        {#if draftDetached && detachedOpen && draftAnchor && !draftEditingId}
+          <div class="review-draft-detached">
+            <InlineCommentEditor
+              anchor={draftAnchor}
+              body={draftBody}
+              dirty={draftDirty}
+              error={commentError}
+              onInput={(value) => {
+                draftBody = value;
+                commentError = null;
+              }}
+              onSave={saveDraft}
+              onCancel={cancelDraft}
+            />
+          </div>
+        {/if}
+      {/if}
+      {#if !block && editAway}
+        <p class="review-draft-away" role="status">
+          <Icon name="pencil" size={13} />
+          <span class="truncate">1 条意见的修改未保存：{editAway.path}（{anchorLabel(editAway)}）</span>
+          <button type="button" class="btn btn-ghost btn-sm" title="打开意见列表继续修改" onclick={() => (commentsOpen = true)}>继续编辑</button>
         </p>
       {/if}
       {#if !block && editOrphan}
@@ -1564,6 +1665,7 @@
                 onCommentLine={beginComment}
                 inlineComment={inlineTarget}
                 inlinePanel={commentPanel}
+                onInlinePlaced={(placed) => (inlinePlaced = placed)}
                 onClear={() => {
                   if (multiActive) {
                     if (selected) select(selected);
@@ -1595,6 +1697,7 @@
                 onCommentLine={beginComment}
                 inlineComment={inlineTarget}
                 inlinePanel={commentPanel}
+                onInlinePlaced={(placed) => (inlinePlaced = placed)}
                 asText={asTextFor !== null && asTextFor === selected?.path}
                 onViewAsText={(next) => {
                   asTextFor = next && selected ? selected.path : null;
@@ -1631,11 +1734,17 @@
           stale={staleComments}
           focusId={drawerFocus}
           onLocate={locateInDiff}
-          onEdit={onEditComment ? (id, body) => {
-            onEditComment?.(id, body);
-            const target = comments.find((comment) => comment.id === id);
-            commentFeedback = target ? `已保存对 ${placeOf(target.anchor)} 意见的修改。` : "已保存修改。";
-          } : undefined}
+          editingId={drawerEditing ? draftEditingId : null}
+          editBody={draftBody}
+          editDirty={draftDirty}
+          editError={commentError}
+          onBeginEdit={onEditComment ? beginDrawerEdit : undefined}
+          onEditInput={(value) => {
+            draftBody = value;
+            commentError = null;
+          }}
+          onSaveEdit={saveDraft}
+          onCancelEdit={cancelDraft}
           onDelete={onDeleteComment ? removeComment : undefined}
           onCopy={onCopyText}
         />

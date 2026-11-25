@@ -192,6 +192,7 @@
 .review-draft-away { background: var(--warning-soft); color: var(--warning-text); }
 .review-draft-away > .truncate { flex: 1; min-width: 0; }
 .review-draft-away > .btn { flex: none; }
+.review-draft-detached { flex: none; padding: var(--space-6) var(--space-12); border-top: 1px solid var(--border); }
 
 /* ---------- 意见抽屉：按文件分组的卡片 + 已失效分区（只读） ---------- */
 .review-comments-drawer { max-height: none; gap: var(--space-8); }

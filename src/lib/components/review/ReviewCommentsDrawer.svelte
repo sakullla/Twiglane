@@ -22,16 +22,39 @@
     focusId?: string | null;
     /** 定位：在差异里打开这条意见所在行的线程。 */
     onLocate?: (comment: ReviewComment) => void;
-    onEdit?: (id: string, body: string) => void;
+    /**
+     * 编辑不在抽屉里自存：正在编辑的意见、正文与错误都来自工作台唯一的草稿槽，
+     * 收起抽屉、切换来源与关闭来源前的草稿确认因此能看到抽屉里的修改。
+     */
+    editingId?: string | null;
+    editBody?: string;
+    editDirty?: boolean;
+    editError?: string | null;
+    onBeginEdit?: (comment: ReviewComment) => void;
+    onEditInput?: (value: string) => void;
+    onSaveEdit?: () => void;
+    onCancelEdit?: () => void;
     onDelete?: (comment: ReviewComment) => void;
     onCopy?: (text: string, label: string) => void;
   }
 
-  let { comments, stale = [], focusId = null, onLocate, onEdit, onDelete, onCopy }: Props = $props();
+  let {
+    comments,
+    stale = [],
+    focusId = null,
+    onLocate,
+    editingId = null,
+    editBody = "",
+    editDirty = false,
+    editError = null,
+    onBeginEdit,
+    onEditInput,
+    onSaveEdit,
+    onCancelEdit,
+    onDelete,
+    onCopy,
+  }: Props = $props();
 
-  let editingId = $state<string | null>(null);
-  let editBody = $state("");
-  let editError = $state<string | null>(null);
   let host = $state<HTMLElement | null>(null);
 
   /** 按文件分组：组的顺序是文件第一次出现的顺序，组内按添加顺序。 */
@@ -46,15 +69,6 @@
   });
   let staleCount = $derived(stale.reduce((sum, batch) => sum + batch.comments.length, 0));
 
-  // 正在编辑的那条被删掉或失效：收起编辑。
-  $effect(() => {
-    if (editingId && !comments.some((comment) => comment.id === editingId)) {
-      editingId = null;
-      editBody = "";
-      editError = null;
-    }
-  });
-
   $effect(() => {
     const id = focusId;
     const node = host;
@@ -66,32 +80,6 @@
     });
   });
 
-  function beginEdit(comment: ReviewComment): void {
-    editingId = comment.id;
-    editBody = comment.body;
-    editError = null;
-  }
-
-  function saveEdit(): void {
-    const id = editingId;
-    if (!id || !onEdit) return;
-    try {
-      onEdit(id, editBody);
-    } catch (error) {
-      editError = error instanceof Error ? error.message : "这条意见没有保存。";
-      return;
-    }
-    editingId = null;
-    editBody = "";
-    editError = null;
-  }
-
-  function cancelEdit(): void {
-    editingId = null;
-    editBody = "";
-    editError = null;
-  }
-
   function copy(text: string, label: string): void {
     if (onCopy) {
       onCopy(text, label);
@@ -102,10 +90,6 @@
 
   function batchText(batch: StaleCommentBatch): string {
     return batch.comments.map(commentCopyText).join("\n\n");
-  }
-
-  function original(id: string): string {
-    return comments.find((comment) => comment.id === id)?.body ?? "";
   }
 </script>
 
@@ -136,16 +120,13 @@
                 anchor={comment.anchor}
                 mode="edit"
                 body={editBody}
-                dirty={editBody !== original(comment.id)}
+                dirty={editDirty}
                 error={editError}
                 label={comment.anchor.path + " 的意见正文"}
                 showQuote={false}
-                onInput={(value) => {
-                  editBody = value;
-                  editError = null;
-                }}
-                onSave={saveEdit}
-                onCancel={cancelEdit}
+                onInput={(value) => onEditInput?.(value)}
+                onSave={() => onSaveEdit?.()}
+                onCancel={() => onCancelEdit?.()}
               />
             {:else}
               <p class="task-comment-body">{comment.body}</p>
@@ -153,8 +134,8 @@
                 {#if onLocate}
                   <button type="button" class="btn btn-ghost btn-sm" title="在差异里打开这条意见所在的行" onclick={() => onLocate?.(comment)}>定位</button>
                 {/if}
-                {#if onEdit}
-                  <button type="button" class="btn btn-ghost btn-sm" title="修改这条意见" onclick={() => beginEdit(comment)}>编辑</button>
+                {#if onBeginEdit}
+                  <button type="button" class="btn btn-ghost btn-sm" title="修改这条意见" onclick={() => onBeginEdit?.(comment)}>编辑</button>
                 {/if}
                 {#if onDelete}
                   <button type="button" class="btn btn-ghost btn-sm" title="从这批意见里删掉" onclick={() => onDelete?.(comment)}>删除</button>

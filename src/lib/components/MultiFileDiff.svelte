@@ -92,6 +92,8 @@
       block: boolean;
     } | null;
     inlinePanel?: Snippet;
+    /** 意见行是否已放进对应文件的差异（见 DiffView.onInlinePlaced）。 */
+    onInlinePlaced?: (placed: boolean | null) => void;
   }
 
   /** 同时在途的差异读取数：选 100 个文件也不会一次把读取通道占满。 */
@@ -142,6 +144,7 @@
     onCommentLine,
     inlineComment = null,
     inlinePanel,
+    onInlinePlaced,
   }: Props = $props();
 
   let scroller = $state<HTMLDivElement | null>(null);
@@ -579,6 +582,7 @@
                 {onCommentLine}
                 inlineComment={inlineComment?.path === row.path ? inlineComment : null}
                 inlinePanel={inlineComment?.path === row.path ? inlinePanel : undefined}
+                onInlinePlaced={inlineComment?.path === row.path ? onInlinePlaced : undefined}
               />
             </div>
           {/if}

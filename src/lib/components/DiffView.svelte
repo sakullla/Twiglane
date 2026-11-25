@@ -131,6 +131,11 @@
     } | null;
     inlinePanel?: Snippet;
     /**
+     * 意见行是否放进了差异：true 已插入；false 差异已读到但找不到锚点行（还没读到、被筛选隐藏）；
+     * null 未知（读取中、没有目标或本视图卸载）。调用方据此在找不到时给出「继续编辑」的入口。
+     */
+    onInlinePlaced?: (placed: boolean | null) => void;
+    /**
      * 在文件视图里编辑当前工作区这一侧的文件（带上当前位置附近的新侧行号）。
      * 只在新侧就是工作区文件时由调用方传入；历史、旧侧、删除与多文件聚合不传。
      * 差异本身仍然只读，保存只在文件视图的编辑器里发生。
@@ -184,6 +189,7 @@
     onCommentLine,
     inlineComment = null,
     inlinePanel,
+    onInlinePlaced,
   }: Props = $props();
   let menu = $state<ContextMenuRequest | null>(null);
   /**
@@ -319,6 +325,37 @@
     const edge = (inlineIndex + 1) * ROW_HEIGHT;
     return y <= edge ? y : Math.max(edge, y - inlineGap);
   }
+
+  /** 最大滚动位置（像素坐标）：代码行加上意见行的高度。 */
+  function maxScrollFor(height: number): number {
+    return Math.max(0, total * ROW_HEIGHT + inlineGap - Math.max(0, height));
+  }
+
+  /** 按行滚动：意见行打开时上限加上它的高度，键盘仍能到达最后一行。 */
+  function scrollRowsBy(delta: number, height: number): number {
+    if (total <= 0) return 0;
+    if (inlineGap === 0) return scrollByRows(scrollTop, delta, total, height, ROW_HEIGHT);
+    const next = scrollTop + delta * ROW_HEIGHT;
+    const max = maxScrollFor(height);
+    return next <= 0 ? 0 : next >= max ? max : next;
+  }
+
+  // 意见行放置结果：差异读到后找不到锚点行时报告 false，读取中或没有目标时为未知。
+  $effect(() => {
+    const report = onInlinePlaced;
+    if (!report) return;
+    const target = inlineComment;
+    const placed: boolean | null =
+      !target || !inlinePanel || !selection || target.path !== selection.path || !currentDiff
+        ? null
+        : inlineIndex !== null
+          ? true
+          : loading
+            ? null
+            : false;
+    untrack(() => report(placed));
+    return () => untrack(() => report(null));
+  });
   /* 宽度取全量差异的最长行，只随内容变化，不随虚拟窗口或布局切换跳动。 */
   let codeTexts = $derived(lines.filter((line) => line.kind !== "hunk").map((line) => codeOf(line)));
   let ruler = $derived(codeRuler(codeTexts));
@@ -341,13 +378,15 @@
         )
       : hunkRowIndexes(split ? sideRows.map((row) => row.left?.kind ?? row.right?.kind) : lines.map((line) => line.kind)),
   );
-  let hunkMax = $derived(viewport > 0 ? Math.max(0, total * ROW_HEIGHT - viewport) : Number.POSITIVE_INFINITY);
+  /** 块导航用「只有代码行」的坐标：意见行的高度从滚动位置与上限里扣掉。 */
+  let hunkMax = $derived(viewport > 0 ? rowSpace(maxScrollFor(viewport)) : Number.POSITIVE_INFINITY);
+  let contentTop = $derived(rowSpace(scrollTop));
   /** 完整文件按页读取：后面还有没读到的行时，「下一处」先续读再跳，不能停在已读部分的末尾。 */
   let moreToRead = $derived(
     Boolean(fullFile && currentDiff && currentDiff.offset + currentDiff.lines.length < currentDiff.totalLines),
   );
   let hunkState = $derived.by(() => {
-    const state = hunkJump(hunkIndexes, scrollTop, ROW_HEIGHT, hunkMax);
+    const state = hunkJump(hunkIndexes, contentTop, ROW_HEIGHT, hunkMax);
     if (moreToRead && state.nextRow === null && (state.nextReason === HUNK_LAST || state.total === 0)) {
       return { ...state, nextReason: loading ? "正在读取后续内容" : null };
     }
@@ -753,7 +792,7 @@
   }
   /** 进入编辑时定位的行：视口里第一条带新侧行号的行，没有就从文件开头。 */
   function editLineHint(): number | null {
-    const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT));
+    const start = Math.max(0, Math.floor(rowSpace(scrollTop) / ROW_HEIGHT));
     for (let index = start; index < lines.length; index += 1) {
       const no = lines[index]?.newNo;
       if (typeof no === "number" && no > 0) return no;
@@ -1412,7 +1451,7 @@
 
   /** 按下时再算一次：滚动可能刚发生，不能用上报那一刻的行号。 */
   function jump(direction: -1 | 1) {
-    const state = hunkJump(hunkIndexes, scrollTop, ROW_HEIGHT, hunkMax);
+    const state = hunkJump(hunkIndexes, rowSpace(scrollTop), ROW_HEIGHT, hunkMax);
     const row = direction < 0 ? state.prevRow : state.nextRow;
     if (row === null) {
       if (direction > 0 && moreToRead && !loading && !pendingNext) {
@@ -1424,7 +1463,7 @@
       }
       return;
     }
-    const max = viewport > 0 ? Math.max(0, total * ROW_HEIGHT + inlineGap - viewport) : Number.POSITIVE_INFINITY;
+    const max = viewport > 0 ? maxScrollFor(viewport) : Number.POSITIVE_INFINITY;
     applyScroll(Math.min(rowTop(row), max));
   }
 
@@ -1493,7 +1532,7 @@
     }
     if (event.key === "End") {
       event.preventDefault();
-      applyScroll(scrollByRows(0, total, total, height, ROW_HEIGHT));
+      applyScroll(total > 0 ? maxScrollFor(height) : 0);
       return;
     }
     if ((event.key === "]" || event.key === "[") && !event.shiftKey && (hunkState.total > 0 || moreToRead)) {
@@ -1507,13 +1546,13 @@
     if (event.key === "j" || event.key === "k") {
       if (delta === null) {
         event.preventDefault();
-        applyScroll(scrollByRows(scrollTop, event.key === "j" ? 1 : -1, total, height, ROW_HEIGHT));
+        applyScroll(scrollRowsBy(event.key === "j" ? 1 : -1, height));
         return;
       }
     }
     if (delta === null) return;
     event.preventDefault();
-    applyScroll(scrollByRows(scrollTop, delta, total, height, ROW_HEIGHT));
+    applyScroll(scrollRowsBy(delta, height));
   }
 
   function lineClass(kind: string): string {

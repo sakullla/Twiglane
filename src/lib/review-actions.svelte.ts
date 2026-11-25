@@ -30,6 +30,7 @@ import {
   editComment as editCommentRecord,
   feedbackComments,
   forgetComments,
+  hasCommentDraft,
   previewComments,
   recordPreparedComments,
   snapshotPreparedComments,
@@ -83,6 +84,11 @@ export interface ReviewActionsHost {
    */
   setTaskReviewInvalidations?(items: { path: string; reason: string; kind: "changed" | "missing" | "unconfirmed" }[]): void;
   confirmEditorLeave(purpose: string): Promise<boolean>;
+  /**
+   * 当前来源有写了内容的意见草稿时，切换来源、返回 Cliora 与准备送回之前先确认（可取消）。
+   * 草稿不会随送回或返回发出；切换来源时草稿仍留在原来源。可选；不接线时不拦截。
+   */
+  confirmCommentDraft?(purpose: CommentDraftPurpose): Promise<boolean>;
   refresh(): Promise<boolean>;
   switchBlocked(): boolean;
   openRecent(path: string): Promise<unknown>;
@@ -93,6 +99,9 @@ export interface ReviewActionsHost {
   /** 当前来源被关闭：撤下任务范围，工作台转到「没有审查来源」状态。不自动选择其他来源。 */
   clearTaskReview?(): void;
 }
+
+/** 需要先确认意见草稿的动作。 */
+export type CommentDraftPurpose = "switch" | "return" | "feedback";
 
 /** 来源本身的问题：已失效（原生不再认识）或协议版本不兼容。工作台据此显示整页状态。 */
 export interface ReviewSourceIssue {
@@ -146,6 +155,12 @@ export class ReviewActions {
 
   issueOf(reviewId: string | null | undefined): ReviewSourceIssue | null {
     return (reviewId && this.sourceIssues[reviewId]) || null;
+  }
+
+  /** 有写了内容的意见草稿时先问一次；没有草稿或没接线时直接放行。 */
+  private async draftCleared(reviewId: string | null | undefined, purpose: CommentDraftPurpose): Promise<boolean> {
+    if (!reviewId || !hasCommentDraft(reviewId) || !this.host.confirmCommentDraft) return true;
+    return this.host.confirmCommentDraft(purpose);
   }
 
   /** 记住来源的当前意见范围（App 在 commentScope 变化时调用）。 */
@@ -342,11 +357,18 @@ export class ReviewActions {
    */
   async prepareFeedback(): Promise<void> {
     const host = this.host;
-    const scope = host.commentScope();
+    let scope = host.commentScope();
     const source = clioraReview.source;
     if (!scope || !source) {
       host.notice("当前没有可送回的任务来源。", "warn");
       return;
+    }
+    if (this.feedbackPreparing || this.returning) return;
+    // 写了一半的草稿不会随这批送出：先确认；取消就什么都不做，草稿与意见原样保留。
+    if (hasCommentDraft(source.reviewId)) {
+      if (!(await this.draftCleared(source.reviewId, "feedback"))) return;
+      scope = host.commentScope();
+      if (!scope || clioraReview.source?.reviewId !== source.reviewId) return;
     }
     const comments = feedbackComments(scope);
     // 与送出内容同一时刻取签名：等待原生准备期间新增或改过的意见不算已送回。
@@ -429,6 +451,9 @@ export class ReviewActions {
       // 返回来源前未保存的草稿必须有结论：保存只写工作区，不会变成提交或合入结果。
       if (!(await host.confirmEditorLeave("返回 cliora"))) return;
       if (clioraReview.source?.reviewId !== reviewId) return;
+      // 意见草稿不会随返回发出，返回后也仍保留：有草稿时先确认，取消就停在这里。
+      if (!(await this.draftCleared(reviewId, "return"))) return;
+      if (clioraReview.source?.reviewId !== reviewId) return;
       const { outcome, headOid } = clioraReturnOutcome();
       // 工作区声明由后端按来源工作树读取真实 Git 状态填写，前端不声明。这里刷新一次只为
       // 后端没给出结果时提示仍按真实快照说明；当前仓库已不是来源工作树就当作没读到。
@@ -473,6 +498,12 @@ export class ReviewActions {
 
   async chooseClioraReview(reviewId: string): Promise<void> {
     const host = this.host;
+    const current = clioraReview.source?.reviewId ?? null;
+    // 切走之前：当前来源的意见草稿会留在原来源（切回来还在），但先让用户知道并可以取消。
+    if (current && current !== reviewId && !host.switchBlocked()) {
+      if (!(await this.draftCleared(current, "switch"))) return;
+      if (clioraReview.source?.reviewId !== current) return;
+    }
     if (!reviewId) { selectClioraSource(null); host.closeTask(); host.clearTaskReview?.(); return; }
     const source = clioraReview.sources.find((item) => item.reviewId === reviewId);
     if (!source || host.switchBlocked()) return;

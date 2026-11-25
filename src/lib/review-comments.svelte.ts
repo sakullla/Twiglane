@@ -271,6 +271,21 @@ function sentBody(comment: { anchor: ReviewCommentAnchor; body: string }): strin
 /** 整批预览：只在本地展示与复制，不写文件、不打开任何深链。 */
 const chr10 = String.fromCharCode(10);
 
+/** 逐卡「预览送回内容」：与 feedbackComments 里的 body 完全一致（整块意见带区间前缀）。 */
+export function sentCommentBody(comment: { anchor: ReviewCommentAnchor; body: string }): string {
+  return sentBody(comment);
+}
+
+/** 编辑器里的上限提示：按 trim 后的 UTF-8 字节数计算，与保存时的校验同一口径。 */
+export function commentBodyBytes(body: string): number {
+  return utf8Bytes(body.trim());
+}
+
+/** 单条意见复制用的文字：路径、行号标签与正文。失效意见只读，只能复制。 */
+export function commentCopyText(comment: { anchor: ReviewCommentAnchor; body: string }): string {
+  return comment.anchor.path + "（" + anchorLabel(comment.anchor) + "）" + chr10 + comment.body;
+}
+
 export function previewComments(comments: readonly ReviewComment[]): string {
   if (comments.length === 0) return "";
   return comments

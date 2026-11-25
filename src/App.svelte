@@ -43,6 +43,7 @@
   import {
     createReviewActions,
     reviewSourceEntries,
+    type CommentDraftPurpose,
     type ReviewCloseImpact,
     type TaskScopeSnapshot,
   } from "./lib/review-actions.svelte";
@@ -792,6 +793,7 @@
       if (workbenchId) recordRevocations(workbenchId, items);
     },
     confirmEditorLeave: (purpose) => confirmEditorLeave(purpose),
+    confirmCommentDraft: (purpose) => confirmCommentDraft(purpose),
     refresh: () => refresh(),
     switchBlocked: () => switchBlocked(commandState),
     openRecent: (path) => openRecent(path),
@@ -990,6 +992,43 @@
    * 没有会丢的内容时直接关闭。关闭从不自动选择其他来源。
    */
   let reviewClose = $state<{ ids: string[]; scope: "current" | "single" | "all"; impacts: ReviewCloseImpact[] } | null>(null);
+
+  /*
+   * 意见草稿关卡（R5）：切换来源、返回 Cliora、准备送回之前，当前来源有写了内容的意见草稿时先确认。
+   * 草稿不会随送回或返回发出，也不会被这些动作删除；取消就停下，一切原样。
+   */
+  let draftConfirm = $state<{ purpose: CommentDraftPurpose; resolve: (ok: boolean) => void } | null>(null);
+  const DRAFT_CONFIRM: Record<CommentDraftPurpose, { title: string; message: string; confirm: string }> = {
+    switch: {
+      title: "切换审查来源？",
+      message: "当前来源有 1 条意见草稿还没保存。切换后草稿留在原来源，切回来可以继续编辑；它不会进入另一个来源的意见。",
+      confirm: "仍然切换",
+    },
+    return: {
+      title: "返回 Cliora？",
+      message: "当前来源有 1 条意见草稿还没保存，它不会随返回发出。返回后草稿仍保留在这里。",
+      confirm: "仍然返回",
+    },
+    feedback: {
+      title: "送回意见？",
+      message: "当前来源有 1 条意见草稿还没保存，它不会包含在这批送回的意见里。可以先保存草稿再送回。",
+      confirm: "不含草稿送回",
+    },
+  };
+
+  function confirmCommentDraft(purpose: CommentDraftPurpose): Promise<boolean> {
+    // 已经有一个关卡在等回答：新的请求按取消处理，不叠两层对话框。
+    if (draftConfirm) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      draftConfirm = { purpose, resolve };
+    });
+  }
+
+  function settleDraftConfirm(ok: boolean): void {
+    const pending = draftConfirm;
+    draftConfirm = null;
+    pending?.resolve(ok);
+  }
 
   function requestCloseSources(ids: string[], scope: "current" | "single" | "all") {
     if (switchBlocked(commandState)) {
@@ -6046,6 +6085,8 @@
                 onAddComment={addReviewComment}
                 onEditComment={editReviewComment}
                 onDeleteComment={deleteReviewComment}
+                staleComments={clioraReview.source && reviewSourceKind === "local" ? staleCommentBatches(clioraReview.source.reviewId) : []}
+                onCopyText={(text, label) => void copyText(text, label)}
                 {workbenchId}
                 sourceCard={reviewSourceCard}
                 completion={reviewCompletionBar}
@@ -6390,6 +6431,22 @@
       >复制意见后关闭</button>
     </div>
   </ConfirmDialog>
+{/if}
+{#if draftConfirm}
+  {@const copy = DRAFT_CONFIRM[draftConfirm.purpose]}
+  <ConfirmDialog
+    title={copy.title}
+    titleId="review-draft-confirm-title"
+    icon="alert"
+    tone="warning"
+    message={copy.message}
+    notes={[{ tone: "info", text: "取消则停在这里，草稿与意见原样保留。" }]}
+    confirmLabel={copy.confirm}
+    cancelLabel="继续编辑草稿"
+    focus="cancel"
+    onConfirm={() => settleDraftConfirm(true)}
+    onCancel={() => settleDraftConfirm(false)}
+  />
 {/if}
 {#if terminalClose}
   <!-- 原生关窗被活动终端拦下：取消不改进程；确认先等待终止成功再关闭，失败留在这一层。 -->

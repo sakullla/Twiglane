@@ -2867,17 +2867,12 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 .hunk-btn.hunk-comment:hover:not(:disabled) { color: var(--accent-text); background: var(--accent-soft); }
 .hunk-btn.hunk-comment.commented { color: var(--accent-text); background: var(--accent-soft); }
 
-/* 任务审阅的意见栏：标题行只留一句计数与两个动作，展开后才是可编辑列表与整批预览。 */
-.task-comments { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8); padding: var(--space-6) var(--space-12); }
-.task-comments-count { color: var(--fg); font-size: var(--text-xs); font-weight: 600; }
-.task-comments-route { flex: 1 1 auto; min-width: 0; color: var(--fg-subtle); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 任务审阅的意见卡片（抽屉与失效分区共用）：结构化卡片，送回内容逐卡折叠预览，不再有整批预览。 */
 .task-comments-panel { display: flex; flex-direction: column; gap: var(--space-8); padding: var(--space-8) var(--space-12); border-top: 1px solid var(--border); max-height: 320px; overflow: auto; }
 .task-comment { display: flex; flex-direction: column; gap: 4px; padding: var(--space-6) var(--space-8); border: 1px solid var(--border); border-radius: var(--radius-sm); }
 .task-comment-head { display: flex; align-items: baseline; gap: var(--space-8); font-size: var(--text-xs); color: var(--fg-subtle); }
-.task-comment-path { font-family: var(--font-mono); color: var(--fg); overflow-wrap: anywhere; }
-.task-comment-quote { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--fg-subtle); white-space: pre-wrap; overflow-wrap: anywhere; }
+.task-comment-path { font-family: var(--mono); color: var(--fg); overflow-wrap: anywhere; }
+.task-comment-quote { font-family: var(--mono); font-size: var(--text-xs); color: var(--fg-subtle); white-space: pre-wrap; overflow-wrap: anywhere; }
 .task-comment-body { font-size: var(--text-sm); color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; }
 .task-comment-actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-6); }
-.task-comment-preview { font-family: var(--font-mono); font-size: var(--text-xs); white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg-raised); padding: var(--space-8); border-radius: var(--radius-sm); }
-.task-comment-composer { display: flex; flex-direction: column; gap: var(--space-6); padding: var(--space-8) var(--space-12); border-top: 1px solid var(--border); }
 .task-comment-note { font-size: var(--text-xs); color: var(--fg-subtle); }

@@ -7,14 +7,19 @@
   import { branchLabel } from "../../labels";
   import { LatestReadQueue } from "../../latest-read";
   import {
+    anchorKey,
     anchorLabel,
     clearCommentDraft,
     commentDraft,
-    previewComments,
     setCommentDraft,
     type ReviewComment,
     type ReviewCommentAnchor,
+    type StaleCommentBatch,
   } from "../../review-comments.svelte";
+  import ConfirmDialog from "../ConfirmDialog.svelte";
+  import InlineCommentEditor from "./InlineCommentEditor.svelte";
+  import InlineCommentThread from "./InlineCommentThread.svelte";
+  import ReviewCommentsDrawer from "./ReviewCommentsDrawer.svelte";
   import type {
     AppFailure,
     ChangeKind,
@@ -175,6 +180,10 @@
     onAddComment?: (anchor: ReviewCommentAnchor, body: string) => void;
     onEditComment?: (id: string, body: string) => void;
     onDeleteComment?: (id: string) => void;
+    /** 当前来源最近失效的意见批次：抽屉里只读展示，只能复制。 */
+    staleComments?: readonly StaleCommentBatch[];
+    /** 复制文字（失效意见）：成功与失败的反馈由外壳统一处理。 */
+    onCopyText?: (text: string, label: string) => void;
     /** 当前来源的 reviewId：界面状态按它保存与恢复；没有来源时为 null。 */
     workbenchId?: string | null;
     /** 左栏最上方的视图切换（与其他视图共用同一个 paneHead）。 */
@@ -240,6 +249,8 @@
     onAddComment,
     onEditComment,
     onDeleteComment,
+    staleComments = [],
+    onCopyText,
     workbenchId = null,
     paneHead,
     sourceCard,
@@ -404,21 +415,29 @@
       queueNote = null;
       commentsOpen = saved?.drawerOpen ?? false;
       restorePath = saved?.selectedPath ?? null;
-      // 意见草稿按来源保存在草稿槽里：切换来源不丢，切回来时恢复。
+      // 意见草稿按来源保存在草稿槽里：切换来源不丢，切回来时恢复（编辑中的意见回到它的线程里）。
       const draft = id ? commentDraft(id) : null;
       draftAnchor = draft?.anchor ?? null;
       draftBody = draft?.anchor ? draft.body : "";
+      draftEditingId = draft?.anchor ? draft.editingId : null;
+      threadAnchor = draft?.anchor && draft.editingId ? draft.anchor : null;
+      commentError = null;
+      commentFeedback = null;
+      replacing = null;
     });
   });
 
   // 正在写的意见草稿写回当前来源的草稿槽：关闭来源与完成栏据此提示「草稿未保存」。
+  // 编辑已有意见时只有改过才算草稿：打开编辑本身不会在关闭、返回时触发确认。
   $effect(() => {
     const anchor = draftAnchor;
     const body = draftBody;
+    const editing = draftEditingId;
+    const dirty = draftDirty;
     untrack(() => {
       const id = boundId;
       if (!id || workbenchId !== id) return;
-      if (anchor) setCommentDraft(id, { anchor, body, editingId: null });
+      if (anchor && (!editing || dirty)) setCommentDraft(id, { anchor, body, editingId: editing });
       else clearCommentDraft(id);
     });
   });
@@ -678,74 +697,228 @@
   }
 
   /*
-   * 行意见：只在这里保存「哪一行、写了什么」。意见不改 Git、不写索引，也不触发 Agent；
-   * 只有用户点「准备送回原任务」时外壳才会写交接文件。范围变化后外壳整体失效这批意见，
+   * 原位意见：只在这里保存「哪一行、写了什么」。意见不改 Git、不写索引，也不触发 Agent；
+   * 只有用户在完成栏点「送回」时外壳才会写交接文件。范围变化后外壳整体失效这批意见，
    * 这里不做任何行号重映射。
+   *
+   * 差异里同一时刻只展开一处意见行：锚点线程（点已有意见的标记）优先，其次是新意见草稿。
+   * 草稿（新增或编辑）只有一份，存在当前来源的草稿槽里：切换文件、视图与来源都不丢。
+   * 会把一份写了内容的草稿换掉的动作（在另一行新开草稿、编辑另一条）先确认。
    */
   let commentsOpen = $state(false);
   let draftAnchor = $state<ReviewCommentAnchor | null>(null);
   let draftBody = $state("");
-  let editingId = $state<string | null>(null);
-  let editBody = $state("");
+  /** 正在编辑的已有意见；为 null 时草稿是一条新意见。 */
+  let draftEditingId = $state<string | null>(null);
   let commentError = $state<string | null>(null);
+  /** 展开中的锚点线程。 */
+  let threadAnchor = $state<ReviewCommentAnchor | null>(null);
+  /** 上一次意见动作的结果（添加、保存、删除、取消）：就地给读屏与视觉一个反馈。 */
+  let commentFeedback = $state<string | null>(null);
+  /** 「在抽屉中定位」的目标卡片。 */
+  let drawerFocus = $state<string | null>(null);
+  /** 等待确认的「换掉草稿」动作。 */
+  let replacing = $state<{ message: string; run: () => void } | null>(null);
 
+  let commenting = $derived(Boolean(onAddComment || onEditComment || onDeleteComment));
+  let editingOriginal = $derived(draftEditingId ? (comments.find((comment) => comment.id === draftEditingId)?.body ?? null) : null);
+  /**
+   * 草稿里有会丢的内容：新意见写了正文，或编辑改过原文。编辑的那条暂时不在当前批次里
+   * （切回来源时还没读完，或已经失效）时按「有内容」处理，绝不静默丢掉。
+   */
+  let draftDirty = $derived(
+    draftAnchor !== null &&
+      (draftEditingId ? editingOriginal === null || draftBody !== editingOriginal : draftBody.trim() !== ""),
+  );
+  /** 编辑中的意见已不在当前批次：给出放弃入口，正文仍可在抽屉的失效分区复制。 */
+  let editOrphan = $derived(draftEditingId !== null && editingOriginal === null && Boolean(task) && !reading);
+  let threadComments = $derived(
+    threadAnchor ? comments.filter((comment) => anchorKey(comment.anchor) === anchorKey(threadAnchor!)) : [],
+  );
+  /** 差异里展开意见行的锚点：线程优先，其次是新意见草稿。 */
+  let inlineAnchor = $derived(threadAnchor ?? (draftAnchor && !draftEditingId ? draftAnchor : null));
+  let inlineTarget = $derived(
+    inlineAnchor
+      ? {
+          path: inlineAnchor.path,
+          hunkIndex: inlineAnchor.hunkIndex,
+          kind: inlineAnchor.kind,
+          oldNo: inlineAnchor.oldNo,
+          newNo: inlineAnchor.newNo,
+          block: Boolean(inlineAnchor.range),
+        }
+      : null,
+  );
 
-  function beginComment(anchor: ReviewCommentAnchor): void {
-    draftAnchor = anchor;
+  // 线程里的意见全被删掉（或整批失效）时收起线程；正在编辑时不收，等当前批次读到再说。
+  $effect(() => {
+    const empty = threadAnchor !== null && threadComments.length === 0 && draftEditingId === null;
+    untrack(() => {
+      if (empty) threadAnchor = null;
+    });
+  });
+
+  function resetDraft(): void {
+    draftAnchor = null;
     draftBody = "";
-    editingId = null;
+    draftEditingId = null;
     commentError = null;
+  }
+
+  /** 会换掉写了内容的草稿时先确认；取消则草稿原样保留。 */
+  function guardDraft(run: () => void): void {
+    if (!draftDirty) {
+      run();
+      return;
+    }
+    const where = draftAnchor ? `${draftAnchor.path}（${anchorLabel(draftAnchor)}）` : "另一处";
+    replacing = {
+      message: draftEditingId
+        ? `${where}的意见改了一半还没保存。继续会放弃这次修改，原意见不变。`
+        : `${where}有一条写了一半的意见草稿。继续会丢掉这条草稿。`,
+      run,
+    };
+  }
+
+  /** 差异里点行或块的意见标记：已有意见就打开线程，没有才开新草稿。 */
+  function beginComment(anchor: ReviewCommentAnchor): void {
+    const key = anchorKey(anchor);
+    if (comments.some((comment) => anchorKey(comment.anchor) === key)) {
+      openThread(anchor);
+      return;
+    }
+    startDraft(anchor);
+  }
+
+  function openThread(anchor: ReviewCommentAnchor): void {
+    commentError = null;
+    if (draftEditingId) {
+      // 另一条意见正在编辑：改过就先确认，没改过直接收起。
+      guardDraft(() => {
+        resetDraft();
+        threadAnchor = anchor;
+      });
+      return;
+    }
+    // 新意见草稿留在草稿槽里：线程只是暂时盖住它，不会丢。
+    threadAnchor = anchor;
+  }
+
+  /** 收起线程：正在编辑且改过时先确认；新意见草稿不受影响，会重新显示出来。 */
+  function closeThread(): void {
+    if (!draftEditingId) {
+      threadAnchor = null;
+      return;
+    }
+    guardDraft(() => {
+      resetDraft();
+      threadAnchor = null;
+    });
+  }
+
+  function startDraft(anchor: ReviewCommentAnchor): void {
+    const same =
+      draftAnchor !== null &&
+      !draftEditingId &&
+      anchorKey(draftAnchor) === anchorKey(anchor) &&
+      Boolean(draftAnchor.range) === Boolean(anchor.range);
+    if (same) {
+      // 同一处的草稿还在：直接回到它，正文不动。
+      threadAnchor = null;
+      return;
+    }
+    guardDraft(() => {
+      draftAnchor = anchor;
+      draftBody = "";
+      draftEditingId = null;
+      threadAnchor = null;
+      commentError = null;
+    });
+  }
+
+  function placeOf(anchor: ReviewCommentAnchor): string {
+    return `${anchor.path}（${anchorLabel(anchor)}）`;
+  }
+
+  /** 保存草稿：新增走 onAddComment，编辑走 onEditComment。上限与空正文由意见状态层统一校验，
+   *  失败消息就地显示在编辑器里，正文不清空。 */
+  function saveDraft(): void {
+    const anchor = draftAnchor;
+    if (!anchor) return;
+    const editing = draftEditingId;
+    try {
+      if (editing) {
+        if (!onEditComment) return;
+        onEditComment(editing, draftBody);
+      } else {
+        if (!onAddComment) return;
+        onAddComment(anchor, draftBody);
+      }
+    } catch (error) {
+      commentError = error instanceof Error ? error.message : "这条意见没有保存。";
+      return;
+    }
+    commentFeedback = editing ? `已保存对 ${placeOf(anchor)} 意见的修改。` : `已添加意见：${placeOf(anchor)}。只存在本窗口，没有发送。`;
+    resetDraft();
   }
 
   function cancelDraft(): void {
-    draftAnchor = null;
-    draftBody = "";
-  }
-
-  /** 新增一条意见：上限与空正文由意见状态层统一校验，失败消息原样给用户看。 */
-  function saveDraft(): void {
     const anchor = draftAnchor;
-    if (!anchor || !onAddComment) return;
-    try {
-      onAddComment(anchor, draftBody);
-    } catch (error) {
-      commentError = error instanceof Error ? error.message : "这条意见没有保存。";
-      return;
-    }
-    commentError = null;
-    cancelDraft();
+    const editing = draftEditingId;
+    const had = draftDirty;
+    resetDraft();
+    if (anchor) commentFeedback = editing ? "已取消编辑，原意见保持不变。" : had ? "已放弃这条意见草稿。" : "已取消。";
   }
 
   function beginEdit(comment: ReviewComment): void {
-    editingId = comment.id;
-    editBody = comment.body;
-    draftAnchor = null;
-    commentError = null;
+    if (draftEditingId === comment.id) return;
+    guardDraft(() => {
+      draftAnchor = comment.anchor;
+      draftBody = comment.body;
+      draftEditingId = comment.id;
+      threadAnchor = comment.anchor;
+      commentError = null;
+    });
   }
 
-  function saveEdit(): void {
-    const id = editingId;
-    if (!id || !onEditComment) return;
-    try {
-      onEditComment(id, editBody);
-    } catch (error) {
-      commentError = error instanceof Error ? error.message : "这条意见没有保存。";
-      return;
-    }
-    commentError = null;
-    editingId = null;
-    editBody = "";
+  function removeComment(comment: ReviewComment): void {
+    if (!onDeleteComment) return;
+    onDeleteComment(comment.id);
+    if (draftEditingId === comment.id) resetDraft();
+    commentFeedback = `已删除 ${placeOf(comment.anchor)} 的一条意见。`;
   }
 
-  function cancelEdit(): void {
-    editingId = null;
-    editBody = "";
-    commentError = null;
+  /** 线程里「在抽屉中定位」：打开抽屉并把这张卡片滚到可见、聚焦。 */
+  function locateInDrawer(comment: ReviewComment): void {
+    commentsOpen = true;
+    drawerFocus = null;
+    void Promise.resolve().then(() => (drawerFocus = comment.id));
   }
 
-  function removeComment(id: string): void {
-    onDeleteComment?.(id);
-    if (editingId === id) cancelEdit();
+  /** 抽屉卡片的「定位」：切到意见所在文件并在锚点处展开线程。 */
+  function locateInDiff(comment: ReviewComment): void {
+    const row = rowOf(comment.anchor.path);
+    if (row && selected?.path !== row.path) goToRow(row);
+    // 中、窄档抽屉覆盖在差异上：让出位置。
+    if (tier !== "wide") commentsOpen = false;
+    openThread(comment.anchor);
+  }
+
+  /** 草稿不在眼前（在别的文件，或被线程盖住）：给一条「继续编辑」的入口。 */
+  let draftAway = $derived.by(() => {
+    const anchor = draftAnchor;
+    if (!anchor || draftEditingId || draftBody.trim() === "") return null;
+    if (threadAnchor) return anchor;
+    const shown = multiActive || continuous ? stackRows.some((row) => row.path === anchor.path) : selected?.path === anchor.path;
+    return shown ? null : anchor;
+  });
+
+  function resumeDraft(): void {
+    const anchor = draftAnchor;
+    if (!anchor) return;
+    threadAnchor = null;
+    const row = rowOf(anchor.path);
+    if (row && selected?.path !== row.path) goToRow(row);
   }
 
   let fileMenu = $state<ContextMenuRequest | null>(null);
@@ -1297,53 +1470,22 @@
       {/if}
 
       {#if !block && commentNotice}<p class="task-comment-note review-comment-notice" role="status">{commentNotice}</p>{/if}
-
-      {#if !block && draftAnchor}
-        <form
-          class="task-comment-composer"
-          aria-label={draftAnchor.range ? "给这一块添加意见" : "给这一行添加意见"}
-          onsubmit={(event) => {
-            event.preventDefault();
-            saveDraft();
-          }}
-        >
-          <div class="task-comment-head">
-            <span class="task-comment-path">{draftAnchor.path}</span>
-            <span>{anchorLabel(draftAnchor)}</span>
-          </div>
-          {#if draftAnchor.quote}<p class="task-comment-quote">{draftAnchor.quote}</p>{/if}
-          <!-- svelte-ignore a11y_autofocus -->
-          <textarea
-            class="textarea"
-            rows={3}
-            autofocus
-            bind:value={draftBody}
-            aria-label="意见正文"
-            placeholder={draftAnchor.range ? "这一块要怎么改？说清楚就够了。" : "这一行要改成什么样？说清楚就够了。"}
-            onkeydown={(event) => {
-              if (event.isComposing) return;
-              if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-                event.preventDefault();
-                if (draftBody.trim() !== "") saveDraft();
-              } else if (event.key === "Escape") {
-                event.preventDefault();
-                event.stopPropagation();
-                cancelDraft();
-              }
-            }}
-          ></textarea>
-          <div class="task-comment-actions">
-            <button
-              type="submit"
-              class="btn btn-primary btn-sm"
-              disabled={draftBody.trim() === ""}
-              title={draftBody.trim() === "" ? "先写一句要怎么改" : "加到这批意见（Ctrl+Enter）"}
-            >添加意见</button>
-            <button type="button" class="btn btn-ghost btn-sm" onclick={cancelDraft}>取消</button>
-            <span class="task-comment-note">Ctrl+Enter 添加 · Esc 取消 · 只存在本窗口，不会自动发送</span>
-          </div>
-          {#if commentError}<p class="task-comment-note" role="alert">{commentError}</p>{/if}
-        </form>
+      {#if !block && commenting}
+        <p class="review-comment-feedback" role="status" aria-live="polite">{#if commentFeedback}<Icon name="check" size={12} /><span>{commentFeedback}</span>{/if}</p>
+      {/if}
+      {#if !block && draftAway}
+        <p class="review-draft-away" role="status">
+          <Icon name="pencil" size={13} />
+          <span class="truncate">1 条意见草稿未保存：{draftAway.path}（{anchorLabel(draftAway)}）</span>
+          <button type="button" class="btn btn-ghost btn-sm" title="回到草稿所在的位置继续写" onclick={resumeDraft}>继续编辑</button>
+        </p>
+      {/if}
+      {#if !block && editOrphan}
+        <p class="review-draft-away" role="alert">
+          <Icon name="alert" size={13} />
+          <span class="truncate">正在编辑的意见已不在当前批次（可能已失效），无法保存；原文可在意见抽屉的「已失效」分区复制。</span>
+          <button type="button" class="btn btn-ghost btn-sm" title="丢掉这次修改" onclick={() => { resetDraft(); threadAnchor = null; }}>放弃修改</button>
+        </p>
       {/if}
 
       <div class="review-body" data-drawer={!block && commentsOpen ? "open" : undefined}>
@@ -1420,6 +1562,8 @@
                 onDiscard={() => {}}
                 comments={commentKeys}
                 onCommentLine={beginComment}
+                inlineComment={inlineTarget}
+                inlinePanel={commentPanel}
                 onClear={() => {
                   if (multiActive) {
                     if (selected) select(selected);
@@ -1449,6 +1593,8 @@
                 onFullFile={onFullFile}
                 comments={commentKeys}
                 onCommentLine={beginComment}
+                inlineComment={inlineTarget}
+                inlinePanel={commentPanel}
                 asText={asTextFor !== null && asTextFor === selected?.path}
                 onViewAsText={(next) => {
                   asTextFor = next && selected ? selected.path : null;
@@ -1480,41 +1626,19 @@
         {/if}
       </div>
       {#if !block && commentsOpen}
-        <div class="task-comments-panel review-drawer" aria-label="意见列表">
-          {#if comments.length === 0}
-            <p class="task-comment-note">还没有意见。点块标题上的「评论此块」一次说一整块，或用行尾气泡说某一行。</p>
-          {:else}
-            {#each comments as comment (comment.id)}
-              <article class="task-comment" data-comment-id={comment.id}>
-                <div class="task-comment-head">
-                  <span class="task-comment-path">{comment.anchor.path}</span>
-                  <span>{anchorLabel(comment.anchor)}</span>
-                </div>
-                {#if comment.anchor.quote}<p class="task-comment-quote">{comment.anchor.quote}</p>{/if}
-                {#if editingId === comment.id}
-                  <textarea
-                    class="textarea"
-                    rows={3}
-                    bind:value={editBody}
-                    aria-label={comment.anchor.path + " 的意见正文"}
-                  ></textarea>
-                  <div class="task-comment-actions">
-                    <button type="button" class="btn btn-primary btn-sm" onclick={saveEdit}>保存意见</button>
-                    <button type="button" class="btn btn-ghost btn-sm" onclick={cancelEdit}>取消</button>
-                  </div>
-                {:else}
-                  <p class="task-comment-body">{comment.body}</p>
-                  <div class="task-comment-actions">
-                    <button type="button" class="btn btn-ghost btn-sm" onclick={() => beginEdit(comment)}>编辑</button>
-                    <button type="button" class="btn btn-ghost btn-sm" onclick={() => removeComment(comment.id)}>删除</button>
-                  </div>
-                {/if}
-              </article>
-            {/each}
-            <pre class="task-comment-preview" aria-label="整批意见预览">{previewComments(comments)}</pre>
-          {/if}
-          {#if commentError && !draftAnchor}<p class="task-comment-note" role="alert">{commentError}</p>{/if}
-        </div>
+        <ReviewCommentsDrawer
+          {comments}
+          stale={staleComments}
+          focusId={drawerFocus}
+          onLocate={locateInDiff}
+          onEdit={onEditComment ? (id, body) => {
+            onEditComment?.(id, body);
+            const target = comments.find((comment) => comment.id === id);
+            commentFeedback = target ? `已保存对 ${placeOf(target.anchor)} 意见的修改。` : "已保存修改。";
+          } : undefined}
+          onDelete={onDeleteComment ? removeComment : undefined}
+          onCopy={onCopyText}
+        />
       {/if}
 
       </div>
@@ -1522,6 +1646,65 @@
     </div>
   </div>
 </div>
+
+{#snippet commentPanel()}
+  {#if threadAnchor}
+    <InlineCommentThread
+      anchor={threadAnchor}
+      comments={threadComments}
+      editingId={draftEditingId}
+      editBody={draftBody}
+      editDirty={draftDirty}
+      editError={commentError}
+      onBeginEdit={beginEdit}
+      onEditInput={(value) => {
+        draftBody = value;
+        commentError = null;
+      }}
+      onSaveEdit={saveDraft}
+      onCancelEdit={cancelDraft}
+      onDelete={removeComment}
+      onAddAnother={() => threadAnchor && startDraft(threadAnchor)}
+      onLocate={locateInDrawer}
+      onClose={closeThread}
+    />
+  {:else if draftAnchor && !draftEditingId}
+    <InlineCommentEditor
+      anchor={draftAnchor}
+      body={draftBody}
+      dirty={draftDirty}
+      error={commentError}
+      onInput={(value) => {
+        draftBody = value;
+        commentError = null;
+      }}
+      onSave={saveDraft}
+      onCancel={cancelDraft}
+    />
+  {/if}
+{/snippet}
+
+{#if replacing}
+  {@const pending = replacing}
+  <ConfirmDialog
+    title="放弃未保存的意见草稿？"
+    titleId="review-draft-replace-title"
+    icon="alert"
+    tone="warning"
+    message={pending.message}
+    notes={[{ tone: "info", text: "取消则草稿原样保留，可以先保存再继续。" }]}
+    confirmLabel="放弃草稿并继续"
+    cancelLabel="继续编辑草稿"
+    focus="cancel"
+    onConfirm={() => {
+      const run = pending.run;
+      replacing = null;
+      resetDraft();
+      run();
+    }}
+    onCancel={() => (replacing = null)}
+  />
+{/if}
 
 {#if fileMenu}
   <ContextMenu request={fileMenu} onClose={() => (fileMenu = null)} />

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, tick, untrack } from "svelte";
+  import { onDestroy, tick, untrack, type Snippet } from "svelte";
   import { createQuietActivity } from "../quiet-activity";
   import { MODIFIER_LABEL } from "../brand";
   import { HUNK_LAST, analyzeDiffSpecials, changeRunIndexes, filterDiffHunks, hunkCaption, hunkJump, hunkRowIndexes, lineSelectionScope, splitColumnsFit, toSideRows, visibleDiffLines, type HunkNavReport, type ViewLine, type WhitespaceFilter } from "../diff";
@@ -118,6 +118,19 @@
       range?: { from: number; to: number };
     }) => void;
     /**
+     * 原位意见行的位置：行意见在锚点行之后，整块意见在块标题之后。只有路径与当前文件相同、
+     * 且锚点行已经读到时才插入；统一视图跨整行，并排视图跨两栏。内容由 inlinePanel 提供。
+     */
+    inlineComment?: {
+      path: string;
+      hunkIndex: number;
+      kind: "add" | "del" | "context";
+      oldNo: number | null;
+      newNo: number | null;
+      block: boolean;
+    } | null;
+    inlinePanel?: Snippet;
+    /**
      * 在文件视图里编辑当前工作区这一侧的文件（带上当前位置附近的新侧行号）。
      * 只在新侧就是工作区文件时由调用方传入；历史、旧侧、删除与多文件聚合不传。
      * 差异本身仍然只读，保存只在文件视图的编辑器里发生。
@@ -169,6 +182,8 @@
     onEdit,
     comments,
     onCommentLine,
+    inlineComment = null,
+    inlinePanel,
   }: Props = $props();
   let menu = $state<ContextMenuRequest | null>(null);
   /**
@@ -261,6 +276,49 @@
   let metaOnly = $derived(shown.lines.length === 0 && shown.meta.length > 0);
   let sideRows = $derived(renderMode === "split" ? toSideRows(lines) : []);
   let total = $derived(renderMode === "split" ? sideRows.length : lines.length);
+  /**
+   * 原位意见行：插在第 inlineIndex 行（当前布局的行号）之后，其后的行整体下移 inlineGap。
+   * 虚拟窗口仍按固定行高计算：滚动位置先扣掉意见行的高度再换算成行号。
+   * 高度按实测取值，测不到（刚挂载或测试环境）时按估计值占位。
+   */
+  const INLINE_ESTIMATE = 200;
+  let inlineHeight = $state(0);
+  let inlineIndex = $derived.by<number | null>(() => {
+    const target = inlineComment;
+    if (!target || !inlinePanel || !selection || target.path !== selection.path) return null;
+    const key = commentLineKey(target.path, target);
+    const matches = (line: ViewLine | null | undefined): boolean =>
+      Boolean(line && line.hunkIndex !== null && commentLineKey(target.path, line) === key);
+    const isHeader = (index: number | undefined): boolean =>
+      index !== undefined && lines[index]?.kind === "hunk" && headerHunk(index) === target.hunkIndex;
+    if (renderMode === "split") {
+      if (target.block) {
+        const at = sideRows.findIndex((row) => row.span && isHeader(row.left?.index));
+        if (at >= 0) return at;
+      }
+      const at = sideRows.findIndex((row) => !row.span && (matches(pickLineOf(row.left)) || matches(pickLineOf(row.right))));
+      return at >= 0 ? at : null;
+    }
+    if (target.block) {
+      const at = lines.findIndex((_line, index) => isHeader(index));
+      if (at >= 0) return at;
+    }
+    const at = lines.findIndex((line) => matches(line));
+    return at >= 0 ? at : null;
+  });
+  let inlineGap = $derived(inlineIndex === null ? 0 : inlineHeight > 0 ? inlineHeight : INLINE_ESTIMATE);
+
+  /** 第 index 行的纵向位置：意见行之后的行让出它的高度。 */
+  function rowTop(index: number): number {
+    return index * ROW_HEIGHT + (inlineIndex !== null && index > inlineIndex ? inlineGap : 0);
+  }
+
+  /** 滚动位置换算回「只有代码行」的坐标，虚拟窗口据此取行。 */
+  function rowSpace(y: number): number {
+    if (inlineIndex === null) return y;
+    const edge = (inlineIndex + 1) * ROW_HEIGHT;
+    return y <= edge ? y : Math.max(edge, y - inlineGap);
+  }
   /* 宽度取全量差异的最长行，只随内容变化，不随虚拟窗口或布局切换跳动。 */
   let codeTexts = $derived(lines.filter((line) => line.kind !== "hunk").map((line) => codeOf(line)));
   let ruler = $derived(codeRuler(codeTexts));
@@ -313,9 +371,25 @@
   let overflow = $state({ left: false, right: false });
   let range = $derived(
     embedded
-      ? visibleRange(total, hostTop, hostHeight, ROW_HEIGHT)
-      : visibleRange(total, scrollTop, viewport > 0 ? viewport : scrollTop > 0 ? ROW_HEIGHT : 0, ROW_HEIGHT),
+      ? visibleRange(total, rowSpace(hostTop), hostHeight, ROW_HEIGHT)
+      : visibleRange(total, rowSpace(scrollTop), viewport > 0 ? viewport : scrollTop > 0 ? ROW_HEIGHT : 0, ROW_HEIGHT),
   );
+
+  /* 意见行刚出现（或换了位置）时，若锚点行与编辑器不同屏，把锚点行滚到视口上部三分之一处。 */
+  let inlineSeen = "";
+  $effect(() => {
+    const at = inlineIndex;
+    const path = selection?.path ?? "";
+    untrack(() => {
+      const key = at === null ? "" : `${path}:${renderMode}:${at}`;
+      if (key === inlineSeen) return;
+      inlineSeen = key;
+      if (at === null || embedded || viewport <= 0) return;
+      const top = rowTop(at);
+      if (top >= scrollTop && top + ROW_HEIGHT + inlineGap <= scrollTop + viewport) return;
+      applyScroll(Math.max(0, top - Math.floor(viewport / 3)));
+    });
+  });
   let hunksByStart = $derived(new Map(currentDiff?.hunks.map((hunk) => [hunk.startLine, hunk])));
   function hunkForLine(index: number) {
     const origin = view.origin[index];
@@ -1350,8 +1424,8 @@
       }
       return;
     }
-    const max = viewport > 0 ? Math.max(0, total * ROW_HEIGHT - viewport) : Number.POSITIVE_INFINITY;
-    applyScroll(Math.min(row * ROW_HEIGHT, max));
+    const max = viewport > 0 ? Math.max(0, total * ROW_HEIGHT + inlineGap - viewport) : Number.POSITIVE_INFINITY;
+    applyScroll(Math.min(rowTop(row), max));
   }
 
   /** 续读到了新的行（或读取结束）后，接着完成那一次「下一处」；仍没有就再读下一页。 */
@@ -1881,7 +1955,7 @@
       onscroll={(event) => (scrollTop = event.currentTarget.scrollTop)}
       bind:clientHeight={viewport}
     >
-      <div class="virtual-space" style={`height:${total * ROW_HEIGHT}px`}>
+      <div class="virtual-space" style={`height:${total * ROW_HEIGHT + inlineGap}px`}>
         {#if !split}
           <div class="code-ruler" aria-hidden="true">{#each ruler as line, i (i)}<span data-text={line.text} style={rulerPadding(line)}></span>{/each}</div>
         {/if}
@@ -1895,7 +1969,7 @@
               class:picked={canPick(line) && isPicked(line)}
               data-diff-row=""
               data-line={absolute}
-              style={`top:${absolute * ROW_HEIGHT}px;height:${ROW_HEIGHT}px`}
+              style={`top:${rowTop(absolute)}px;height:${ROW_HEIGHT}px`}
               title={canPick(line) ? pickLabel(line) : undefined}
             >
               <span class="ln">{line.oldNo ?? ""}</span>
@@ -1974,7 +2048,7 @@
               class:span={row.span}
               data-diff-row=""
               data-line={row.right?.index ?? row.left?.index ?? undefined}
-              style={`top:${absolute * ROW_HEIGHT}px;height:${ROW_HEIGHT}px`}
+              style={`top:${rowTop(absolute)}px;height:${ROW_HEIGHT}px`}
             >
               <!-- 占位格用 blank 而不是 empty：.empty 是全局空状态（flex + 32px 内边距），会把单元格撑到 64px，相邻行文字叠在一起。 -->
               {#if row.span && row.left?.kind === "hunk"}
@@ -2088,6 +2162,23 @@
               {/if}
             </div>
           {/each}
+        {/if}
+        {#if inlineIndex !== null && inlinePanel}
+          <!-- 原位意见行：紧跟锚点行（或块标题）之后，统一视图跨整行、并排视图跨两栏。
+               它不是差异文本：键盘、点击与右键都不冒泡到差异滚动区的快捷键与行选。 -->
+          <div
+            class="diff-inline-comment"
+            class:split
+            data-inline-after={inlineIndex}
+            style={`top:${(inlineIndex + 1) * ROW_HEIGHT}px`}
+            role="presentation"
+            bind:offsetHeight={inlineHeight}
+            onkeydown={(event) => event.stopPropagation()}
+            onclick={(event) => event.stopPropagation()}
+            oncontextmenu={(event) => event.stopPropagation()}
+          >
+            {@render inlinePanel()}
+          </div>
         {/if}
         </div>
       </div>

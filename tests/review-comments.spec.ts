@@ -13,6 +13,8 @@ import {
   anchorKey,
   anchorLabel,
   clearCommentDraft,
+  commentBodyBytes,
+  commentCopyText,
   commentDraft,
   commentDraftCount,
   commentsSignature,
@@ -30,6 +32,7 @@ import {
   recordPreparedComments,
   snapshotPreparedComments,
   resetReviewComments,
+  sentCommentBody,
   setCommentDraft,
   staleBatches,
   unsentCommentCount,
@@ -344,5 +347,25 @@ describe("最近成功准备的签名与未送回意见", () => {
     recordPreparedComments(current, snapshotPreparedComments(current));
     forgetComments(REVIEW);
     expect(preparedSignature(REVIEW)).toBeNull();
+  });
+});
+
+describe("逐卡预览与复制（抽屉用）", () => {
+  it("逐卡「预览送回内容」与 feedback-v1 的 body 完全一致；整块意见带区间前缀", () => {
+    const current = scope();
+    adoptCommentScope(current);
+    const line = addComment(current, anchor(), "单行意见");
+    const block = addComment(current, { ...anchor(), range: { from: 3, to: 6 } }, "整块意见");
+    const sent = feedbackComments(current);
+    expect(sentCommentBody(line)).toBe(sent[0].body);
+    expect(sentCommentBody(block)).toBe(sent[1].body);
+    expect(sentCommentBody(block).startsWith("（第 3–6 行这一块）")).toBe(true);
+  });
+
+  it("复制文字含路径、行号与原正文；字节数按 trim 后的 UTF-8 计算，与保存校验同口径", () => {
+    const comment = { anchor: anchor(), body: "原正文" };
+    expect(commentCopyText(comment)).toBe(comment.anchor.path + "（" + anchorLabel(comment.anchor) + "）\n原正文");
+    expect(commentBodyBytes("  意见  ")).toBe(6);
+    expect(commentBodyBytes("a".repeat(MAX_BODY_BYTES + 1))).toBeGreaterThan(MAX_BODY_BYTES);
   });
 });

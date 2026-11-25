@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, tick, untrack } from "svelte";
+  import { onDestroy, tick, untrack, type Snippet } from "svelte";
   import { api } from "../api";
   import { normalizeError } from "../errors";
   import { reuseDiffContent } from "../diff";
@@ -79,6 +79,19 @@
       quote: string;
       range?: { from: number; to: number };
     }) => void;
+    /**
+     * 原位意见行：只有路径匹配的那个文件块在锚点行（或块标题）后展开，其他块不受影响。
+     * 块高度由 ResizeObserver 实测写回，展开后下方的文件块自然下移。
+     */
+    inlineComment?: {
+      path: string;
+      hunkIndex: number;
+      kind: "add" | "del" | "context";
+      oldNo: number | null;
+      newNo: number | null;
+      block: boolean;
+    } | null;
+    inlinePanel?: Snippet;
   }
 
   /** 同时在途的差异读取数：选 100 个文件也不会一次把读取通道占满。 */
@@ -127,6 +140,8 @@
     onUnstageFiles,
     comments,
     onCommentLine,
+    inlineComment = null,
+    inlinePanel,
   }: Props = $props();
 
   let scroller = $state<HTMLDivElement | null>(null);
@@ -562,6 +577,8 @@
                 onFileHistory={onFileHistory}
                 {comments}
                 {onCommentLine}
+                inlineComment={inlineComment?.path === row.path ? inlineComment : null}
+                inlinePanel={inlineComment?.path === row.path ? inlinePanel : undefined}
               />
             </div>
           {/if}

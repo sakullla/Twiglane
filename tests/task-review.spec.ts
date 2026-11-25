@@ -998,7 +998,7 @@ describe("任务审阅的行意见（feedback-v1 准备侧）", () => {
     await waitFor(() => expect(screen.queryByRole("form", { name: "给这一块添加意见" })).toBeNull());
   });
 
-  it("已存意见可查看、编辑、删除，并给出整批预览", async () => {
+  it("已存意见按文件分组成卡片，可查看、编辑、删除，逐卡预览送回内容（没有整批 <pre>）", async () => {
     const onEditComment = vi.fn();
     const onDeleteComment = vi.fn();
     const stored = comment();
@@ -1013,8 +1013,14 @@ describe("任务审阅的行意见（feedback-v1 准备侧）", () => {
     await screen.findByRole("listbox", { name: "任务文件" });
     await fireEvent.click(await screen.findByRole("button", { name: "查看意见列表" }));
     const panel = await screen.findByLabelText("意见列表");
-    expect(within(panel).getByText("这里要保留上一份结果，不要显示零改动。")).toBeTruthy();
-    expect(within(panel).getByLabelText("整批意见预览").textContent).toContain("src/app.ts（新增第 3 行）");
+    const group = within(panel).getByRole("region", { name: "src/app.ts 的意见" });
+    const card = group.querySelector<HTMLElement>(`[data-comment-id="${stored.id}"]`)!;
+    expect(card.querySelector(".task-comment-body")?.textContent).toBe("这里要保留上一份结果，不要显示零改动。");
+    expect(card.textContent).toContain("新增第 3 行");
+    // 整批 <pre> 预览已删除；送回内容改为逐卡折叠预览，与 feedback-v1 的 body 一致。
+    expect(panel.querySelector("pre")).toBeNull();
+    expect(within(panel).queryByLabelText("整批意见预览")).toBeNull();
+    expect(card.querySelector("details.review-comment-sent summary")?.textContent).toBe("预览送回内容");
 
     await fireEvent.click(within(panel).getByRole("button", { name: "编辑" }));
     const editor = within(panel).getByRole("textbox", { name: "src/app.ts 的意见正文" });

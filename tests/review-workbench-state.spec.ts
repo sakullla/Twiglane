@@ -4,7 +4,18 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { beginClioraReview, resetClioraReview } from "../src/lib/cliora-review.svelte";
-import { commentDraft, resetReviewComments, setCommentDraft } from "../src/lib/review-comments.svelte";
+import {
+  addComment,
+  adoptCommentScope,
+  commentDraft,
+  commentsIn,
+  editComment,
+  resetReviewComments,
+  setCommentDraft,
+  unsentComments,
+  type CommentScope,
+} from "../src/lib/review-comments.svelte";
+import { api } from "../src/lib/api";
 import { createReviewActions, type ReviewActionsHost } from "../src/lib/review-actions.svelte";
 import {
   defaultWorkbenchState,
@@ -16,7 +27,10 @@ import {
 } from "../src/lib/review-workbench.svelte";
 
 vi.mock("../src/lib/api", () => ({
-  api: { clioraReviewForget: vi.fn(async () => undefined) },
+  api: {
+    clioraReviewForget: vi.fn(async () => undefined),
+    prepareReviewFeedback: vi.fn(),
+  },
 }));
 
 const A = "6f1a2b3c-4d5e-4f60-8172-93a4b5c6d7e8";
@@ -121,12 +135,12 @@ describe("review-workbench state", () => {
 });
 
 describe("关闭来源时清理工作台状态", () => {
-  function host(): ReviewActionsHost {
+  function host(commentScope: CommentScope | null = null): ReviewActionsHost {
     return {
       opened: () => null,
       taskScope: () => null,
       taskTarget: () => null,
-      commentScope: () => null,
+      commentScope: () => commentScope,
       commentScopeOutdated: () => false,
       nextId: () => 1,
       notice: vi.fn(),
@@ -166,5 +180,78 @@ describe("关闭来源时清理工作台状态", () => {
     await actions.closeAllClioraReviews();
     expect(hasWorkbenchState(A)).toBe(false);
     expect(hasWorkbenchState(B)).toBe(false);
+  });
+});
+
+describe("准备送回期间的意见变化", () => {
+  function host(commentScope: CommentScope): ReviewActionsHost {
+    return {
+      opened: () => null,
+      taskScope: () => null,
+      taskTarget: () => null,
+      commentScope: () => commentScope,
+      commentScopeOutdated: () => false,
+      nextId: () => 1,
+      notice: vi.fn(),
+      showError: vi.fn(),
+      setReviewNote: vi.fn(),
+      setTaskReviewNote: vi.fn(),
+      confirmEditorLeave: async () => true,
+      refresh: async () => true,
+      switchBlocked: () => false,
+      openRecent: async () => undefined,
+      openTaskReview: vi.fn(),
+      closeTask: vi.fn(),
+      closeReviewManager: vi.fn(),
+      clearSourcesNotice: vi.fn(),
+    };
+  }
+
+  const anchor = (newNo: number) => ({ path: "a.ts", hunkIndex: 0, kind: "add" as const, oldNo: null, newNo, quote: "x" });
+
+  it("等待原生准备期间新增或改过的意见不会被记成已送回", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1_000);
+      beginClioraReview({ reviewId: A, sessionId: "s-a", worktreePath: "/work/a", baseline: "a".repeat(40) });
+      const scope: CommentScope = {
+        reviewId: A,
+        sessionId: "s-a",
+        worktree: "/work/a",
+        baselineOid: "a".repeat(40),
+        headOid: "c".repeat(40),
+        rangeVersion: "range-1",
+        generation: 1,
+      };
+      adoptCommentScope(scope);
+      const first = addComment(scope, anchor(1), "第一条");
+      const second = addComment(scope, anchor(2), "第二条");
+
+      let resolve!: (value: { feedbackId: string; commentCount: number }) => void;
+      const pending = new Promise<{ feedbackId: string; commentCount: number }>((r) => { resolve = r; });
+      const prepare = vi.mocked(api.prepareReviewFeedback);
+      prepare.mockReset();
+      prepare.mockReturnValue(pending as never);
+
+      const actions = createReviewActions(host(scope));
+      const running = actions.prepareFeedback();
+      expect(prepare).toHaveBeenCalledTimes(1);
+      expect(prepare.mock.calls[0][0].comments).toHaveLength(2);
+
+      // 准备尚未返回：用户继续新增一条、改动一条。
+      vi.setSystemTime(2_000);
+      const third = addComment(scope, anchor(3), "第三条（准备期间新增）");
+      editComment(scope, second.id, "第二条（准备期间改过）");
+
+      resolve({ feedbackId: "f".repeat(32), commentCount: 2 });
+      await running;
+
+      expect(commentsIn(scope)).toHaveLength(3);
+      // 只有真正送出且之后没改过的第一条算已送回。
+      expect(unsentComments(scope).map((comment) => comment.id).sort()).toEqual([second.id, third.id].sort());
+      expect(unsentComments(scope).some((comment) => comment.id === first.id)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

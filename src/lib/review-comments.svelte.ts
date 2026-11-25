@@ -350,11 +350,19 @@ export function commentsSignature(scope: CommentScope): string {
   return [commentScopeKey(scope), ...commentsIn(scope).map(signatureEntry).sort()].join("\n");
 }
 
-/** 准备送回成功后调用：记录这一刻当前批次的签名。 */
-export function recordPreparedComments(scope: CommentScope): void {
+/** 准备送回之前调用：取下真正要送出的那批意见的签名（id@updatedAt）。 */
+export function snapshotPreparedComments(scope: CommentScope): string[] {
+  return commentsIn(scope).map(signatureEntry);
+}
+
+/**
+ * 准备送回成功后调用：记录真正送出那一批的签名。必须传入发起请求前取的快照——
+ * 等待期间新增或改过的意见没有送出，不能被记成已送回。
+ */
+export function recordPreparedComments(scope: CommentScope, entries: readonly string[]): void {
   store.prepared = {
     ...store.prepared,
-    [scope.reviewId]: { scopeKey: commentScopeKey(scope), entries: commentsIn(scope).map(signatureEntry) },
+    [scope.reviewId]: { scopeKey: commentScopeKey(scope), entries: [...entries] },
   };
 }
 

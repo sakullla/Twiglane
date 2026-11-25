@@ -725,8 +725,6 @@
   let reviewBusy = $state<string | null>(null);
   let reviewNote = $state<string | null>(null);
   let taskReviewNote = $state<string | null>(null);
-  let reviewSerial = 0;
-  let taskReviewSerial = 0;
   /** 任务页报告的已解析范围：只有后端校验过的起点与 HEAD 才能作为任务快照 token 的依据。 */
   let taskScope = $state.raw<TaskScopeSnapshot | null>(null);
   /**

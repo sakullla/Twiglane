@@ -28,6 +28,7 @@ import {
   previewComments,
   previewText,
   recordPreparedComments,
+  snapshotPreparedComments,
   resetReviewComments,
   setCommentDraft,
   staleBatches,
@@ -304,7 +305,7 @@ describe("最近成功准备的签名与未送回意见", () => {
       expect(unsentCommentCount(current)).toBe(2);
       expect(unsentCommentCount(null)).toBe(0);
 
-      recordPreparedComments(current);
+      recordPreparedComments(current, snapshotPreparedComments(current));
       expect(preparedSignature(REVIEW)).toBe(commentsSignature(current));
       expect(unsentComments(current)).toEqual([]);
 
@@ -325,7 +326,7 @@ describe("最近成功准备的签名与未送回意见", () => {
     const current = scope();
     adoptCommentScope(current);
     addComment(current, anchor(), "第一条");
-    recordPreparedComments(current);
+    recordPreparedComments(current, snapshotPreparedComments(current));
     expect(unsentCommentCount(current)).toBe(0);
 
     const next = scope({ generation: 5 });
@@ -340,7 +341,7 @@ describe("最近成功准备的签名与未送回意见", () => {
   it("关闭来源时清掉签名", () => {
     const current = scope();
     addComment(current, anchor(), "第一条");
-    recordPreparedComments(current);
+    recordPreparedComments(current, snapshotPreparedComments(current));
     forgetComments(REVIEW);
     expect(preparedSignature(REVIEW)).toBeNull();
   });

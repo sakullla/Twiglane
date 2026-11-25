@@ -27,6 +27,7 @@ import {
   feedbackComments,
   forgetComments,
   recordPreparedComments,
+  snapshotPreparedComments,
   staleBatches,
   type CommentScope,
   type ReviewCommentAnchor,
@@ -235,6 +236,8 @@ export class ReviewActions {
       return;
     }
     const comments = feedbackComments(scope);
+    // 与送出内容同一时刻取签名：等待原生准备期间新增或改过的意见不算已送回。
+    const sentSignature = snapshotPreparedComments(scope);
     if (comments.length === 0) {
       // 失效的批次不会回到当前范围里：这里要如实说「已经失效」，不能让用户以为只是没写。
       const invalidated = staleBatches(source.reviewId).length > 0;
@@ -267,7 +270,7 @@ export class ReviewActions {
         comments,
       });
       // 记下这次成功准备的意见签名：之后新增或改过的意见才算「未送回」。
-      recordPreparedComments(scope);
+      recordPreparedComments(scope, sentSignature);
       this.feedbackNotice = "已准备 " + prepared.commentCount + " 条意见（批次 " + prepared.feedbackId.slice(0, 8) + "）。到 Cliora 里确认预览后再发送，这里没有发送任何内容。";
       host.notice(this.feedbackNotice);
     } catch (error) {

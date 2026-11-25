@@ -42,7 +42,6 @@
     OpenedRepository,
     PreviewSources,
     StatusSnapshot,
-    TaskSummary,
   } from "../types";
   import { FULL_FILE_CONTEXT, type HunkNavReport } from "../diff";
   import { createQuietActivity } from "../quiet-activity";
@@ -108,16 +107,12 @@
     /** 从提交差异进入只读文档阅读；不传时不显示入口。 */
     onReadDocument?: (sources: PreviewSources, side: "old" | "new", trigger: HTMLElement | null) => void;
     /**
-     * cliora 审查带来的任务范围：历史按「起点..HEAD」过滤，列表顶部多一行「任务净差异」。
-     * nonce 每次跳转递增：同一个起点再跳一次也回到任务净差异。
+     * 审查工作台「范围内提交」的落点：历史按「起点..HEAD」过滤。任务净差异本身在审查视图里，
+     * 历史不再出现任务行。nonce 每次跳转递增：同一个起点再跳一次也重新应用范围。
      */
     taskRange?: { baseline: string; nonce: number } | null;
-    /** 顶部那一行的摘要（含已审阅数），由外壳从任务净差异组件汇总。 */
-    taskSummary?: (TaskSummary & { reviewed: number }) | null;
-    /** 任务净差异的详情：选中顶部那一行时显示，选中提交时隐藏但保活。 */
-    taskDetail?: Snippet<[boolean]>;
-    /** 任务净差异是否正在详情区显示：外壳据此把审阅、暂存等命令作用到任务范围。 */
-    onTaskFocus?: (focused: boolean) => void;
+    /** 范围生效时显示「回到审查」：回到审查工作台，来源与阅读位置不变。 */
+    onReturnToReview?: () => void;
   }
 
   const pageReads = new LatestReadQueue();
@@ -204,9 +199,7 @@
     onFullFile,
     onReadDocument,
     taskRange = null,
-    taskSummary = null,
-    taskDetail,
-    onTaskFocus,
+    onReturnToReview,
   }: Props = $props();
 
   let historyNow = $state(Date.now());
@@ -760,25 +753,17 @@
     { value: "unpushed", label: "未推送的提交", icon: "upload" as const },
     { value: "all", label: "全部分支", icon: "layers" as const },
   ]);
-  /** 顶部「任务净差异」行只在任务范围生效、且不是单文件历史时出现。 */
-  let taskRowShown = $derived(Boolean(rangeScope && activeScope === rangeScope && !filePath && taskDetail));
-  /** 任务净差异是否占着详情区：选中了顶部那一行，而不是某个提交。 */
-  let taskFocused = $state(false);
-  let taskShown = $derived(taskRowShown && taskFocused);
-  $effect(() => {
-    const shown = active && taskShown;
-    untrack(() => onTaskFocus?.(shown));
-  });
-  onDestroy(() => onTaskFocus?.(false));
+  /** 任务范围正在生效：显示「回到审查」。 */
+  let rangeActive = $derived(Boolean(rangeScope && activeScope === rangeScope));
 
-  let reportedNav = $derived(taskShown ? null : selectedOids.length > 1 ? unionNav : fileNav);
+  let reportedNav = $derived(selectedOids.length > 1 ? unionNav : fileNav);
 
   $effect(() => {
     onFileNav?.(reportedNav);
     return () => onFileNav?.(null);
   });
 
-  /** 每次 cliora 跳转（nonce 变化）：清掉其它筛选，切到任务范围并选中「任务净差异」。 */
+  /** 每次从审查工作台跳来（nonce 变化）：清掉其它筛选，切到任务范围。 */
   let seenTaskNonce = 0;
   $effect(() => {
     const range = taskRange;
@@ -787,7 +772,6 @@
       syncReading(repo);
       if (!range) {
         seenTaskNonce = 0;
-        taskFocused = false;
         if (activeScope.startsWith(HISTORY_RANGE_PREFIX)) {
           scope = "current";
           activeScope = "current";
@@ -808,19 +792,8 @@
       activeUntil = "";
       scope = `${HISTORY_RANGE_PREFIX}${range.baseline}`;
       activeScope = scope;
-      focusTask();
     });
   });
-
-  /** 选中顶部「任务净差异」：提交选择清空，详情区交给任务净差异。 */
-  function focusTask() {
-    taskFocused = true;
-    selectedOids = [];
-    anchorOid = null;
-    parentChoice = null;
-    manualPath = null;
-    multiFocus = null;
-  }
   /** 历史范围下拉框的分支行：后端只给本地分支名，这里补成分支记录。 */
   let scopeBranches = $derived(
     scopeNames.map((name): BranchRecord => ({ name, remote: false, current: name === page?.head, upstream: null, worktree: null })),
@@ -832,9 +805,9 @@
     const shownAt = historyNow;
     let next = Infinity;
     for (const row of visible) next = Math.min(next, nextRelativeTimeChange(row.authoredAt, shownAt));
-    if (!taskShown && selectedOids.length > 1) {
+    if (selectedOids.length > 1) {
       for (const row of selectedCommits) next = Math.min(next, nextRelativeTimeChange(row.authoredAt, shownAt));
-    } else if (!taskShown && detail) {
+    } else if (detail) {
       next = Math.min(next, nextRelativeTimeChange(detail.commit.authoredAt, shownAt));
     }
     const now = Date.now();
@@ -943,7 +916,7 @@
     commits: HistoryCommit[]; selectedOids: string[]; anchorOid: string | null; parentChoice: string | null;
     manualPath: string | null; multiFocus: string | null; scrollTop: number; fileScroll: number;
     viewMode: "single" | "multi"; fileFilter: string; lastReadSignature: string | null; lastSearchSeed: string;
-    page: typeof page; taskFocused: boolean; seenTaskNonce: number;
+    page: typeof page; seenTaskNonce: number;
   }
   const readings = new Map<string, HistoryReading>();
   let loadedRepo: string | null = null;
@@ -954,7 +927,7 @@
       query, author, pathFilter, sinceDay, untilDay, scope,
       activeQuery, activeAuthor, activePath, activeSince, activeUntil, activeScope,
       commits, selectedOids, anchorOid, parentChoice, manualPath, multiFocus,
-      scrollTop, fileScroll, viewMode, fileFilter, lastReadSignature, lastSearchSeed, page, taskFocused, seenTaskNonce,
+      scrollTop, fileScroll, viewMode, fileFilter, lastReadSignature, lastSearchSeed, page, seenTaskNonce,
     });
     loadedRepo = repo;
     const saved = readings.get(repo);
@@ -970,7 +943,6 @@
     restoreCount = saved?.commits.length ?? 0;
     detail = null; detailError = null; commitDiff = null; diffError = null;
     multiFiles = []; multiDiff = null; multiError = null; multiDiffError = null;
-    taskFocused = saved?.taskFocused ?? false;
     seenTaskNonce = saved?.seenTaskNonce ?? 0;
     loadSerial += 1;
     if (list) list.scrollTop = scrollTop;
@@ -1069,11 +1041,7 @@
         const ids = new Set(result.commits.map((commit) => commit.oid));
         const previous = selectedOids;
         const kept = previous.filter((oid) => ids.has(oid));
-        if (kept.length === 0 && untrack(() => taskFocused && taskRowShown)) {
-          // 任务净差异占着详情区：列表换页或刷新不把选择抢回到第一个提交。
-          selectedOids = [];
-          anchorOid = null;
-        } else if (kept.length === 0) {
+        if (kept.length === 0) {
           selectedOids = result.commits[0] ? [result.commits[0].oid] : [];
           anchorOid = selectedOids[0] ?? null;
           parentChoice = null;
@@ -1475,7 +1443,6 @@
   }
 
   function singleSelect(oid: string) {
-    taskFocused = false;
     if (selectedOids.length === 1 && selectedOids[0] === oid) {
       anchorOid = oid;
       return;
@@ -1490,7 +1457,6 @@
   }
 
   function clickCommit(event: MouseEvent, oid: string) {
-    taskFocused = false;
     if (event.shiftKey) {
       selectedOids = commitSelectionRange(commits.map((commit) => commit.oid), anchorOid, oid);
     } else if (event.metaKey || event.ctrlKey) {
@@ -1657,7 +1623,6 @@
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "a") {
       event.preventDefault();
       if (commits.length === 0) return;
-      taskFocused = false;
       selectedOids = commits.map((commit) => commit.oid);
       anchorOid ??= commits[0]?.oid ?? null;
       return;
@@ -1685,23 +1650,9 @@
       return;
     }
     if (event.altKey || event.ctrlKey || event.metaKey) return;
-    if ((event.key === "ArrowUp" || event.key === "k") && !event.shiftKey && current <= 0 && taskRowShown && !taskFocused) {
-      event.preventDefault();
-      focusTask();
-      return;
-    }
-    if ((event.key === "ArrowUp" || event.key === "k") && !event.shiftKey && (current === 0 || (taskFocused && taskRowShown))) {
+    if ((event.key === "ArrowUp" || event.key === "k") && !event.shiftKey && current === 0) {
       event.preventDefault();
       document.getElementById("history-search")?.focus();
-      return;
-    }
-    if ((event.key === "ArrowDown" || event.key === "j") && !event.shiftKey && taskFocused && taskRowShown) {
-      event.preventDefault();
-      const first = commits[0];
-      if (first) {
-        reveal(0);
-        singleSelect(first.oid);
-      }
       return;
     }
     const move = nextIndex(current, event.key, commits.length);
@@ -2069,43 +2020,14 @@
       {#if appendError}
         <div class="infobar error" role="alert"><Icon name="alert-circle" size={15} /><span class="infobar-text">{appendError}已显示的提交仍保留。</span></div>
       {/if}
-      {#if taskRowShown}
-        {@const summary = taskSummary}
-        <!-- 任务净差异：起点到工作区的最终结果，排在范围内提交之前；选中它时详情区显示任务审阅。 -->
-        <button
-          type="button"
-          class="history-task-row"
-          aria-pressed={taskFocused}
-          title="起点到当前工作区的最终结果：已提交与未提交的改动合成一份，只读"
-          onclick={() => {
-            focusTask();
-            list?.focus({ preventScroll: true });
-          }}
-        >
-          <span class="history-task-icon" aria-hidden="true"><Icon name="layers" size={15} /></span>
-          <span class="hr-main">
-            <span class="hr-line">
-              <span class="hr-summary">任务净差异</span>
-            </span>
-            <span class="hr-meta">
-              {#if !summary || summary.state === "reading"}
-                <span>正在读取任务范围……</span>
-              {:else if summary.state === "failed"}
-                <span class="history-task-warn">任务范围读取失败，点开查看原因</span>
-              {:else if summary.state === "empty"}
-                <span>起点 {summary.baseline} 之后没有净改动</span>
-              {:else if summary.state === "none"}
-                <span>没有任务范围</span>
-              {:else}
-                <span>{summary.files} 个文件</span>
-                <LineCounts stat={{ additions: summary.additions, deletions: summary.deletions }} />
-                <span class="hr-dot"></span>
-                <span class:history-task-done={summary.reviewed === summary.files && summary.files > 0}>已审阅 {summary.reviewed}/{summary.files}</span>
-                {#if summary.dirty}<span class="hr-dot"></span><span>含未提交</span>{/if}
-              {/if}
-            </span>
-          </span>
-        </button>
+      {#if rangeActive && onReturnToReview}
+        <div class="history-range-return" role="note">
+          <Icon name="layers" size={13} />
+          <span class="truncate">正在查看审查任务范围内的提交</span>
+          <button type="button" class="btn btn-secondary btn-sm" onclick={onReturnToReview}>
+            <Icon name="arrow-left" size={12} />回到审查
+          </button>
+        </div>
       {/if}
       <div
         class="history-list"
@@ -2294,12 +2216,6 @@
     </aside>
     {@render paneResizer?.()}
     <div class="history-detail">
-      {#if taskRange && taskDetail}
-        {@render taskDetail(taskShown)}
-      {/if}
-      {#if taskShown}
-        <!-- 任务净差异占着详情区：提交详情与多选结果都不显示。 -->
-      {:else}
       {#if detailError}
         <div class="infobar error" role="alert">
           <Icon name="alert-circle" size={15} />
@@ -2767,7 +2683,6 @@
           <strong>没有可查看的提交</strong>
           <p>左侧列表里出现提交后，这里显示所选提交的文件和差异。</p>
         </div>
-      {/if}
       {/if}
     </div>
   </div>

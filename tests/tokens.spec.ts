@@ -37,7 +37,7 @@ describe("主题与无障碍契约", () => {
   });
 
   it("主题外的布局不写死颜色，保持切换主题的能力", () => {
-    for (const name of ["base.css", "components.css", "layout.css"]) {
+    for (const name of ["base.css", "components.css", "layout.css", "review.css"]) {
       const css = clean(read(name));
       const withoutUrls = css.replace(/url\((['"]?)[^)]*\1\)/g, "url()");
       expect(withoutUrls, name).not.toMatch(/#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?\b/);

@@ -1,12 +1,20 @@
 <script lang="ts">
-  import { onDestroy, untrack } from "svelte";
-  import { api } from "../api";
-  import { FULL_FILE_CONTEXT, reuseDiffContent, type HunkNavReport } from "../diff";
-  import { normalizeError } from "../errors";
-  import { shortOid } from "../history";
-  import { branchLabel } from "../labels";
-  import { LatestReadQueue } from "../latest-read";
-  import { anchorLabel, previewComments, type ReviewComment, type ReviewCommentAnchor } from "../review-comments.svelte";
+  import { onDestroy, untrack, type Snippet } from "svelte";
+  import { api } from "../../api";
+  import { FULL_FILE_CONTEXT, reuseDiffContent, type HunkNavReport } from "../../diff";
+  import { normalizeError } from "../../errors";
+  import { shortOid } from "../../history";
+  import { branchLabel } from "../../labels";
+  import { LatestReadQueue } from "../../latest-read";
+  import {
+    anchorLabel,
+    clearCommentDraft,
+    commentDraft,
+    previewComments,
+    setCommentDraft,
+    type ReviewComment,
+    type ReviewCommentAnchor,
+  } from "../../review-comments.svelte";
   import type {
     AppFailure,
     ChangeKind,
@@ -20,7 +28,7 @@
     TaskRequest,
     TaskReview,
     TaskSummary,
-  } from "../types";
+  } from "../../types";
   import {
     fileNavState,
     appendDiffPage,
@@ -30,21 +38,37 @@
     selectionKey,
     type FileNavState,
     type ReviewQueueState,
-  } from "../ui";
-  import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest } from "./ContextMenu.svelte";
-  import DiffView from "./DiffView.svelte";
-  import FileList from "./FileList.svelte";
-  import Icon from "./Icon.svelte";
-  import LineCounts from "./LineCounts.svelte";
-  import MultiFileDiff from "./MultiFileDiff.svelte";
-  import PaneResizer from "./PaneResizer.svelte";
-  import { clampWidth } from "../layout";
+  } from "../../ui";
+  import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest } from "../ContextMenu.svelte";
+  import DiffView from "../DiffView.svelte";
+  import FileList from "../FileList.svelte";
+  import Icon from "../Icon.svelte";
+  import LineCounts from "../LineCounts.svelte";
+  import MultiFileDiff from "../MultiFileDiff.svelte";
+  import PaneResizer from "../PaneResizer.svelte";
+  import { clampWidth } from "../../layout";
+  import {
+    saveWorkbenchState,
+    workbenchState,
+    type ReviewReadingMode,
+  } from "../../review-workbench.svelte";
+  import ReviewStatePanel, { type ReviewStateAction, type ReviewStateKind } from "./ReviewStatePanel.svelte";
+
+  /** 外壳决定的整页状态（没有来源、来源失效、版本不兼容）：优先于任务读取状态显示。 */
+  export interface ReviewWorkbenchBlock {
+    kind: ReviewStateKind;
+    title: string;
+    message: string;
+    detail?: string | null;
+    actions?: ReviewStateAction[];
+  }
 
   /**
-   * 任务净差异：cliora 审查链接带来的起点到当前工作区的最终结果。
+   * 审查工作台：cliora 审查链接带来的起点到当前工作区的最终结果（任务净差异）。
    *
-   * 它不是独立视图，而是历史详情区里的一块：历史按「起点..HEAD」过滤后，顶部「任务净差异」
-   * 行选中时显示它；选中某个提交时它隐藏但保活，回来时阅读位置不丢。
+   * 它是顶级「审查」视图：左栏是来源卡与任务文件队列，主区是头部、差异与底部完成栏。
+   * 四个视图同时保活，切走再回来时来源、选中文件与阅读模式都还在；跨来源切换时按
+   * reviewId 保存/恢复界面状态（review-workbench）。
    *
    * 它只读：建立范围、浏览文件、看差异都走 task_review / load_task_diff，不切换分支、
    * 不写索引也不碰工作区。整文件暂存只写真实索引，按块/行暂存转到改动视图。
@@ -126,9 +150,21 @@
     onAddComment?: (anchor: ReviewCommentAnchor, body: string) => void;
     onEditComment?: (id: string, body: string) => void;
     onDeleteComment?: (id: string) => void;
-    /** 显式准备送回原任务：只有这个动作会写交接文件并打开深链。 */
-    onPrepareFeedback?: () => void;
-    feedbackPreparing?: boolean;
+    /** 当前来源的 reviewId：界面状态按它保存与恢复；没有来源时为 null。 */
+    workbenchId?: string | null;
+    /** 左栏最上方的视图切换（与其他视图共用同一个 paneHead）。 */
+    paneHead?: Snippet;
+    /** 左栏顶部的来源卡（由外壳渲染，含来源菜单与关闭确认）。 */
+    sourceCard?: Snippet;
+    /** 主区底部常驻完成栏（送回意见 / 返回 Cliora）。 */
+    completion?: Snippet;
+    /** 外壳决定的整页状态：没有来源、来源失效、版本不兼容。 */
+    block?: ReviewWorkbenchBlock | null;
+    /** 无起点状态的两个动作：查看普通历史、返回 Cliora。 */
+    onShowHistory?: () => void;
+    onReturnToCliora?: () => void;
+    /** 「范围内提交 N」：转到历史并按任务范围过滤。 */
+    onShowCommits?: () => void;
   }
 
   let {
@@ -172,8 +208,14 @@
     onAddComment,
     onEditComment,
     onDeleteComment,
-    onPrepareFeedback,
-    feedbackPreparing = false,
+    workbenchId = null,
+    paneHead,
+    sourceCard,
+    completion,
+    block = null,
+    onShowHistory,
+    onReturnToCliora,
+    onShowCommits,
   }: Props = $props();
 
   /** 这些错误说明「任务范围不再成立」，要撤下结果而不是把它当成一次普通读取失败。 */
@@ -290,10 +332,78 @@
     };
   }
 
+  /*
+   * 工作台界面状态按来源保存：选中文件、阅读模式、搜索与意见列表开合。切换来源时先保存
+   * 上一个来源，再恢复新来源；同一来源内切视图不卸载组件，状态自然保留。
+   */
+  let readingMode = $state<ReviewReadingMode>("single");
+  let restorePath: string | null = null;
+  let boundId: string | null = null;
+  $effect(() => {
+    const id = workbenchId;
+    untrack(() => {
+      if (id === boundId) return;
+      if (boundId) persist(boundId);
+      const switched = boundId !== null;
+      boundId = id;
+      // 换来源时不沿用上一个来源的选中项：新来源只恢复它自己的记录，没有记录时从队列第一个文件开始。
+      if (switched) {
+        selected = null;
+        selectedSet = [];
+      }
+      const saved = id ? workbenchState(id) : null;
+      readingMode = saved?.readingMode ?? "single";
+      query = saved?.query ?? "";
+      commentsOpen = saved?.drawerOpen ?? false;
+      restorePath = saved?.selectedPath ?? null;
+      // 意见草稿按来源保存在草稿槽里：切换来源不丢，切回来时恢复。
+      const draft = id ? commentDraft(id) : null;
+      draftAnchor = draft?.anchor ?? null;
+      draftBody = draft?.anchor ? draft.body : "";
+    });
+  });
+
+  // 正在写的意见草稿写回当前来源的草稿槽：关闭来源与完成栏据此提示「草稿未保存」。
+  $effect(() => {
+    const anchor = draftAnchor;
+    const body = draftBody;
+    untrack(() => {
+      const id = boundId;
+      if (!id || workbenchId !== id) return;
+      if (anchor) setCommentDraft(id, { anchor, body, editingId: null });
+      else clearCommentDraft(id);
+    });
+  });
+
+  function persist(id: string | null = boundId): void {
+    if (!id) return;
+    saveWorkbenchState(id, {
+      selectedPath: selected?.path ?? null,
+      selectedSet: selectedSet.map((item) => item.path),
+      readingMode,
+      query,
+      drawerOpen: commentsOpen,
+    });
+  }
+
+  // 选择、模式、搜索或意见列表变化时写回当前来源（只存界面状态，不存进度与意见）。
+  $effect(() => {
+    void selected;
+    void selectedSet;
+    void readingMode;
+    void query;
+    void commentsOpen;
+    untrack(() => {
+      if (boundId && workbenchId === boundId && task) persist(boundId);
+    });
+  });
+
   let files = $derived((task?.files ?? []).map(toChange));
   let rows = $derived(orderedRows(files, query));
   let rowsByPath = $derived(new Map(rows.map((row) => [row.path, row])));
   let multiActive = $derived(selectedSet.length > 1);
+  /** 连续阅读：没有多选时作用于当前可见队列的全部文件。 */
+  let continuous = $derived(readingMode === "continuous" && !multiActive);
   let selectedKeys = $derived(new Set(selectedSet.map(selectionKey)));
   let selectedRows = $derived(
     selectedSet.length > 1
@@ -322,6 +432,8 @@
     return Boolean(row && row.unstaged !== "deleted" && !row.unmerged);
   });
 
+  /** 多文件差异作用的行：多选时是选中文件，连续阅读时是当前可见队列。 */
+  let stackRows = $derived(multiActive ? selectedRows : rows);
   let nav: FileNavState = $derived.by(() => {
     const items: FileRow[] = multiActive ? selectedRows : rows;
     const index = items.findIndex((row) => sameSelection(row, selected));
@@ -361,7 +473,7 @@
 
   function goToRow(row: FileRow): void {
     const item: FileSelection = { path: row.path, side: row.side };
-    if (multiActive) selected = item;
+    if (multiActive || continuous) selected = item;
     else select(item);
   }
 
@@ -405,7 +517,6 @@
   let editBody = $state("");
   let commentError = $state<string | null>(null);
 
-  let canPrepare = $derived(comments.length > 0 && !feedbackPreparing && Boolean(onPrepareFeedback));
 
   function beginComment(anchor: ReviewCommentAnchor): void {
     draftAnchor = anchor;
@@ -612,7 +723,10 @@
         return next ? [next] : [];
       });
       selectedSet = keptSet.length > 1 ? keptSet : [];
-      selected = keptFocus ?? (rows[0] ? { path: rows[0].path, side: rows[0].side } : null);
+      // 切回某个来源时优先恢复它上次选中的文件；仍不在任务里时让位给列表第一个。
+      const restored = restorePath && rowOf(restorePath) ? { path: restorePath, side: "unstaged" as const } : null;
+      restorePath = null;
+      selected = restored ?? keptFocus ?? (rows[0] ? { path: rows[0].path, side: rows[0].side } : null);
       void loadSelectedDiff();
     } catch (error) {
       if (at !== readSerial) return;
@@ -667,7 +781,7 @@
     // Do not retain the entire task file/commit list in an in-flight preview.
     const current = task ? { worktree: task.worktree, baselineOid: task.baselineOid, headOid: task.headOid } : null;
     const choice = selected;
-    if (!detailActive || !current || !choice || multiActive) {
+    if (!detailActive || !current || !choice || multiActive || continuous) {
       diff = null;
       diffError = null;
       diffLoading = false;
@@ -791,202 +905,52 @@
   function reload(): void {
     void readTask(request?.baseline ?? null);
   }
+
+  function setReadingMode(mode: ReviewReadingMode): void {
+    if (readingMode === mode) return;
+    readingMode = mode;
+    if (mode === "single") void loadSelectedDiff();
+  }
+
+  /** 任务读取状态对应的整页状态；ready 且有文件时为 null，交给差异区。 */
+  let pageState = $derived.by<ReviewWorkbenchBlock | null>(() => {
+    if (block) return block;
+    if (phase === "no-baseline") {
+      const actions: ReviewStateAction[] = [];
+      if (onShowHistory) actions.push({ id: "history", label: "查看普通历史", icon: "history", run: onShowHistory });
+      if (onReturnToCliora) actions.push({ id: "return", label: "返回 Cliora", icon: "arrow-left", primary: true, run: onReturnToCliora });
+      return {
+        kind: "no-baseline",
+        title: "没有任务范围",
+        message: "Cliora 审查链接没有携带任务起点；这里不会用 HEAD 或默认分支补缺。可以查看普通历史，或返回 Cliora 重新发起。",
+        actions,
+      };
+    }
+    if (phase === "failed") {
+      return {
+        kind: invalidRange ? "range-invalid" : "read-failed",
+        title: invalidRange ? "任务范围已失效" : "读取任务范围失败",
+        message: failure?.message ?? "无法读取这次任务，仓库没有被修改。",
+        detail: failure?.code ? `错误码 ${failure.code}` : null,
+        actions: [
+          { id: "reload", label: "重新读取", icon: "refresh", primary: true, run: reload },
+          ...(invalidRange && onReturnToCliora ? [{ id: "return", label: "返回 Cliora", icon: "arrow-left" as const, run: onReturnToCliora }] : []),
+        ],
+      };
+    }
+    if (!task) return { kind: "reading", title: "正在读取任务范围", message: "正在读取起点到当前工作区的最终结果，仓库不会被修改。" };
+    if (task.empty) return { kind: "empty", title: "这个任务没有净改动", message: task.message };
+    return null;
+  });
 </script>
 
 <!-- 后台重读不在界面上插提示或转圈：旧结果原地保留到新结果就绪，只用 aria-busy 告诉读屏。 -->
-<div class="task-detail" aria-label="任务净差异" aria-busy={reading && task ? "true" : undefined} style:display={visible ? null : "none"}>
-  <header class="commit-head task-head">
-    <div class="commit-head-main">
-      <h2 class="commit-title">任务净差异</h2>
-      <div class="commit-byline task-byline" role="group" aria-label="任务范围">
-        <span class="task-range" title={task ? `起点 ${task.baselineOid}\nHEAD ${task.headOid}` : (request?.baseline ?? "")}>
-          <span class="task-kicker">起点</span>
-          <code class="task-oid">{baselineLabel || "未选择"}</code>
-          <Icon name="arrow-right" size={12} />
-          {#if task}
-            <span class="task-value">{branchLabel(task.branch)}</span>
-            <code class="task-oid">{headLabel}</code>
-            {#if task.dirty}<span class="task-value">+ 未提交改动</span>{/if}
-          {:else}
-            <span class="task-value">工作区</span>
-          {/if}
-        </span>
-        {#if task}
-          <span class="task-stats">
-            <span class="task-value">{task.commitCount} 个提交</span>
-            <span class="task-value">{task.filesTotal} 个文件</span>
-            <LineCounts stat={{ additions: task.additions, deletions: task.deletions }} />
-          </span>
-          {#if task.untrackedFiles > 0}<span class="task-tag">未跟踪 {task.untrackedFiles} 个</span>{/if}
-          {#if task.conflicted}<span class="task-tag danger">有冲突</span>{/if}
-        {/if}
-        <span class="read-only-chip" title="任务净差异只读：不会写入暂存区，也不改变提交范围">
-          <Icon name="eye" size={12} />只读
-        </span>
-      </div>
-      {#if task?.filesTruncated}
-        <p class="task-context-note" role="alert">{task.message}</p>
-      {/if}
-    </div>
-    {#if task && onOpenChanges}
-      <div class="commit-facts">
-        <button
-          type="button"
-          class="btn btn-secondary btn-sm"
-          aria-label="回到改动视图提交"
-          title="提交只按真实暂存范围执行；任务净差异不会自动进入提交"
-          onclick={onOpenChanges}
-        >
-          <Icon name="commit" size={13} /><span>回到提交区</span>
-        </button>
-      </div>
-    {/if}
-  </header>
-
-  {#if onPrepareFeedback}
-    <!-- 意见是任务级的下一步：一行计数 + 两个动作，展开后才显示可编辑列表与整批预览。 -->
-    <div class="task-comments" role="group" aria-label="审阅意见">
-      <span class="task-comments-count">{comments.length > 0 ? comments.length + " 条意见" : "还没有意见"}</span>
-      <span class="task-comments-route" title="意见只存在这个窗口。送回后由 cliora 让你确认，才会写进发起审查的那个 CLI 会话；不会自动执行，也不改代码。">
-        {comments.length > 0 ? "送回后在 cliora 确认，再写进原会话" : "点块标题的「评论此块」或行尾气泡写意见，写完一起送回原会话"}
-      </span>
-      <button
-        type="button"
-        class="btn btn-ghost btn-sm"
-        aria-expanded={commentsOpen}
-        aria-label={commentsOpen ? "收起意见列表" : "查看意见列表"}
-        onclick={() => (commentsOpen = !commentsOpen)}
-      >
-        <Icon name="list" size={13} /><span>{commentsOpen ? "收起意见" : "查看意见"}</span>
-      </button>
-      <button
-        type="button"
-        class="btn btn-secondary btn-sm"
-        disabled={!canPrepare}
-        aria-label="准备把这批意见送回原任务"
-        title={comments.length === 0
-          ? "先在差异行上写一条意见"
-          : "写一个私有的交接文件，并打开 cliora 深链；这里不会自动发送或修改代码"}
-        onclick={() => onPrepareFeedback?.()}
-      >
-        <Icon name="sparkle" size={13} /><span>{feedbackPreparing ? "正在准备…" : "准备送回原任务"}</span>
-      </button>
-      {#if commentNotice}<span class="task-comment-note" role="status">{commentNotice}</span>{/if}
-    </div>
-  {/if}
-
-  {#if draftAnchor}
-    <form
-      class="task-comment-composer"
-      aria-label={draftAnchor.range ? "给这一块添加意见" : "给这一行添加意见"}
-      onsubmit={(event) => {
-        event.preventDefault();
-        saveDraft();
-      }}
-    >
-      <div class="task-comment-head">
-        <span class="task-comment-path">{draftAnchor.path}</span>
-        <span>{anchorLabel(draftAnchor)}</span>
-      </div>
-      {#if draftAnchor.quote}<p class="task-comment-quote">{draftAnchor.quote}</p>{/if}
-      <!-- svelte-ignore a11y_autofocus -->
-      <textarea
-        class="textarea"
-        rows={3}
-        autofocus
-        bind:value={draftBody}
-        aria-label="意见正文"
-        placeholder={draftAnchor.range ? "这一块要怎么改？说清楚就够了。" : "这一行要改成什么样？说清楚就够了。"}
-        onkeydown={(event) => {
-          if (event.isComposing) return;
-          if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-            event.preventDefault();
-            if (draftBody.trim() !== "") saveDraft();
-          } else if (event.key === "Escape") {
-            event.preventDefault();
-            event.stopPropagation();
-            cancelDraft();
-          }
-        }}
-      ></textarea>
-      <div class="task-comment-actions">
-        <button
-          type="submit"
-          class="btn btn-primary btn-sm"
-          disabled={draftBody.trim() === ""}
-          title={draftBody.trim() === "" ? "先写一句要怎么改" : "加到这批意见（Ctrl+Enter）"}
-        >添加意见</button>
-        <button type="button" class="btn btn-ghost btn-sm" onclick={cancelDraft}>取消</button>
-        <span class="task-comment-note">Ctrl+Enter 添加 · Esc 取消 · 只存在本窗口，不会自动发送</span>
-      </div>
-    </form>
-  {/if}
-
-  {#if commentsOpen}
-    <div class="task-comments-panel" aria-label="意见列表">
-      {#if comments.length === 0}
-        <p class="task-comment-note">还没有意见。点块标题上的「评论此块」一次说一整块，或用行尾气泡说某一行。</p>
-      {:else}
-        {#each comments as comment (comment.id)}
-          <article class="task-comment" data-comment-id={comment.id}>
-            <div class="task-comment-head">
-              <span class="task-comment-path">{comment.anchor.path}</span>
-              <span>{anchorLabel(comment.anchor)}</span>
-            </div>
-            {#if comment.anchor.quote}<p class="task-comment-quote">{comment.anchor.quote}</p>{/if}
-            {#if editingId === comment.id}
-              <textarea
-                class="textarea"
-                rows={3}
-                bind:value={editBody}
-                aria-label={comment.anchor.path + " 的意见正文"}
-              ></textarea>
-              <div class="task-comment-actions">
-                <button type="button" class="btn btn-primary btn-sm" onclick={saveEdit}>保存意见</button>
-                <button type="button" class="btn btn-ghost btn-sm" onclick={cancelEdit}>取消</button>
-              </div>
-            {:else}
-              <p class="task-comment-body">{comment.body}</p>
-              <div class="task-comment-actions">
-                <button type="button" class="btn btn-ghost btn-sm" onclick={() => beginEdit(comment)}>编辑</button>
-                <button type="button" class="btn btn-ghost btn-sm" onclick={() => removeComment(comment.id)}>删除</button>
-              </div>
-            {/if}
-          </article>
-        {/each}
-        <pre class="task-comment-preview" aria-label="整批意见预览">{previewComments(comments)}</pre>
-      {/if}
-      {#if commentError}<p class="task-comment-note" role="alert">{commentError}</p>{/if}
-    </div>
-  {/if}
-
-  {#if phase === "failed"}
-    <div class="empty task-failure" role="alert">
-      <span class="empty-icon err"><Icon name="alert-circle" size={22} /></span>
-      <strong>{invalidRange ? "任务范围已失效" : "读取任务范围失败"}</strong>
-      <p>{failure?.message ?? "无法读取这次任务，仓库没有被修改。"}</p>
-      <button type="button" class="btn btn-secondary btn-sm" onclick={reload}>重新读取</button>
-    </div>
-  {:else if phase === "no-baseline"}
-    <div class="empty" role="status">
-      <span class="empty-icon"><Icon name="layers" size={22} /></span>
-      <strong>没有任务范围</strong>
-      <p>cliora 审查链接没有携带起点。</p>
-    </div>
-  {:else if !task}
-    <div class="empty" role="status" aria-busy="true">
-      <span class="empty-icon"><span class="spinner"></span></span>
-      <strong>正在读取任务范围</strong>
-    </div>
-  {:else if task.empty}
-    <div class="empty task-empty">
-      <span class="empty-icon ok"><Icon name="check-circle" size={24} /></span>
-      <strong>这个任务没有净改动</strong>
-      <p>{task.message}</p>
-    </div>
-  {:else}
-    <div class="task-split" style={`--task-files:${taskFilesShown}px`} bind:clientWidth={taskSplitWidth}>
-      <aside class="task-files" aria-label="任务文件">
+<div class="task-detail review-workbench" aria-label="审查工作台" aria-busy={reading && task ? "true" : undefined} style:display={visible ? null : "none"}>
+  <div class="task-split review-layout" style={`--task-files:${taskFilesShown}px`} bind:clientWidth={taskSplitWidth}>
+    <aside class="task-files review-side" aria-label="审查来源与任务文件">
+      {@render paneHead?.()}
+      {@render sourceCard?.()}
+      {#if !block && task && !task.empty}
         <FileList
           variant="task"
           searchId="task-file-search"
@@ -1014,127 +978,322 @@
           {onUnstageFile}
           {stageSideFor}
         />
-      </aside>
-      <PaneResizer
-        value={taskFilesShown}
-        saved={taskFilesWidth}
-        label="调整任务文件栏宽度"
-        fit={(width) => fitTaskFilesWidth(width, taskSplitWidth)}
-        onResize={(width) => (taskFilesWidth = width)}
-        onCommit={saveTaskFilesWidth}
-      />
-      {#if rows.length > 0}
-        <div class="task-diff">
-          {#if selected && onOpenUnstaged && !multiActive}
-            <!-- 聚合净差异不能直接应用：按块/行暂存要回到同一文件的真实未提交差异。 -->
-            <div class="task-diff-actions">
-              <button
-                type="button"
-                class="btn btn-ghost btn-sm"
-                aria-label={`在未提交差异里按块/行暂存 ${selected.path}`}
-                title="任务净差异同时含已提交内容，不能直接做块/行补丁；转到这个文件的真实未提交差异再按块/行暂存"
-                onclick={() => selected && onOpenUnstaged?.(selected.path)}
-              >
-                <Icon name="file-diff" size={13} /><span>在未提交差异里按块/行暂存</span>
-              </button>
+      {/if}
+    </aside>
+    <PaneResizer
+      value={taskFilesShown}
+      saved={taskFilesWidth}
+      label="调整任务文件栏宽度"
+      fit={(width) => fitTaskFilesWidth(width, taskSplitWidth)}
+      onResize={(width) => (taskFilesWidth = width)}
+      onCommit={saveTaskFilesWidth}
+    />
+    <div class="review-main">
+      {#if !block && (task || request)}
+        <header class="commit-head task-head review-head">
+          <div class="commit-head-main">
+            <h2 class="commit-title">任务净差异</h2>
+            <div class="commit-byline task-byline" role="group" aria-label="任务范围">
+              <span class="task-range" title={task ? `起点 ${task.baselineOid}\nHEAD ${task.headOid}` : (request?.baseline ?? "")}>
+                <span class="task-kicker">起点</span>
+                <code class="task-oid">{baselineLabel || "未选择"}</code>
+                <Icon name="arrow-right" size={12} />
+                {#if task}
+                  <span class="task-value">{branchLabel(task.branch)}</span>
+                  <code class="task-oid">{headLabel}</code>
+                  {#if task.dirty}<span class="task-value">+ 未提交改动</span>{/if}
+                {:else}
+                  <span class="task-value">工作区</span>
+                {/if}
+              </span>
+              {#if task}
+                <span class="task-stats">
+                  <span class="task-value">{task.commitCount} 个提交</span>
+                  <span class="task-value">{task.filesTotal} 个文件</span>
+                  <LineCounts stat={{ additions: task.additions, deletions: task.deletions }} />
+                </span>
+                {#if task.untrackedFiles > 0}<span class="task-tag">未跟踪 {task.untrackedFiles} 个</span>{/if}
+                {#if task.conflicted}<span class="task-tag danger">有冲突</span>{/if}
+              {/if}
+              <span class="read-only-chip" title="任务净差异只读：不会写入暂存区，也不改变提交范围">
+                <Icon name="eye" size={12} />只读
+              </span>
+            </div>
+            {#if task?.filesTruncated}
+              <p class="task-context-note" role="alert">{task.message}</p>
+            {/if}
+          </div>
+          {#if task}
+            <div class="commit-facts review-head-actions">
+              {#if !task.empty}
+                <div class="segmented review-mode" role="group" aria-label="阅读模式">
+                  <button
+                    type="button"
+                    aria-pressed={readingMode === "single"}
+                    title="一次看一个文件"
+                    onclick={() => setReadingMode("single")}
+                  ><Icon name="file" size={12} /><span>单文件</span></button>
+                  <button
+                    type="button"
+                    aria-pressed={readingMode === "continuous"}
+                    title="连续阅读当前可见队列的全部文件"
+                    onclick={() => setReadingMode("continuous")}
+                  ><Icon name="rows" size={12} /><span>连续</span></button>
+                </div>
+              {/if}
+              {#if onShowCommits && task.commitCount > 0}
+                <button
+                  type="button"
+                  class="btn btn-ghost btn-sm"
+                  title="转到历史，只看起点之后的提交"
+                  onclick={onShowCommits}
+                ><Icon name="history" size={13} /><span>范围内提交 {task.commitCount}</span></button>
+              {/if}
+              {#if onAddComment || onEditComment || onDeleteComment}
+                <button
+                  type="button"
+                  class="btn btn-ghost btn-sm review-comments-toggle"
+                  aria-expanded={commentsOpen}
+                  aria-label={commentsOpen ? "收起意见列表" : "查看意见列表"}
+                  title={comments.length > 0 ? `${comments.length} 条意见` : "还没有意见"}
+                  onclick={() => (commentsOpen = !commentsOpen)}
+                >
+                  <Icon name="list" size={13} /><span>意见</span>{#if comments.length > 0}<span class="count">{comments.length}</span>{/if}
+                </button>
+              {/if}
+              {#if onOpenChanges}
+                <button
+                  type="button"
+                  class="btn btn-ghost btn-sm"
+                  aria-label="回到改动视图提交"
+                  title="提交只按真实暂存范围执行；任务净差异不会自动进入提交"
+                  onclick={onOpenChanges}
+                >
+                  <Icon name="commit" size={13} /><span>回到提交区</span>
+                </button>
+              {/if}
             </div>
           {/if}
-          {#if selectedRebuilt}
-            <!-- 工作区重建：起点里有旧版本，工作区里是未跟踪的同名文件。行数只统计重建后的内容，
-                 不暗示为纯新增；files 列表与这条单文件差异用的是同一份口径。 -->
-            <p class="task-diff-note" role="note">
-              这个路径在起点里有旧版本，当前是工作区重建：行数只统计重建后的文件，单文件差异按新增文件显示。
-            </p>
-          {/if}
-          {#if !multiActive && diff?.truncated}
-            <!-- 截断就如实说截断：不把只读到的一部分当成完整净差异（R7）。 -->
-            <p class="task-diff-note" role="alert">{diff.summary || "这条净差异超过预览上限，只读到一部分。"}</p>
-          {/if}
-          {#if multiActive}
-            <MultiFileDiff
-              active={detailActive}
-              {opened}
-              rows={selectedRows}
-              focus={selected}
-              {nav}
-              disabled={writeLocked}
-              readOnly
-              loadDiff={taskLoader}
-              scopeKey={scopeKey}
-              {fullFile}
-              fullContext={FULL_FILE_CONTEXT}
-              stageCount={0}
-              unstageCount={0}
-              discardCount={0}
-              conflictCount={0}
-              {onOpenUnstaged}
-              {nextId}
-              {reviewed}
-              {onToggleReview}
-              {stageSideFor}
-              {onStageFiles}
-              {onUnstageFiles}
-              onFocus={focusBlock}
-              onStale={onGeneration}
-              onStageHunk={() => {}}
-              onFullFile={onFullFile}
-              onFileHistory={(path) => onFileHistory?.(path)}
-              onReadDocument={onReadDocument}
-              onStage={() => {}}
-              onUnstage={() => {}}
-              onDiscard={() => {}}
-              comments={commentKeys}
-              onCommentLine={beginComment}
-              onClear={() => selected && select(selected)}
-            />
+        </header>
+      {/if}
+
+      {#if !block && commentNotice}<p class="task-comment-note review-comment-notice" role="status">{commentNotice}</p>{/if}
+
+      {#if !block && draftAnchor}
+        <form
+          class="task-comment-composer"
+          aria-label={draftAnchor.range ? "给这一块添加意见" : "给这一行添加意见"}
+          onsubmit={(event) => {
+            event.preventDefault();
+            saveDraft();
+          }}
+        >
+          <div class="task-comment-head">
+            <span class="task-comment-path">{draftAnchor.path}</span>
+            <span>{anchorLabel(draftAnchor)}</span>
+          </div>
+          {#if draftAnchor.quote}<p class="task-comment-quote">{draftAnchor.quote}</p>{/if}
+          <!-- svelte-ignore a11y_autofocus -->
+          <textarea
+            class="textarea"
+            rows={3}
+            autofocus
+            bind:value={draftBody}
+            aria-label="意见正文"
+            placeholder={draftAnchor.range ? "这一块要怎么改？说清楚就够了。" : "这一行要改成什么样？说清楚就够了。"}
+            onkeydown={(event) => {
+              if (event.isComposing) return;
+              if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+                event.preventDefault();
+                if (draftBody.trim() !== "") saveDraft();
+              } else if (event.key === "Escape") {
+                event.preventDefault();
+                event.stopPropagation();
+                cancelDraft();
+              }
+            }}
+          ></textarea>
+          <div class="task-comment-actions">
+            <button
+              type="submit"
+              class="btn btn-primary btn-sm"
+              disabled={draftBody.trim() === ""}
+              title={draftBody.trim() === "" ? "先写一句要怎么改" : "加到这批意见（Ctrl+Enter）"}
+            >添加意见</button>
+            <button type="button" class="btn btn-ghost btn-sm" onclick={cancelDraft}>取消</button>
+            <span class="task-comment-note">Ctrl+Enter 添加 · Esc 取消 · 只存在本窗口，不会自动发送</span>
+          </div>
+          {#if commentError}<p class="task-comment-note" role="alert">{commentError}</p>{/if}
+        </form>
+      {/if}
+
+      {#if !block && commentsOpen}
+        <div class="task-comments-panel" aria-label="意见列表">
+          {#if comments.length === 0}
+            <p class="task-comment-note">还没有意见。点块标题上的「评论此块」一次说一整块，或用行尾气泡说某一行。</p>
           {:else}
-            <DiffView
-              readingKey={`${opened.summary.path}:task:${request?.baseline ?? ""}`}
-              selection={selected}
-              {diff}
-              error={diffError}
-              loading={diffLoading}
-              disabled={false}
-              readOnly
-              readOnlyLabel="任务净差异"
-              reviewed={selected ? reviewed.has(selected.path) : false}
-              reviewBusy={selected ? reviewBusy === selected.path : false}
-              onToggleReview={selected && onToggleReview ? () => onToggleReview(selected!.path) : undefined}
-              onStageHunk={() => {}}
-              onLoadMore={() => void loadMoreDiff()}
-              onFileHistory={onFileHistory}
-              onReadDocument={onReadDocument}
-              {fullFile}
-              onFullFile={onFullFile}
-              comments={commentKeys}
-              onCommentLine={beginComment}
-              asText={asTextFor !== null && asTextFor === selected?.path}
-              onViewAsText={(next) => {
-                asTextFor = next && selected ? selected.path : null;
-                void loadSelectedDiff();
-              }}
-              fileNav={nav}
-              fileCount={rows.length}
-              onRetry={() => void loadSelectedDiff()}
-              onHunkNav={onHunkNav}
-              onEdit={onEditFile && selected && selectedEditable
-                ? (line) => {
-                    // 编辑的是当前工作区文件，不是这份聚合差异；cliora 来源与任务范围保持不变。
-                    if (selected) onEditFile?.(selected.path, line);
-                  }
-                : undefined}
-            />
+            {#each comments as comment (comment.id)}
+              <article class="task-comment" data-comment-id={comment.id}>
+                <div class="task-comment-head">
+                  <span class="task-comment-path">{comment.anchor.path}</span>
+                  <span>{anchorLabel(comment.anchor)}</span>
+                </div>
+                {#if comment.anchor.quote}<p class="task-comment-quote">{comment.anchor.quote}</p>{/if}
+                {#if editingId === comment.id}
+                  <textarea
+                    class="textarea"
+                    rows={3}
+                    bind:value={editBody}
+                    aria-label={comment.anchor.path + " 的意见正文"}
+                  ></textarea>
+                  <div class="task-comment-actions">
+                    <button type="button" class="btn btn-primary btn-sm" onclick={saveEdit}>保存意见</button>
+                    <button type="button" class="btn btn-ghost btn-sm" onclick={cancelEdit}>取消</button>
+                  </div>
+                {:else}
+                  <p class="task-comment-body">{comment.body}</p>
+                  <div class="task-comment-actions">
+                    <button type="button" class="btn btn-ghost btn-sm" onclick={() => beginEdit(comment)}>编辑</button>
+                    <button type="button" class="btn btn-ghost btn-sm" onclick={() => removeComment(comment.id)}>删除</button>
+                  </div>
+                {/if}
+              </article>
+            {/each}
+            <pre class="task-comment-preview" aria-label="整批意见预览">{previewComments(comments)}</pre>
           {/if}
-        </div>
-      {:else}
-        <div class="empty task-placeholder" role="status">
-          <span class="empty-icon"><Icon name="search" size={22} /></span>
-          <strong>没有匹配“{query.trim()}”的任务文件</strong>
-          <button type="button" class="btn btn-ghost btn-sm" onclick={() => (query = "")}>清除筛选</button>
+          {#if commentError && !draftAnchor}<p class="task-comment-note" role="alert">{commentError}</p>{/if}
         </div>
       {/if}
+
+      <div class="review-stage">
+        {#if pageState}
+          <ReviewStatePanel
+            kind={pageState.kind}
+            title={pageState.title}
+            message={pageState.message}
+            detail={pageState.detail ?? null}
+            actions={pageState.actions ?? []}
+          />
+        {:else if task && rows.length > 0}
+          <div class="task-diff">
+            {#if selected && onOpenUnstaged && !multiActive && !continuous}
+              <!-- 聚合净差异不能直接应用：按块/行暂存要回到同一文件的真实未提交差异。 -->
+              <div class="task-diff-actions">
+                <button
+                  type="button"
+                  class="btn btn-ghost btn-sm"
+                  aria-label={`在未提交差异里按块/行暂存 ${selected.path}`}
+                  title="任务净差异同时含已提交内容，不能直接做块/行补丁；转到这个文件的真实未提交差异再按块/行暂存"
+                  onclick={() => selected && onOpenUnstaged?.(selected.path)}
+                >
+                  <Icon name="file-diff" size={13} /><span>在未提交差异里按块/行暂存</span>
+                </button>
+              </div>
+            {/if}
+            {#if selectedRebuilt}
+              <!-- 工作区重建：起点里有旧版本，工作区里是未跟踪的同名文件。行数只统计重建后的内容，
+                   不暗示为纯新增；files 列表与这条单文件差异用的是同一份口径。 -->
+              <p class="task-diff-note" role="note">
+                这个路径在起点里有旧版本，当前是工作区重建：行数只统计重建后的文件，单文件差异按新增文件显示。
+              </p>
+            {/if}
+            {#if !multiActive && !continuous && diff?.truncated}
+              <!-- 截断就如实说截断：不把只读到的一部分当成完整净差异（R7）。 -->
+              <p class="task-diff-note" role="alert">{diff.summary || "这条净差异超过预览上限，只读到一部分。"}</p>
+            {/if}
+            {#if multiActive || continuous}
+              <MultiFileDiff
+                active={detailActive}
+                {opened}
+                rows={stackRows}
+                focus={selected}
+                {nav}
+                disabled={writeLocked}
+                readOnly
+                loadDiff={taskLoader}
+                scopeKey={scopeKey}
+                {fullFile}
+                fullContext={FULL_FILE_CONTEXT}
+                stageCount={0}
+                unstageCount={0}
+                discardCount={0}
+                conflictCount={0}
+                {onOpenUnstaged}
+                {nextId}
+                {reviewed}
+                {onToggleReview}
+                {stageSideFor}
+                {onStageFiles}
+                {onUnstageFiles}
+                onFocus={focusBlock}
+                onStale={onGeneration}
+                onStageHunk={() => {}}
+                onFullFile={onFullFile}
+                onFileHistory={(path) => onFileHistory?.(path)}
+                onReadDocument={onReadDocument}
+                onStage={() => {}}
+                onUnstage={() => {}}
+                onDiscard={() => {}}
+                comments={commentKeys}
+                onCommentLine={beginComment}
+                onClear={() => {
+                  if (multiActive) {
+                    if (selected) select(selected);
+                  } else {
+                    setReadingMode("single");
+                  }
+                }}
+              />
+            {:else}
+              <DiffView
+                readingKey={`${opened.summary.path}:task:${request?.baseline ?? ""}`}
+                selection={selected}
+                {diff}
+                error={diffError}
+                loading={diffLoading}
+                disabled={false}
+                readOnly
+                readOnlyLabel="任务净差异"
+                reviewed={selected ? reviewed.has(selected.path) : false}
+                reviewBusy={selected ? reviewBusy === selected.path : false}
+                onToggleReview={selected && onToggleReview ? () => onToggleReview(selected!.path) : undefined}
+                onStageHunk={() => {}}
+                onLoadMore={() => void loadMoreDiff()}
+                onFileHistory={onFileHistory}
+                onReadDocument={onReadDocument}
+                {fullFile}
+                onFullFile={onFullFile}
+                comments={commentKeys}
+                onCommentLine={beginComment}
+                asText={asTextFor !== null && asTextFor === selected?.path}
+                onViewAsText={(next) => {
+                  asTextFor = next && selected ? selected.path : null;
+                  void loadSelectedDiff();
+                }}
+                fileNav={nav}
+                fileCount={rows.length}
+                onRetry={() => void loadSelectedDiff()}
+                onHunkNav={onHunkNav}
+                onEdit={onEditFile && selected && selectedEditable
+                  ? (line) => {
+                      // 编辑的是当前工作区文件，不是这份聚合差异；cliora 来源与任务范围保持不变。
+                      if (selected) onEditFile?.(selected.path, line);
+                    }
+                  : undefined}
+              />
+            {/if}
+          </div>
+        {:else if task}
+          <div class="empty task-placeholder" role="status">
+            <span class="empty-icon"><Icon name="search" size={22} /></span>
+            <strong>没有匹配“{query.trim()}”的任务文件</strong>
+            <button type="button" class="btn btn-ghost btn-sm" onclick={() => (query = "")}>清除筛选</button>
+          </div>
+        {/if}
+      </div>
+      {@render completion?.()}
     </div>
-  {/if}
+  </div>
 </div>
 
 {#if fileMenu}

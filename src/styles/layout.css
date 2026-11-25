@@ -289,8 +289,6 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--danger) 1
   .titlebar-spacer { min-width: var(--space-4); }
   .titlebar-palette { flex: none; padding: 0 var(--space-8); }
   .titlebar-palette-label { display: none; }
-  .review-strip-meta { max-width: 190px; }
-  .review-strip-notice, .review-strip-note { max-width: 220px; }
 }
 @media (max-width: 960px) {
   /* 窄窗口仍保持三列：每列约 230px 放得下图标与两行文案。改成行式卡片只收高度，
@@ -367,38 +365,3 @@ button.welcome-diagnostic:hover { background: color-mix(in srgb, var(--danger) 1
 .project-switcher-hint[data-project-scope="outside"] > .icon { color: var(--info-text); }
 .project-switcher-hint-text { flex: 1 1 auto; min-width: 0; }
 .project-switcher-hint > .btn { flex: none; }
-
-/* ---------- Cliora 审查条 ----------
-   只在保留了审查来源时出现：一条淡靛蓝细条，左侧标识与来源选择，右侧关闭与管理。
-   容量与保留规则收在「管理」弹层底部，不再常驻一行说明。 */
-.review-strip { position: relative; z-index: var(--z-sticky); display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8); row-gap: var(--space-4); min-width: 0; min-height: 36px; padding: var(--space-4) var(--space-12); flex: none; background: var(--accent-softer); border-bottom: 1px solid var(--border); font-size: var(--text-sm); }
-.review-strip-mark { display: grid; place-items: center; width: 22px; height: 22px; border-radius: var(--radius-sm); background: var(--accent-soft); color: var(--accent-text); flex: none; }
-.review-strip-title { font-weight: var(--weight-semibold); color: var(--accent-text); white-space: nowrap; flex: none; }
-/* 来源下拉：横条上的一个带边框小按钮，名称是仓库，展开后再看项目、会话与路径。 */
-.review-strip-select { flex: 0 1 auto; min-width: 0; }
-.review-strip-select .select-menu-trigger { height: 26px; max-width: min(320px, 32vw); border: 1px solid var(--control-border); background: var(--surface); color: var(--fg); font-size: var(--text-sm); }
-.review-strip-meta, .review-strip-note { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-muted); }
-.review-strip-meta { display: inline-flex; align-items: center; gap: var(--space-6); flex: 0 1 auto; max-width: 420px; }
-.review-strip-project { display: inline-flex; align-items: center; gap: var(--space-4); flex: none; height: 20px; padding: 0 var(--space-6); border-radius: 999px; background: var(--surface); border: 1px solid var(--border); color: var(--fg-muted); font-size: var(--text-xs); font-weight: var(--weight-medium); }
-.review-strip-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 11px; color: var(--fg-subtle); }
-.review-strip-notice { display: inline-flex; align-items: center; gap: var(--space-2); min-width: 0; max-width: 380px; }
-.review-strip-note { max-width: 360px; }
-.review-strip-dismiss { width: 22px; height: 22px; flex: none; }
-/* 完全关闭审查：固定在这一行最右端，关闭全部来源并收起审查栏。 */
-.review-strip-close { flex: none; margin-left: var(--space-4); }
-.review-strip-jump { flex: none; }
-.review-source-manager { position: relative; flex: none; }
-.review-source-manager-trigger[aria-expanded="true"] { background: var(--active); color: var(--fg); }
-.review-source-pop { position: fixed; z-index: var(--z-menu); display: flex; flex-direction: column; width: min(560px, calc(100vw - 16px)); padding: var(--space-6); border-radius: var(--radius-lg); background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow-lg); animation: pop var(--duration-fast) var(--ease-out); }
-.review-source-pop ul { list-style: none; margin: 0; padding: 0; max-height: 240px; overflow: auto; }
-.review-source-pop li { display: flex; align-items: center; gap: var(--space-8); min-height: 34px; padding: 0 var(--space-4) 0 var(--space-8); border-radius: var(--radius); min-width: 0; }
-.review-source-pop li:hover { background: var(--hover); }
-.review-source-pop li.current { background: var(--accent-softer); }
-.review-source-switch { display: flex; flex: 1; min-width: 0; padding: var(--space-4) 0; border-radius: var(--radius-sm); text-align: left; }
-.review-source-switch:disabled { cursor: not-allowed; color: var(--fg-subtle); }
-.review-source-switch:disabled strong, .review-source-switch:disabled small { color: var(--fg-subtle); }
-.review-source-text { display: flex; flex-direction: column; flex: 1; min-width: 0; }
-.review-source-text strong, .review-source-text small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.review-source-text strong { font-weight: var(--weight-semibold); color: var(--fg); }
-.review-source-text small { color: var(--fg-subtle); font-size: var(--text-xs); }
-.review-source-pop > small { display: block; margin-top: var(--space-6); padding: var(--space-6) var(--space-8) var(--space-2); border-top: 1px solid var(--border); color: var(--fg-muted); font-size: var(--text-xs); line-height: var(--leading-normal); }

@@ -420,6 +420,28 @@ async function openRepo() {
 }
 
 const activeView = () => document.querySelector<HTMLElement>('.workbench-view[data-active="true"]')?.dataset.viewScope ?? null;
+
+/** 切到左栏切换条上的某个视图（当前可见的那份切换条）。 */
+async function switchView(view: "changes" | "history" | "files" | "review") {
+  const item = await waitFor(() => {
+    const found = document.querySelector<HTMLElement>(`.workbench-view[data-active="true"] nav[aria-label="视图"] [data-view="${view}"]`);
+    if (!found) throw new Error(`切换条上没有 ${view}`);
+    return found;
+  });
+  await fireEvent.click(item);
+  await waitFor(() => expect(activeView()).toBe(view));
+}
+
+/** 返回 Cliora 只在审查视图的完成栏：先进入审查视图，再点完成栏的「返回 Cliora」。 */
+async function clickReviewReturn() {
+  if (activeView() !== "review") await switchView("review");
+  const button = await waitFor(() => {
+    const found = document.querySelector<HTMLButtonElement>('.workbench-view[data-active="true"] .review-completion [data-completion-action="return"]');
+    if (!found) throw new Error("完成栏没有返回入口");
+    return found;
+  });
+  await fireEvent.click(button);
+}
 const editorBox = () => document.querySelector<HTMLTextAreaElement>('.workbench-view[data-active="true"] .text-editor-input');
 
 function changesRow(path: string): HTMLElement {
@@ -585,7 +607,8 @@ describe("cliora 来源与编辑", () => {
     expect(screen.getByRole("button", { name: "返回任务差异" })).toBeTruthy();
     await fireEvent.input(editorBox()!, { target: { value: "edited\n" } });
 
-    await fireEvent.click(screen.getByRole("button", { name: /^返回 cliora/ }));
+    // 返回入口在审查视图完成栏：离开文件视图不丢草稿，返回前仍先处理它。
+    await clickReviewReturn();
     const dialog = await screen.findByRole("dialog", { name: "有未保存的编辑" });
     expect(mocks.api.clioraReviewReturn).not.toHaveBeenCalled();
     await fireEvent.click(within(dialog).getByRole("button", { name: "保存" }));
@@ -594,10 +617,11 @@ describe("cliora 来源与编辑", () => {
     expect(clioraReview.source?.reviewId, "保存与返回都不清来源").toBe("review-1");
     expect(calls("commitChanges")).toBe(0);
 
-    // 回到任务差异：任务页按新代次重新读取净差异。
+    // 回到任务差异：从文件视图的编辑器回到审查视图，任务页按新代次重新读取净差异。
     const reads = calls("taskReview");
+    await switchView("files");
     await fireEvent.click(screen.getByRole("button", { name: "返回任务差异" }));
-    await waitFor(() => expect(activeView()).toBe("history"));
+    await waitFor(() => expect(activeView()).toBe("review"));
     await waitFor(() => expect(calls("taskReview")).toBeGreaterThan(reads));
   });
 
@@ -605,7 +629,7 @@ describe("cliora 来源与编辑", () => {
     render(App);
     await openRepo();
     beginClioraReview({ reviewId: "review-2", sessionId: "session-2", worktreePath: REPO, baseline: null });
-    await fireEvent.click(await screen.findByRole("button", { name: /^返回 cliora/ }));
+    await clickReviewReturn();
     await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith("review-2", "session-2", "reviewed", null));
     expect(screen.queryByRole("dialog", { name: "有未保存的编辑" })).toBeNull();
   });
@@ -763,7 +787,7 @@ describe("离开前保存后的状态", () => {
     await waitFor(() => expect(editorBox()?.value).toBe("line 1\nline 2\nline 3\n"));
     await fireEvent.input(editorBox()!, { target: { value: "edited\n" } });
 
-    await fireEvent.click(screen.getByRole("button", { name: /^返回 cliora/ }));
+    await clickReviewReturn();
     const dialog = await screen.findByRole("dialog", { name: "有未保存的编辑" });
     await fireEvent.click(within(dialog).getByRole("button", { name: "保存" }));
     await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith("review-3", "session-3", "reviewed", null));

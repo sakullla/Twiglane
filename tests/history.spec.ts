@@ -3056,14 +3056,8 @@ describe("提交里的文档阅读与引用收起（R5）", () => {
   });
 });
 
-describe("历史里的 cliora 任务范围", () => {
+describe("历史里的 cliora 任务范围（审查工作台「范围内提交」的落点）", () => {
   const BASE = "b".repeat(40);
-  const taskDetail = createRawSnippet((visible: () => boolean) => ({
-    render: () => `<div class="task-detail-stub" data-initial-visible="${visible()}">任务净差异详情</div>`,
-  }));
-  const summary = {
-    state: "ready" as const, reading: false, files: 3, additions: 12, deletions: 4, commits: 2, dirty: true, baseline: "bbbbbbb", reviewed: 1,
-  };
 
   beforeEach(() => {
     historyPage.mockReset();
@@ -3079,71 +3073,38 @@ describe("历史里的 cliora 任务范围", () => {
     });
   });
 
-  it("跳转后按「起点..HEAD」读取历史，顶部「任务净差异」默认选中，不自动选提交", async () => {
-    const onTaskFocus = vi.fn();
-    render(HistoryPanel, {
-      props: { ...panelProps(), taskRange: { baseline: BASE, nonce: 1 }, taskSummary: summary, taskDetail, onTaskFocus },
-    });
+  it("从审查跳来后按「起点..HEAD」读取历史；历史里不再出现任务净差异行，范围内提交照常选中与查看", async () => {
+    render(HistoryPanel, { props: { ...panelProps(), taskRange: { baseline: BASE, nonce: 1 } } });
     await waitFor(() => expect(historyPage).toHaveBeenCalledWith("/repo", "", 0, 3, 1, { scope: `range:${BASE}` }));
-    const row = await screen.findByRole("button", { name: /任务净差异/ });
-    expect(row.getAttribute("aria-pressed")).toBe("true");
-    expect(row.textContent).toContain("3 个文件");
-    expect(row.textContent).toContain("已审阅 1/3");
-    expect(row.textContent).toContain("含未提交");
-    expect(screen.getByText("任务净差异详情")).toBeTruthy();
     await screen.findByRole("option", { name: /commit-0/ });
-    // 任务净差异占着详情区：没有提交详情，也没有「未选择提交」。
-    expect(document.querySelector(".history-detail .commit-head")).toBeNull();
-    expect(screen.queryByText("未选择提交")).toBeNull();
-    expect(screen.getByRole("option", { name: /commit-0/ }).getAttribute("aria-selected")).toBe("false");
-    expect(commitDetail).not.toHaveBeenCalled();
-    await waitFor(() => expect(onTaskFocus).toHaveBeenLastCalledWith(true));
+    // 任务净差异只在审查视图里：历史顶部没有任务行，也不渲染任务详情。
+    expect(screen.queryByRole("button", { name: /任务净差异/ })).toBeNull();
+    expect(document.querySelector(".task-detail")).toBeNull();
+    // 范围内的第一条提交照常被选中并读取详情。
+    await waitFor(() => expect(screen.getByRole("option", { name: /commit-0/ }).getAttribute("aria-selected")).toBe("true"));
+    await waitFor(() => expect(commitDetail).toHaveBeenCalled());
     // 范围下拉框里有任务范围这一项，离开后还能回来。
     expect(document.querySelector(".history-filters")?.textContent).toContain(`任务范围（${shortOid(BASE)}..HEAD）`);
   });
 
-  it("选中提交时任务净差异隐藏但保活；从第一条提交按上方向键回到任务净差异", async () => {
-    const onTaskFocus = vi.fn();
-    render(HistoryPanel, {
-      props: { ...panelProps(), taskRange: { baseline: BASE, nonce: 1 }, taskSummary: summary, taskDetail, onTaskFocus },
-    });
-    const first = await screen.findByRole("option", { name: /commit-0/ });
-    await fireEvent.click(first);
-    await waitFor(() => expect(commitDetail).toHaveBeenCalled());
-    expect(screen.getByRole("button", { name: /任务净差异/ }).getAttribute("aria-pressed")).toBe("false");
-    // 任务详情保活（仍在 DOM 里），提交详情接管详情区。
-    expect(screen.getByText("任务净差异详情")).toBeTruthy();
-    await waitFor(() => expect(document.querySelector(".history-detail .commit-head")).toBeTruthy());
-    await waitFor(() => expect(onTaskFocus).toHaveBeenLastCalledWith(false));
-
-    await fireEvent.keyDown(screen.getByRole("listbox", { name: "提交历史" }), { key: "ArrowUp" });
-    expect(screen.getByRole("button", { name: /任务净差异/ }).getAttribute("aria-pressed")).toBe("true");
-    expect(document.querySelector(".history-detail .commit-head")).toBeNull();
-    expect(first.getAttribute("aria-selected")).toBe("false");
-    await waitFor(() => expect(onTaskFocus).toHaveBeenLastCalledWith(true));
-    // 再按下方向键进入第一条提交。
-    await fireEvent.keyDown(screen.getByRole("listbox", { name: "提交历史" }), { key: "ArrowDown" });
-    expect(screen.getByRole("option", { name: /commit-0/ }).getAttribute("aria-selected")).toBe("true");
+  it("范围生效时给出「回到审查」，点击交回外壳", async () => {
+    const onReturnToReview = vi.fn();
+    render(HistoryPanel, { props: { ...panelProps(), taskRange: { baseline: BASE, nonce: 1 }, onReturnToReview } });
+    await screen.findByRole("option", { name: /commit-0/ });
+    await fireEvent.click(await screen.findByRole("button", { name: "回到审查" }));
+    expect(onReturnToReview).toHaveBeenCalledTimes(1);
   });
 
-  it("没有任务范围时不显示任务行，也不渲染任务详情", async () => {
+  it("没有任务范围时不显示任务行，也没有回到审查", async () => {
     historyPage.mockResolvedValue({
       generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: [commit(0)],
       scope: "current", branches: ["main"], head: "main",
     });
-    render(HistoryPanel, { props: { ...panelProps(), taskRange: null, taskDetail } });
+    render(HistoryPanel, { props: { ...panelProps(), taskRange: null, onReturnToReview: vi.fn() } });
     await screen.findByRole("option", { name: /commit-0/ });
     expect(screen.queryByRole("button", { name: /任务净差异/ })).toBeNull();
-    expect(screen.queryByText(/任务净差异详情/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "回到审查" })).toBeNull();
     expect(historyPage).toHaveBeenCalledWith("/repo", "", 0, 3, 1);
-  });
-
-  it("任务范围读取失败时行里说明失败，点开看原因", async () => {
-    render(HistoryPanel, {
-      props: { ...panelProps(), taskRange: { baseline: BASE, nonce: 1 }, taskSummary: { ...summary, state: "failed" }, taskDetail },
-    });
-    const row = await screen.findByRole("button", { name: /任务净差异/ });
-    expect(row.textContent).toContain("任务范围读取失败");
   });
 
   it("合并提交详情清晰标识两侧父提交比较基准与改动含义", async () => {

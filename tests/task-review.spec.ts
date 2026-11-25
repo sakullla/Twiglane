@@ -1,8 +1,8 @@
 /**
  * 任务净差异（cliora 审查）：范围上下文、净文件队列、只读净差异与失败恢复。
  *
- * 组件级用例直接渲染 TaskReview，验证它自己的状态机；App 级用例验证外壳接线：
- * 任务范围只来自 cliora 链接，没有独立视图，普通仓库里不出现任务入口。
+ * 组件级用例直接渲染审查工作台（ReviewWorkbench），验证它自己的状态机；App 级用例验证外壳接线：
+ * 任务范围只来自 cliora 链接，「审查」视图只在有审查目标时出现，普通仓库里不出现任务入口。
  * 真实 Git 的净差异语义由 Rust 侧夹具覆盖（src-tauri/src/git/task.rs）。
  */
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
@@ -173,7 +173,9 @@ vi.mock("../src/lib/api", () => ({
 }));
 
 import App from "../src/App.svelte";
-import TaskReview from "../src/lib/components/TaskReview.svelte";
+import TaskReview from "../src/lib/components/review/ReviewWorkbench.svelte";
+import ReviewCompletionBar from "../src/lib/components/review/ReviewCompletionBar.svelte";
+import { reviewCompletion } from "../src/lib/review-completion";
 import { resetClioraReview } from "../src/lib/cliora-review.svelte";
 import type { ReviewComment } from "../src/lib/review-comments.svelte";
 import { resetReviewProgress } from "../src/lib/review-progress.svelte";
@@ -374,9 +376,16 @@ describe("任务审阅组件", () => {
 
   it("没有起点时不建立任务范围，也不用 HEAD 补缺", async () => {
     const onSummary = vi.fn();
-    render(TaskReview, { props: reviewProps({ request: null, onSummary }) });
+    const onShowHistory = vi.fn();
+    const onReturnToCliora = vi.fn();
+    render(TaskReview, { props: reviewProps({ request: null, onSummary, onShowHistory, onReturnToCliora }) });
     await screen.findByText("没有任务范围");
-    expect(screen.getByText("cliora 审查链接没有携带起点。")).toBeTruthy();
+    expect(screen.getByText(/没有携带任务起点；这里不会用 HEAD 或默认分支补缺/)).toBeTruthy();
+    // 无起点状态给出两条可执行的下一步：查看普通历史、返回 Cliora。
+    await fireEvent.click(screen.getByRole("button", { name: "查看普通历史" }));
+    expect(onShowHistory).toHaveBeenCalledTimes(1);
+    await fireEvent.click(screen.getByRole("button", { name: "返回 Cliora" }));
+    expect(onReturnToCliora).toHaveBeenCalledTimes(1);
     expect(mocks.api.taskReview).not.toHaveBeenCalled();
     expect(document.querySelector(".file-list")).toBeNull();
     expect(document.querySelector(".task-baseline")).toBeNull();
@@ -933,7 +942,7 @@ describe("任务审阅的行意见（feedback-v1 准备侧）", () => {
 
   it("在差异行上加意见：行身份来自真实行号，正文非空才提交", async () => {
     const onAddComment = vi.fn();
-    render(TaskReview, { props: reviewProps({ onAddComment, onPrepareFeedback: vi.fn() }) });
+    render(TaskReview, { props: reviewProps({ onAddComment }) });
     await screen.findByRole("listbox", { name: "任务文件" });
     const button = await waitFor(() => {
       const found = document.querySelector<HTMLButtonElement>("[data-comment-line]");
@@ -965,7 +974,7 @@ describe("任务审阅的行意见（feedback-v1 准备侧）", () => {
       const header: DiffLine = { kind: "hunk", text: "@@ -1,6 +1,6 @@", oldNo: null, newNo: null, hunkIndex: 0 };
       return { ...base, lines: [header, ...base.lines], totalLines: base.lines.length + 1 };
     });
-    render(TaskReview, { props: reviewProps({ onAddComment, onPrepareFeedback: vi.fn() }) });
+    render(TaskReview, { props: reviewProps({ onAddComment }) });
     await screen.findByRole("listbox", { name: "任务文件" });
     const button = await waitFor(() => {
       const found = document.querySelector<HTMLButtonElement>("[data-hunk-comment]");
@@ -999,7 +1008,6 @@ describe("任务审阅的行意见（feedback-v1 准备侧）", () => {
         commentKeys: new Set([anchorKeyValue]),
         onEditComment,
         onDeleteComment,
-        onPrepareFeedback: vi.fn(),
       }),
     });
     await screen.findByRole("listbox", { name: "任务文件" });
@@ -1016,35 +1024,42 @@ describe("任务审阅的行意见（feedback-v1 准备侧）", () => {
 
     await fireEvent.click(within(panel).getByRole("button", { name: "删除" }));
     expect(onDeleteComment).toHaveBeenCalledWith(stored.id);
-    rerender(reviewProps({ comments: [], commentKeys: new Set(), onPrepareFeedback: vi.fn() }));
+    rerender(reviewProps({ comments: [], commentKeys: new Set() }));
     await waitFor(() => expect(document.body.textContent).toContain("还没有意见"));
   });
 
   it("只有写好的意见才允许准备送回，准备中禁用按钮并显示进行中", async () => {
-    const onPrepareFeedback = vi.fn();
-    const { rerender } = render(TaskReview, {
-      props: reviewProps({ comments: [], onPrepareFeedback }),
-    });
-    await screen.findByRole("listbox", { name: "任务文件" });
-    const empty = await screen.findByRole("button", { name: "准备把这批意见送回原任务" });
-    expect((empty as HTMLButtonElement).disabled).toBe(true);
-    expect(empty.getAttribute("title")).toContain("先在差异行上写一条意见");
+    // 送回入口在审查工作台底部的完成栏：没有意见时不出现送回动作，主动作是返回 Cliora。
+    const onFeedback = vi.fn();
+    const base = {
+      source: "local" as const,
+      draftCount: 0,
+      staleCount: 0,
+      handoff: { state: "idle" as const },
+      gitResult: { kind: "none" as const },
+      worktree: { state: "clean" as const },
+      returnState: { state: "idle" as const },
+      writeLocked: false,
+      canFeedback: true,
+    };
+    const { rerender } = render(ReviewCompletionBar, { props: { model: reviewCompletion({ ...base, commentCount: 0 }), onFeedback } });
+    expect(screen.queryByRole("button", { name: /送回/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "返回 Cliora" })).toBeTruthy();
 
-    rerender(reviewProps({ comments: [comment()], commentKeys: new Set([anchorKeyValue]), onPrepareFeedback }));
-    const ready = await screen.findByRole("button", { name: "准备把这批意见送回原任务" });
-    expect((ready as HTMLButtonElement).disabled).toBe(false);
+    await rerender({ model: reviewCompletion({ ...base, commentCount: 1 }), onFeedback });
+    const ready = screen.getByRole("button", { name: "送回 1 条意见" }) as HTMLButtonElement;
+    expect(ready.disabled).toBe(false);
+    expect(ready.getAttribute("title")).toContain("先在 Cliora 确认");
     await fireEvent.click(ready);
-    expect(onPrepareFeedback).toHaveBeenCalledTimes(1);
+    expect(onFeedback).toHaveBeenCalledTimes(1);
 
-    rerender(reviewProps({
-      comments: [comment()],
-      commentKeys: new Set([anchorKeyValue]),
-      onPrepareFeedback,
-      feedbackPreparing: true,
-    }));
-    const busy = await screen.findByRole("button", { name: "准备把这批意见送回原任务" });
-    expect((busy as HTMLButtonElement).disabled).toBe(true);
-    expect(busy.textContent).toContain("正在准备");
+    await rerender({ model: reviewCompletion({ ...base, commentCount: 1, handoff: { state: "preparing" } }), onFeedback });
+    const busy = screen.getByRole("button", { name: "正在准备…" }) as HTMLButtonElement;
+    expect(busy.disabled).toBe(true);
+    // 准备中两个动作都禁用：不会在交接未完成时再返回。
+    expect((screen.getByRole("button", { name: "返回 Cliora" }) as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.click(busy);
+    expect(onFeedback).toHaveBeenCalledTimes(1);
   });
 
   it("失效说明与准备结果只作为说明展示，不会把旧意见当成当前范围的意见", async () => {
@@ -1053,13 +1068,13 @@ describe("任务审阅的行意见（feedback-v1 准备侧）", () => {
         comments: [],
         commentKeys: new Set(),
         commentNotice: "任务范围（起点、HEAD 或工作区）已经变化，这批意见不会自动对应到新行号。",
-        onPrepareFeedback: vi.fn(),
+        onAddComment: vi.fn(),
       }),
     });
     await screen.findByRole("listbox", { name: "任务文件" });
-    const group = await screen.findByRole("group", { name: "审阅意见" });
-    expect(within(group).getByText(/不会自动对应到新行号/)).toBeTruthy();
-    await fireEvent.click(within(group).getByRole("button", { name: "查看意见列表" }));
+    const notice = await screen.findByText(/不会自动对应到新行号/);
+    expect(notice.getAttribute("role")).toBe("status");
+    await fireEvent.click(screen.getByRole("button", { name: "查看意见列表" }));
     expect(within(await screen.findByLabelText("意见列表")).getByText("还没有意见。点块标题上的「评论此块」一次说一整块，或用行尾气泡说某一行。")).toBeTruthy();
   });
 });

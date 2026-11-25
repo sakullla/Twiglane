@@ -19,8 +19,17 @@ export type CommandGroup = "视图" | "提交" | "同步" | "任务" | "仓库" 
 
 export interface CommandState {
   hasRepo: boolean;
-  /** 当前视图；历史里选中「任务净差异」时为 task。 */
+  /** 当前视图；审查工作台里有任务范围时为 task。 */
   workspaceView: CommandView;
+  /**
+   * 审查工作台：是否存在审查目标（本地已接受来源或远程审查来源），以及完成栏两个动作的
+   * 不可用原因（null 表示可用）。缺省时视为没有审查目标。
+   */
+  reviewWorkbench?: {
+    available: boolean;
+    feedbackReason: string | null;
+    returnReason: string | null;
+  } | null;
   taskModal: TaskModal | null;
   sidebarHidden: boolean;
   writeLocked: boolean;
@@ -158,6 +167,8 @@ const commitReason = (state: CommandState) => {
 };
 
 const NO_FILE_REASON = "先选择一个文件";
+/** 审查工作台只在有审查目标时存在。 */
+const NO_REVIEW_TARGET = "没有审查来源：从 Cliora 发起审查后可用";
 /** 只有改动视图与历史里的任务净差异有审阅队列；其它位置说明原因，而不是说「先选文件」。 */
 const NO_REVIEW_QUEUE = "当前视图没有审阅队列";
 /** 整文件写入不可用的原因：没有选中、正在读写、或这一侧本来就没有可写的真实改动。 */
@@ -221,6 +232,34 @@ const VIEW_COMMANDS: CommandSpec[] = [
     shortcut: `${MODIFIER_LABEL} 3`,
     available: filesAvailable,
     reason: filesReason,
+  },
+  {
+    /** 审查工作台：排在第四位，只在有审查目标时可用。 */
+    id: "view.review",
+    group: "视图",
+    title: "审查",
+    hint: "打开 Cliora 审查工作台：任务净差异、意见与返回",
+    shortcut: `${MODIFIER_LABEL} 4`,
+    available: (state) => hasRepo(state) && Boolean(state.reviewWorkbench?.available),
+    reason: (state) => (state.hasRepo ? NO_REVIEW_TARGET : "先打开一个仓库"),
+  },
+  {
+    id: "review.feedback",
+    group: "视图",
+    title: "送回意见",
+    hint: "准备这批意见并打开 Cliora 预览；先在 Cliora 确认后才会发送",
+    available: (state) => hasRepo(state) && Boolean(state.reviewWorkbench?.available) && state.reviewWorkbench?.feedbackReason === null,
+    reason: (state) =>
+      !state.hasRepo ? "先打开一个仓库" : !state.reviewWorkbench?.available ? NO_REVIEW_TARGET : (state.reviewWorkbench.feedbackReason ?? "当前不可用"),
+  },
+  {
+    id: "review.return",
+    group: "视图",
+    title: "返回 Cliora",
+    hint: "把 Git 结果与工作区状态带回 Cliora；不写 Git、不关闭来源",
+    available: (state) => hasRepo(state) && Boolean(state.reviewWorkbench?.available) && state.reviewWorkbench?.returnReason === null,
+    reason: (state) =>
+      !state.hasRepo ? "先打开一个仓库" : !state.reviewWorkbench?.available ? NO_REVIEW_TARGET : (state.reviewWorkbench.returnReason ?? "当前不可用"),
   },
   {
     id: "file.prev",
@@ -770,6 +809,9 @@ const PALETTE_ALIASES: Record<string, string> = {
   "view.changes": "changes status diff 工作区 未提交",
   "view.history": "history log 日志 提交记录",
   "view.files": "files tree explorer 文件树 目录 浏览",
+  "view.review": "review cliora 审查 任务净差异 工作台",
+  "review.feedback": "feedback cliora comments 意见 交接 送回",
+  "review.return": "return cliora 返回 回报",
   "file.prev": "previous file",
   "file.next": "next file",
   "review.prev": "review previous",

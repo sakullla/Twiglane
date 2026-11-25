@@ -318,12 +318,32 @@ describe("视图切换", () => {
     expect(onView).toHaveBeenCalledWith("files");
   });
 
-  it("有 cliora 任务范围时历史项带提示点，名称说明从历史进入审查", () => {
-    const { container } = render(ViewSwitcher, { props: { view: "changes", taskActive: true, onView: () => {} } });
-    const history = screen.getByRole("button", { name: "提交历史（含 cliora 任务范围）" });
-    expect(history.querySelector(".view-task-dot")).toBeTruthy();
-    expect(history.getAttribute("title")).toContain("任务净差异");
-    expect(container.querySelectorAll(".view-task-dot")).toHaveLength(1);
+  it("有审查目标时出现第四项「审查」（Mod+4），历史项不再承载任务入口", async () => {
+    const onView = vi.fn();
+    const { container } = render(ViewSwitcher, { props: { view: "changes", review: { comments: 2, tone: "ok" }, onView } });
+    const nav = screen.getByRole("navigation", { name: "视图" });
+    expect([...nav.querySelectorAll("button")].map((item) => item.dataset.view)).toEqual(["changes", "history", "files", "review"]);
+    const review = screen.getByRole("button", { name: "审查（2 条意见）" });
+    expect(review.getAttribute("title")).toContain("+4");
+    expect(review.querySelector(".count")?.textContent).toBe("2");
+    // 历史项恢复为普通的提交历史，没有任务提示点。
+    expect(screen.getByRole("button", { name: "提交历史" })).toBeTruthy();
+    expect(container.querySelector(".view-task-dot")).toBeNull();
+    await fireEvent.click(review);
+    expect(onView).toHaveBeenCalledWith("review");
+  });
+
+  it("审查来源需要处理时不只靠颜色：名称、提示与图标都说明", () => {
+    const { container } = render(ViewSwitcher, { props: { view: "review", review: { comments: 0, tone: "warn" }, onView: () => {} } });
+    const review = screen.getByRole("button", { name: "审查（需要处理）" });
+    expect(review.getAttribute("aria-current")).toBe("page");
+    expect(review.getAttribute("title")).toContain("来源需要处理");
+    expect(container.querySelector('.view-review-dot[data-tone="warn"] svg')).toBeTruthy();
+  });
+
+  it("普通独立仓库（没有审查目标）不显示审查项", () => {
+    render(ViewSwitcher, { props: { view: "changes", onView: () => {} } });
+    expect(screen.queryByRole("button", { name: /^审查/ })).toBeNull();
   });
 
   it("名称和快捷键由标签与提示承载，没有改动时不显示 0", () => {

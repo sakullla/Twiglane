@@ -63,15 +63,33 @@ describe("视图命令", () => {
     expect(shortcutCommand({ key: "2", ctrlKey: true })).toBe("view.history");
     expect(shortcutCommand({ key: "3", ctrlKey: true })).toBe("view.files");
     expect(shortcutCommand({ key: "3", metaKey: true })).toBe("view.files");
-    // 任务范围并入历史：数字 4 不再对应任何视图。
-    expect(shortcutCommand({ key: "4", ctrlKey: true })).toBeNull();
+    // 审查是第四个视图：数字 4 对应审查工作台，5 仍不对应任何视图。
+    expect(shortcutCommand({ key: "4", ctrlKey: true })).toBe("view.review");
+    expect(shortcutCommand({ key: "5", ctrlKey: true })).toBeNull();
     // Shift 仍然不参与数字视图切换。
     expect(shortcutCommand({ key: "3", ctrlKey: true, shiftKey: true })).toBeNull();
   });
 
-  it("命令面板里三个视图连续出现，顺序与快捷键 1/2/3 一致", () => {
+  it("命令面板里四个视图连续出现，顺序与快捷键 1/2/3/4 一致", () => {
     const titles = paletteItems(state()).filter((item) => item.group === "视图").map((item) => item.title);
-    expect(titles.slice(0, 3)).toEqual(["改动", "提交历史", "文件"]);
+    expect(titles.slice(0, 4)).toEqual(["改动", "提交历史", "文件", "审查"]);
+  });
+
+  it("审查视图与完成动作只在有审查目标时可用，并给出禁用原因", () => {
+    const none = state();
+    for (const id of ["view.review", "review.feedback", "review.return"]) {
+      expect(commandAvailable(commandById(id)!, none), id).toBe(false);
+      expect(commandReason(commandById(id)!, none), id).toContain("没有审查来源");
+    }
+    const ready = state({ reviewWorkbench: { available: true, feedbackReason: null, returnReason: null } });
+    for (const id of ["view.review", "review.feedback", "review.return"]) {
+      expect(commandAvailable(commandById(id)!, ready), id).toBe(true);
+    }
+    const busy = state({ reviewWorkbench: { available: true, feedbackReason: "先写一条意见，再送回原任务", returnReason: "正在准备意见交接，请稍候。" } });
+    expect(commandAvailable(commandById("view.review")!, busy)).toBe(true);
+    expect(commandReason(commandById("review.feedback")!, busy)).toBe("先写一条意见，再送回原任务");
+    expect(commandReason(commandById("review.return")!, busy)).toBe("正在准备意见交接，请稍候。");
+    expect(commandById("view.review")!.shortcut).toContain("4");
   });
 
   it("文件视图的上下文件切换读文件视图自己的导航状态", () => {
@@ -173,6 +191,9 @@ describe("文件导航命令", () => {
       "view.changes",
       "view.history",
       "view.files",
+      "view.review",
+      "review.feedback",
+      "review.return",
       "file.prev",
       "file.next",
       "review.prev",

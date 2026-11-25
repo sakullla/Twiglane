@@ -22,16 +22,23 @@ import {
 import {
   addComment as addCommentRecord,
   adoptCommentScope,
+  commentDraft,
+  commentDraftCount,
+  commentScopeKey,
+  commentsIn,
   deleteComment as deleteCommentRecord,
   editComment as editCommentRecord,
   feedbackComments,
   forgetComments,
+  previewComments,
   recordPreparedComments,
   snapshotPreparedComments,
   staleBatches,
+  unsentComments,
   type CommentScope,
   type ReviewCommentAnchor,
 } from "./review-comments.svelte";
+import type { ReviewHandoffState, ReviewReturnState, ReviewWorktreeState } from "./review-completion";
 import {
   CHANGES_SCOPE,
   applyReviewReverificationIn,
@@ -44,7 +51,6 @@ import { forgetWorkbenchState } from "./review-workbench.svelte";
 import { hueOf } from "./ui";
 import { checkoutKey, projectInitial, type Projects } from "./workspaces";
 import type { OpenedRepository } from "./types";
-import type { SelectMenuOption } from "./components/SelectMenu.svelte";
 
 /**
  * 任务页报告的已解析范围。`generation` 是这次读取被校验过的仓库代次：起点、HEAD 与
@@ -79,7 +85,27 @@ export interface ReviewActionsHost {
   closeTask(): void;
   closeReviewManager(refocus: boolean): void;
   clearSourcesNotice(): void;
+  /** 当前来源被关闭：撤下任务范围，工作台转到「没有审查来源」状态。不自动选择其他来源。 */
+  clearTaskReview?(): void;
 }
+
+/** 来源本身的问题：已失效（原生不再认识）或协议版本不兼容。工作台据此显示整页状态。 */
+export interface ReviewSourceIssue {
+  kind: "expired" | "version";
+  message: string;
+}
+
+/** 关闭某个来源会丢掉的内容：未送回的意见与意见草稿。 */
+export interface ReviewCloseImpact {
+  reviewId: string;
+  unsent: number;
+  drafts: number;
+  /** 可复制的文字：未送回意见的预览与草稿正文。 */
+  text: string;
+}
+
+const SOURCE_EXPIRED_CODES = new Set(["source_expired"]);
+const SOURCE_VERSION_CODES = new Set(["unsupported_version"]);
 
 function samePath(a: string, b: string): boolean {
   return checkoutKey(a) === checkoutKey(b);
@@ -90,10 +116,82 @@ export class ReviewActions {
   feedbackPreparing = $state(false);
   /** 最近一次准备送回的结论（成功或失败）；新增/编辑/删除意见或范围清空时收起。 */
   feedbackNotice = $state<string | null>(null);
+  /** 正在返回 Cliora：防重入，准备与返回互斥。 */
+  returning = $state(false);
+  /** 按 reviewId 保存的交接、返回与来源问题：迟到的响应只写回自己的来源，不覆盖新来源。 */
+  handoffs = $state<Record<string, ReviewHandoffState>>({});
+  returns = $state<Record<string, ReviewReturnState>>({});
+  returnedWorktree = $state<Record<string, ReviewWorktreeState>>({});
+  sourceIssues = $state<Record<string, ReviewSourceIssue>>({});
+  /** 每个来源最近一次生效的意见范围：非当前来源关闭时据此计算未送回的意见。 */
+  private scopes = $state<Record<string, CommentScope>>({});
+  private returnCounts: Record<string, number> = {};
   private reviewSerial = 0;
   private taskReviewSerial = 0;
 
   constructor(private readonly host: ReviewActionsHost) {}
+
+  handoffOf(reviewId: string | null | undefined): ReviewHandoffState {
+    return (reviewId && this.handoffs[reviewId]) || { state: "idle" };
+  }
+
+  returnOf(reviewId: string | null | undefined): ReviewReturnState {
+    return (reviewId && this.returns[reviewId]) || { state: "idle" };
+  }
+
+  issueOf(reviewId: string | null | undefined): ReviewSourceIssue | null {
+    return (reviewId && this.sourceIssues[reviewId]) || null;
+  }
+
+  /** 记住来源的当前意见范围（App 在 commentScope 变化时调用）。 */
+  rememberScope(scope: CommentScope | null): void {
+    if (!scope) return;
+    const known = this.scopes[scope.reviewId];
+    if (known && commentScopeKey(known) === commentScopeKey(scope)) return;
+    this.scopes = { ...this.scopes, [scope.reviewId]: scope };
+  }
+
+  /** 某来源当前批次的意见数与未送回数；没有读到过范围时都是 0。 */
+  commentCounts(reviewId: string): { comments: number; unsent: number } {
+    const scope = this.scopes[reviewId];
+    if (!scope) return { comments: 0, unsent: 0 };
+    return { comments: commentsIn(scope).length, unsent: unsentComments(scope).length };
+  }
+
+  /** 关闭前的影响：未送回意见与草稿。两者都为 0 时关闭不需要确认。 */
+  closeImpact(reviewId: string): ReviewCloseImpact {
+    const scope = this.scopes[reviewId];
+    const unsent = scope ? unsentComments(scope) : [];
+    const drafts = commentDraftCount(reviewId);
+    const parts: string[] = [];
+    if (unsent.length > 0) parts.push(previewComments(unsent));
+    const draft = commentDraft(reviewId);
+    if (drafts > 0 && draft) parts.push("（草稿）" + (draft.anchor ? draft.anchor.path + "\n" : "") + draft.body.trim());
+    return { reviewId, unsent: unsent.length, drafts, text: parts.join("\n\n") };
+  }
+
+  private forgetLocal(reviewId: string): void {
+    const drop = <T>(record: Record<string, T>): Record<string, T> => {
+      if (!Object.hasOwn(record, reviewId)) return record;
+      const next = { ...record };
+      delete next[reviewId];
+      return next;
+    };
+    this.handoffs = drop(this.handoffs);
+    this.returns = drop(this.returns);
+    this.returnedWorktree = drop(this.returnedWorktree);
+    this.sourceIssues = drop(this.sourceIssues);
+    this.scopes = drop(this.scopes);
+    delete this.returnCounts[reviewId];
+  }
+
+  /** 失败码说明来源本身不再成立时，记到这个来源上，工作台显示整页状态。 */
+  private noteSourceIssue(reviewId: string, error: unknown): void {
+    const failure = normalizeError(error);
+    const kind = SOURCE_EXPIRED_CODES.has(failure.code) ? "expired" : SOURCE_VERSION_CODES.has(failure.code) ? "version" : null;
+    if (!kind) return;
+    this.sourceIssues = { ...this.sourceIssues, [reviewId]: { kind, message: failure.message } };
+  }
 
   /**
    * 刷新后只重验已标记的路径：token 相同保留，内容或状态变化、文件消失、
@@ -254,9 +352,11 @@ export class ReviewActions {
       host.notice("工作区在这次任务读取之后又变化了，先重新读取任务再准备送回；这批意见不会送出。", "warn");
       return;
     }
-    if (this.feedbackPreparing) return;
+    if (this.feedbackPreparing || this.returning) return;
     this.feedbackPreparing = true;
     this.feedbackNotice = null;
+    const reviewId = source.reviewId;
+    this.handoffs = { ...this.handoffs, [reviewId]: { state: "preparing" } };
     try {
       const prepared = await api.prepareReviewFeedback({
         reviewId: source.reviewId,
@@ -271,11 +371,14 @@ export class ReviewActions {
       });
       // 记下这次成功准备的意见签名：之后新增或改过的意见才算「未送回」。
       recordPreparedComments(scope, sentSignature);
+      this.handoffs = { ...this.handoffs, [reviewId]: { state: "prepared", feedbackId: prepared.feedbackId, commentCount: prepared.commentCount } };
       this.feedbackNotice = "已准备 " + prepared.commentCount + " 条意见（批次 " + prepared.feedbackId.slice(0, 8) + "）。到 Cliora 里确认预览后再发送，这里没有发送任何内容。";
       host.notice(this.feedbackNotice);
     } catch (error) {
       // 失败不打开 cliora：意见、原任务与所有草稿都保留，用户可以重新准备。
       this.feedbackNotice = "这批意见没有准备好，Cliora 没有被唤起。意见仍保留，可以再试一次。";
+      this.handoffs = { ...this.handoffs, [reviewId]: { state: "failed", message: normalizeError(error).message } };
+      this.noteSourceIssue(reviewId, error);
       host.showError(error);
     } finally {
       this.feedbackPreparing = false;
@@ -300,33 +403,62 @@ export class ReviewActions {
     const source = clioraReview.source;
     const opened = host.opened();
     if (!source || !opened || !clioraSourceMatches(opened.summary.path)) return;
-    // 返回来源前未保存的草稿必须有结论：保存只写工作区，不会变成提交或合入结果。
-    if (!(await host.confirmEditorLeave("返回 cliora"))) return;
-    if (clioraReview.source?.reviewId !== source.reviewId) return;
-    const { outcome, headOid } = clioraReturnOutcome();
-    // 工作区声明由后端按来源工作树读取真实 Git 状态填写，前端不声明。这里刷新一次只为
-    // 后端没给出结果时提示仍按真实快照说明；当前仓库已不是来源工作树就当作没读到。
-    const fresh = await host.refresh().catch(() => false);
-    if (clioraReview.source?.reviewId !== source.reviewId) return;
-    const current = host.opened();
-    const localUncommitted =
-      fresh && current && clioraSourceMatches(current.summary.path) ? current.snapshot.files.length : null;
+    // 防重入：返回或准备送回进行中时再次点击不产生第二次交接。
+    if (this.returning || this.feedbackPreparing) return;
+    const reviewId = source.reviewId;
+    this.returning = true;
+    const previous = this.returnOf(reviewId);
+    this.returns = { ...this.returns, [reviewId]: { state: "returning" } };
+    let settled = false;
     try {
-      const sent = await api.clioraReviewReturn(source.reviewId, source.sessionId, outcome, headOid);
-      await this.refreshClioraSources();
-      // 普通保存不制造提交或合入结果；工作区还有未提交修改时如实说出来，不再说「只做了浏览」。
-      host.notice(clioraReturnNotice(outcome, sent, localUncommitted));
-    } catch (error) {
-      if (normalizeError(error).code === "source_result_changed") {
+      // 返回来源前未保存的草稿必须有结论：保存只写工作区，不会变成提交或合入结果。
+      if (!(await host.confirmEditorLeave("返回 cliora"))) return;
+      if (clioraReview.source?.reviewId !== reviewId) return;
+      const { outcome, headOid } = clioraReturnOutcome();
+      // 工作区声明由后端按来源工作树读取真实 Git 状态填写，前端不声明。这里刷新一次只为
+      // 后端没给出结果时提示仍按真实快照说明；当前仓库已不是来源工作树就当作没读到。
+      const fresh = await host.refresh().catch(() => false);
+      if (clioraReview.source?.reviewId !== reviewId) return;
+      const current = host.opened();
+      const localUncommitted =
+        fresh && current && clioraSourceMatches(current.summary.path) ? current.snapshot.files.length : null;
+      try {
+        const sent = await api.clioraReviewReturn(source.reviewId, source.sessionId, outcome, headOid);
         await this.refreshClioraSources();
+        const count = (this.returnCounts[reviewId] ?? 0) + 1;
+        this.returnCounts[reviewId] = count;
+        const revision = clioraReview.source?.reviewId === reviewId ? Math.max(clioraReview.lastReturn?.revision ?? 0, count) : count;
+        // 迟到的响应只写回发起它的来源：按 reviewId 保存，切到新来源不会被覆盖。
+        this.returns = { ...this.returns, [reviewId]: { state: "returned", revision } };
+        if (sent && (sent.worktreeState === "clean" || sent.worktreeState === "dirty" || sent.worktreeState === "unknown")) {
+          const worktree: ReviewWorktreeState =
+            sent.worktreeState === "dirty" ? { state: "dirty", count: sent.uncommitted ?? null } : { state: sent.worktreeState };
+          this.returnedWorktree = { ...this.returnedWorktree, [reviewId]: worktree };
+        }
+        settled = true;
+        // 普通保存不制造提交或合入结果；工作区还有未提交修改时如实说出来，不再说「只做了浏览」。
+        host.notice(clioraReturnNotice(outcome, sent, localUncommitted));
+      } catch (error) {
+        if (normalizeError(error).code === "source_result_changed") {
+          await this.refreshClioraSources();
+        }
+        this.returns = { ...this.returns, [reviewId]: { state: "failed", message: normalizeError(error).message } };
+        this.noteSourceIssue(reviewId, error);
+        settled = true;
+        host.showError(error);
       }
-      host.showError(error);
+    } finally {
+      this.returning = false;
+      // 用户取消或来源已切走：恢复发起前的返回状态，不留下「正在返回」。
+      if (!settled && this.returns[reviewId]?.state === "returning") {
+        this.returns = { ...this.returns, [reviewId]: previous };
+      }
     }
   }
 
   async chooseClioraReview(reviewId: string): Promise<void> {
     const host = this.host;
-    if (!reviewId) { selectClioraSource(null); host.closeTask(); return; }
+    if (!reviewId) { selectClioraSource(null); host.closeTask(); host.clearTaskReview?.(); return; }
     const source = clioraReview.sources.find((item) => item.reviewId === reviewId);
     if (!source || host.switchBlocked()) return;
     let opened = host.opened();
@@ -346,8 +478,12 @@ export class ReviewActions {
       forgetClioraReview(source.reviewId);
       forgetComments(source.reviewId);
       forgetWorkbenchState(source.reviewId);
-      if (wasActive) host.closeTask();
-      host.notice("已关闭此审查来源；仓库、阅读记录和草稿仍保留。需要审查时从 Cliora 重新发起。");
+      this.forgetLocal(source.reviewId);
+      if (wasActive) {
+        host.closeTask();
+        host.clearTaskReview?.();
+      }
+      host.notice("已关闭此审查来源；仓库与阅读记录已保留。需要审查时从 Cliora 重新发起。");
     } catch (error) { host.showError(error); }
   }
 
@@ -368,14 +504,18 @@ export class ReviewActions {
         forgetClioraReview(source.reviewId);
         forgetComments(source.reviewId);
         forgetWorkbenchState(source.reviewId);
+        this.forgetLocal(source.reviewId);
       } catch (error) {
         failure ??= error;
       }
     }
     host.clearSourcesNotice();
-    if (wasActive) host.closeTask();
+    if (wasActive) {
+      host.closeTask();
+      host.clearTaskReview?.();
+    }
     if (failure) host.showError(failure);
-    else if (sources.length > 0) host.notice("已关闭全部审查来源；仓库、阅读记录和草稿仍保留。需要审查时从 Cliora 重新发起。");
+    else if (sources.length > 0) host.notice("已关闭全部审查来源；仓库与阅读记录已保留。需要审查时从 Cliora 重新发起。");
   }
 }
 
@@ -427,38 +567,92 @@ export function clioraProjectLabel(source: ClioraReviewSource, projects: Project
   return (source.workspaceName ?? project?.manifest.name ?? source.workspaceId.slice(0, 8)) + (!project ? "（项目未关联）" : !membership ? "（仓库未关联）" : "");
 }
 
+/** 来源菜单里的一项：人类可读信息在前，ID、路径与协议版本放在详情里。 */
+export interface ReviewSourceEntry {
+  reviewId: string;
+  repoName: string;
+  projectLabel: string;
+  /** 当前正在审查的来源。 */
+  active: boolean;
+  /** 来源工作树就是当前打开的仓库。 */
+  inCurrentRepo: boolean;
+  /** 「最新发起 / 较早发起」：只有多个来源时才有。 */
+  order: "最新发起" | "较早发起" | null;
+  /** 接受时间的相对文字；原生没给时间（旧快照）时为 null。 */
+  acceptedLabel: string | null;
+  acceptedAt: number | null;
+  comments: number;
+  unsent: number;
+  drafts: number;
+  /** 已审阅文件数；total 只有当前来源已读到任务时才知道。 */
+  reviewed: number;
+  total: number | null;
+  hue: number;
+  badge: string;
+  details: { label: string; value: string }[];
+}
+
+export interface ReviewSourceEntryInfo {
+  acceptedAt(reviewId: string): number | null;
+  comments(reviewId: string): { comments: number; unsent: number; drafts: number };
+  progress(source: ClioraReviewSource): { reviewed: number; total: number | null };
+  relative(ms: number): string;
+}
+
 /**
- * 来源下拉：仓库名为主，第二行是项目、会话、任务起点与审查号。
- * 同一会话对同一工作树重复发起时标出「最新 / 较早第 N 次」，并给出起点与审查号，
- * 用户能分清要回报哪一次。当前仓库的来源排在前面。
+ * 来源菜单：当前来源在最前，其余按接受时间从新到旧（没有时间的按到达顺序排在后面）。
+ * 只有一个来源时不标「最新 / 较早」；多个来源时接受时间最新的一项是「最新发起」。
  */
-export function clioraSourceOptions(
+export function reviewSourceEntries(
   sources: readonly ClioraReviewSource[],
+  activeId: string | null,
   currentPath: string | null,
   projects: Projects,
-): SelectMenuOption[] {
-  const ranks = clioraSourceRanks(sources);
-  const isCurrent = (source: ClioraReviewSource) => currentPath !== null && samePath(source.worktreePath, currentPath);
-  return [
-    { value: "", label: "不使用审查来源", detail: "独立操作当前仓库，不回报给 Cliora", icon: "x" },
-    ...[...sources]
-      .sort((a, b) => Number(isCurrent(b)) - Number(isCurrent(a)))
-      .map((source) => {
-        const repeat = clioraRepeatLabel(source, ranks);
-        const parts = [
-          clioraProjectLabel(source, projects),
-          `会话 ${source.sessionId.slice(0, 8)}`,
-          source.baseline ? `起点 ${source.baseline.slice(0, 7)}` : "无起点",
-          `审查 ${source.reviewId.slice(0, 8)}`,
-        ];
-        return {
-          value: source.reviewId,
-          label: clioraRepoName(source),
-          detail: parts.join(" · "),
-          badge: projectInitial(clioraRepoName(source)),
-          hue: hueOf(source.worktreePath),
-          tag: repeat ?? (isCurrent(source) ? "当前仓库" : undefined),
-        };
-      }),
+  info: ReviewSourceEntryInfo,
+): ReviewSourceEntry[] {
+  const arrival = new Map(sources.map((source, index) => [source.reviewId, index]));
+  const stamp = (source: ClioraReviewSource) => info.acceptedAt(source.reviewId);
+  const newestFirst = [...sources].sort((a, b) => {
+    const left = stamp(a);
+    const right = stamp(b);
+    if (left !== null && right !== null && left !== right) return right - left;
+    if (left !== null && right === null) return -1;
+    if (left === null && right !== null) return 1;
+    return (arrival.get(b.reviewId) ?? 0) - (arrival.get(a.reviewId) ?? 0);
+  });
+  const newest = newestFirst[0]?.reviewId ?? null;
+  const ordered = [
+    ...newestFirst.filter((source) => source.reviewId === activeId),
+    ...newestFirst.filter((source) => source.reviewId !== activeId),
   ];
+  return ordered.map((source) => {
+    const accepted = stamp(source);
+    const counts = info.comments(source.reviewId);
+    const progress = info.progress(source);
+    const details = [
+      { label: "工作树", value: source.worktreePath },
+      { label: "任务起点", value: source.baseline ?? "无起点" },
+      { label: "会话 ID", value: source.sessionId },
+      { label: "审查 ID", value: source.reviewId },
+      { label: "协议版本", value: `v${source.protocolVersion}` },
+    ];
+    return {
+      reviewId: source.reviewId,
+      repoName: clioraRepoName(source),
+      projectLabel: clioraProjectLabel(source, projects),
+      active: source.reviewId === activeId,
+      inCurrentRepo: currentPath !== null && samePath(source.worktreePath, currentPath),
+      order: sources.length < 2 ? null : source.reviewId === newest ? "最新发起" : "较早发起",
+      acceptedAt: accepted,
+      acceptedLabel: accepted !== null ? info.relative(accepted) : null,
+      comments: counts.comments,
+      unsent: counts.unsent,
+      drafts: counts.drafts,
+      reviewed: progress.reviewed,
+      total: progress.total,
+      hue: hueOf(source.worktreePath),
+      badge: projectInitial(clioraRepoName(source)),
+      details,
+    };
+  });
 }

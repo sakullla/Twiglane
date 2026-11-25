@@ -191,7 +191,7 @@ vi.mock("../src/lib/api", () => ({
 
 import App from "../src/App.svelte";
 import { remoteReviewPort as reviews } from "../src/lib/remote-worktree";
-import { menuValues, pickMenu } from "./select-menu-helpers";
+
 
 function resetMocks() {
   for (const fn of mocks.created.values()) fn.mockReset();
@@ -280,6 +280,70 @@ async function mountShell() {
   return handler;
 }
 
+/** 当前可见视图（切换条上 aria-current 的那一项）。 */
+function activeViewId(): string | null {
+  return document.querySelector<HTMLElement>('.workbench-view[data-active="true"] [aria-current="page"]')?.getAttribute("data-view") ?? null;
+}
+
+/** 从起始页打开最近仓库（夹具里 openRepository 决定实际打开哪个工作树）。 */
+async function openRecentRepo() {
+  await waitFor(() => expect(document.querySelector(".welcome-recent button")).toBeTruthy());
+  await fireEvent.click(document.querySelector<HTMLButtonElement>(".welcome-recent button")!);
+  await waitFor(() => expect(document.querySelector('.workbench-view[data-active="true"] nav[aria-label="视图"]')).toBeTruthy());
+}
+
+/** 进入审查视图：深链建立来源后外壳已经在这里；恢复的来源从切换条的「审查」进入。 */
+async function openReviewView() {
+  if (activeViewId() !== "review") {
+    const button = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>('.workbench-view[data-active="true"] nav[aria-label="视图"] [data-view="review"]');
+      if (!found) throw new Error("切换条上没有审查项");
+      return found;
+    });
+    await fireEvent.click(button);
+  }
+  await waitFor(() => expect(activeViewId()).toBe("review"));
+}
+
+/** 审查工作台底部完成栏里的动作按钮（送回意见 / 返回 Cliora）。 */
+function completionAction(id: "feedback" | "return"): HTMLButtonElement | null {
+  return document.querySelector<HTMLButtonElement>(`.workbench-view[data-active="true"] .review-completion [data-completion-action="${id}"]`);
+}
+
+/** 返回入口只在完成栏：先进入审查视图，再点完成栏的「返回 Cliora」。 */
+async function clickReturn() {
+  await openReviewView();
+  const button = await waitFor(() => {
+    const found = completionAction("return");
+    if (!found) throw new Error("完成栏没有返回入口");
+    return found;
+  });
+  await fireEvent.click(button);
+}
+
+/** 打开来源卡上的来源菜单。 */
+async function openSourceMenu(): Promise<HTMLElement> {
+  await openReviewView();
+  await fireEvent.click(await screen.findByRole("button", { name: "选择 Cliora 审查来源" }));
+  return screen.findByRole("dialog", { name: "审查来源" });
+}
+
+/** 在来源菜单里切换到指定来源。 */
+async function pickSource(reviewId: string) {
+  const menu = await openSourceMenu();
+  const row = menu.querySelector<HTMLButtonElement>(`[data-review-source-id="${reviewId}"] .review-source-switch`);
+  if (!row) throw new Error(`来源菜单里没有 ${reviewId}`);
+  await fireEvent.click(row);
+}
+
+/** 读出来源菜单里的全部来源，再按 Esc 收起。 */
+async function sourceMenuIds(): Promise<string[]> {
+  const menu = await openSourceMenu();
+  const ids = [...menu.querySelectorAll<HTMLElement>("[data-review-source-id]")].map((node) => node.dataset.reviewSourceId ?? "");
+  await fireEvent.keyDown(window, { key: "Escape" });
+  return ids;
+}
+
 describe("cliora v2 审查链接", () => {
   it("冷启动只打开链接指定的 worktree 并回送 accepted", async () => {
     deepLink.getCurrent.mockResolvedValue([URL_A]);
@@ -294,8 +358,10 @@ describe("cliora v2 审查链接", () => {
     // 链接只能请求打开仓库：没有暂存、提交或合入调用。
     expect(mocks.api.commitChanges).not.toHaveBeenCalled();
     expect(mocks.api.startMerge).not.toHaveBeenCalled();
-    // 来源建立后标题栏给出返回入口。
-    await waitFor(() => expect(screen.getByRole("button", { name: /返回 cliora/ })).toBeTruthy());
+    // 来源建立后外壳进入审查工作台，返回入口在底部完成栏（标题栏不再有返回按钮）。
+    await waitFor(() => expect(activeViewId()).toBe("review"));
+    await waitFor(() => expect(completionAction("return")).toBeTruthy());
+    expect(document.querySelector(".titlebar .cliora-return")).toBeNull();
   });
 
   it("同一 reviewId 被冷启动与热启动各派发一次时只处理一次", async () => {
@@ -311,8 +377,8 @@ describe("cliora v2 审查链接", () => {
     expect(mocks.api.openRepository).toHaveBeenCalledTimes(1);
     expect(mocks.api.clioraReviewReceipt).toHaveBeenCalledWith(REVIEW_A, SESSION_A, true, null);
     // 来源只建立一次：返回入口只有一个，返回事件也只发一次。
-    expect(screen.getAllByRole("button", { name: /返回 cliora/ })).toHaveLength(1);
-    await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "返回 Cliora" })).toHaveLength(1));
+    await fireEvent.click(screen.getByRole("button", { name: "返回 Cliora" }));
     await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledTimes(1));
   });
   it("运行中链接串行建立多个来源，最后来源活动且能显式切回", async () => {
@@ -335,12 +401,12 @@ describe("cliora v2 审查链接", () => {
     await waitFor(() => expect(mocks.api.clioraReviewReceipt).toHaveBeenCalledTimes(2));
     expect(mocks.api.clioraReviewReceipt).toHaveBeenCalledWith(REVIEW_A, SESSION_A, true, null);
     expect(clioraReview.sources).toHaveLength(2);
-    await pickMenu("选择 Cliora 审查来源", REVIEW_A);
-    expect(clioraBaseline()).toBe(BASELINE);
-    await pickMenu("选择 Cliora 审查来源", REVIEW_B);
-    expect(clioraBaseline()).toBeNull();
+    await pickSource(REVIEW_A);
+    await waitFor(() => expect(clioraBaseline()).toBe(BASELINE));
+    await pickSource(REVIEW_B);
+    await waitFor(() => expect(clioraBaseline()).toBeNull());
 
-    await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
+    await clickReturn();
     await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith(...returned(REVIEW_B, SESSION_B, "reviewed", null)));
   });
 
@@ -353,7 +419,8 @@ describe("cliora v2 审查链接", () => {
     await waitFor(() => expect(mocks.api.clioraReviewReceipt).toHaveBeenCalledWith(REVIEW_A, SESSION_A, false, "not_a_worktree"));
     expect(mocks.api.openRepository).toHaveBeenCalledTimes(1);
     expect(mocks.api.openRepository).toHaveBeenCalledWith(WORKTREE, expect.any(Number));
-    expect(screen.queryByRole("button", { name: /返回 cliora/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "返回 Cliora" })).toBeNull();
+    expect(document.querySelector('[data-view="review"]')).toBeNull();
     expect(mocks.api.commitChanges).not.toHaveBeenCalled();
     expect(mocks.api.refreshStatus).not.toHaveBeenCalled();
   });
@@ -401,7 +468,7 @@ describe("cliora v2 审查链接", () => {
     );
     await waitFor(() => expect(mocks.api.clioraReviewReceipt).toHaveBeenCalledWith(REVIEW_B, SESSION_B, true, null));
     expect(mocks.api.clioraReviewReceipt).not.toHaveBeenCalledWith(REVIEW_B, SESSION_B, false, expect.anything());
-    await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
+    await clickReturn();
     await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith(...returned(REVIEW_B, SESSION_B, "reviewed", null)));
   });
 
@@ -421,15 +488,16 @@ describe("cliora v2 审查链接", () => {
     deepLink.getCurrent.mockResolvedValue([URL_A]);
     mocks.api.openRepository.mockResolvedValue(openedAt(WORKTREE));
     await mountShell();
-    await waitFor(() => expect(screen.getByRole("button", { name: /返回 cliora/ })).toBeTruthy());
+    await waitFor(() => expect(completionAction("return")).toBeTruthy());
 
     // 提交成功的记录发生在 api.ts 的成功边界（tests/api.spec.ts 覆盖）；这里写入同一条
-    // 内存态记录，验证标题栏结果与返回链接的内容。
+    // 内存态记录，验证标题栏结果、完成栏的 Git 结果分项与返回链接的内容。
     recordClioraCommit(WORKTREE, COMMITTED);
     await waitFor(() => expect(screen.getByText("已提交 " + COMMITTED.slice(0, 7))).toBeTruthy());
+    expect(document.querySelector('.review-completion [data-status="git"]')?.textContent).toContain("已提交 " + COMMITTED.slice(0, 7) + "（待复核）");
 
     mocks.api.commitChanges.mockClear();
-    await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
+    await clickReturn();
     await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith(...returned(REVIEW_A, SESSION_A, "committed", COMMITTED)));
     expect(mocks.api.commitChanges).not.toHaveBeenCalled();
     expect(mocks.api.startMerge).not.toHaveBeenCalled();
@@ -440,7 +508,7 @@ describe("cliora v2 审查链接", () => {
     deepLink.getCurrent.mockResolvedValue([URL_A]);
     mocks.api.openRepository.mockResolvedValue(openedAt(WORKTREE));
     await mountShell();
-    await waitFor(() => expect(screen.getByRole("button", { name: /返回 cliora/ })).toBeTruthy());
+    await waitFor(() => expect(completionAction("return")).toBeTruthy());
     const nav = document.querySelector<HTMLElement>('.workbench-view[data-active="true"] nav[aria-label="视图"]')!;
     await fireEvent.click(within(nav).getByRole("button", { name: /^改动/ }));
     const draft = (await screen.findByLabelText("提交说明草稿")) as HTMLTextAreaElement;
@@ -510,9 +578,9 @@ describe("cliora v2 审查链接", () => {
     deepLink.getCurrent.mockResolvedValue([URL_A]);
     mocks.api.openRepository.mockResolvedValue(openedAt(WORKTREE));
     await mountShell();
-    await waitFor(() => expect(screen.getByRole("button", { name: /返回 cliora/ })).toBeTruthy());
+    await waitFor(() => expect(completionAction("return")).toBeTruthy());
 
-    // 链接带起点：外壳进入历史，按任务范围过滤并选中「任务净差异」（只读）。审阅标记仍在改动视图里做。
+    // 链接带起点：外壳进入审查工作台读取「任务净差异」（只读）。这里改到改动视图里做审阅标记。
     await waitFor(() => expect(mocks.api.taskReview).toHaveBeenCalledWith(WORKTREE, BASELINE, expect.any(Number), expect.any(Number)));
     const nav = document.querySelector<HTMLElement>('.workbench-view[data-active="true"] nav[aria-label="视图"]')!;
     await fireEvent.click(within(nav).getByRole("button", { name: /^改动/ }));
@@ -522,7 +590,7 @@ describe("cliora v2 审查链接", () => {
     await fireEvent.click(await within(list!).findByRole("button", { name: "标记 src/a.ts 已审阅" }));
     await waitFor(() => expect(screen.getByLabelText("已审阅 1 个，共 1 个改动文件")).toBeTruthy());
 
-    await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
+    await clickReturn();
     await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith(...returned(REVIEW_A, SESSION_A, "reviewed", null)));
     expect(document.body.textContent).not.toContain("已批准");
     expect(document.body.textContent).not.toContain("approved");
@@ -531,26 +599,23 @@ describe("cliora v2 审查链接", () => {
     expect(mocks.api.completeMerge).not.toHaveBeenCalled();
   });
 
-  it("带起点的链接进入历史并按任务范围过滤，选中任务净差异；没有起点时只打开普通历史", async () => {
+  it("带起点的链接直接进入审查工作台并显示首个文件差异；没有起点时进入「无起点」状态，不用 HEAD 补缺", async () => {
     deepLink.getCurrent.mockResolvedValue([URL_A]);
     mocks.api.openRepository.mockResolvedValue(openedAt(WORKTREE));
+    mocks.api.taskReview.mockResolvedValue(taskFor(BASELINE));
+    mocks.api.loadTaskDiff.mockImplementation(async (_worktree: string, _base: string, _head: string, path: string) => diffFor(path));
     await mountShell();
 
-    // 有已校验起点：历史只列「起点..HEAD」，顶部「任务净差异」默认选中，起点就是链接给的 baseline。
+    // 有已校验起点：外壳进入审查视图，按链接给的 baseline 读取任务并选中首个文件读取差异。
     await waitFor(() => expect(mocks.api.taskReview).toHaveBeenCalledWith(WORKTREE, BASELINE, expect.any(Number), expect.any(Number)));
-    const activeView = () =>
-      document.querySelector<HTMLElement>('.workbench-view[data-active="true"] [aria-current="page"]')?.getAttribute("data-view");
-    await waitFor(() => expect(activeView()).toBe("history"));
-    await waitFor(
-      () => expect(mocks.api.historyPage).toHaveBeenCalledWith(WORKTREE, "", 0, expect.any(Number), expect.any(Number), { scope: `range:${BASELINE}` }),
-      { timeout: 8000 },
-    );
-    const row = await screen.findByRole("button", { name: /任务净差异/ }, { timeout: 8000 });
-    expect(row.getAttribute("aria-pressed")).toBe("true");
+    await waitFor(() => expect(activeViewId()).toBe("review"));
     const context = await screen.findByRole("group", { name: "任务范围" });
     expect(context.textContent).toContain(BASELINE.slice(0, 7));
+    await waitFor(() => expect(mocks.api.loadTaskDiff).toHaveBeenCalledWith(WORKTREE, BASELINE, BASELINE, "src/a.ts", expect.anything(), expect.anything(), null, 0, 0, undefined, false));
+    // 历史里不再出现任务净差异行。
+    expect(screen.queryByRole("button", { name: /任务净差异/ })).toBeNull();
 
-    // 没有起点的链接：不建立范围、不猜 HEAD，只打开普通历史并说明原因。
+    // 没有起点的链接：不建立范围、不猜 HEAD，工作台停在「无起点」并给出两个动作。
     resetClioraReview();
     mocks.api.taskReview.mockClear();
     mocks.api.clioraReviewRequest.mockResolvedValue({
@@ -563,8 +628,16 @@ describe("cliora v2 审查链接", () => {
     cleanup();
     await mountShell();
     await waitFor(() => expect(mocks.api.openRepository).toHaveBeenCalledWith(WORKTREE, expect.any(Number)));
-    await screen.findByText(/没有携带起点，已打开普通提交历史/);
-    await waitFor(() => expect(activeView()).toBe("history"));
+    await screen.findByText("没有任务范围");
+    expect(activeViewId()).toBe("review");
+    expect(mocks.api.taskReview).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "查看普通历史" })).toBeTruthy();
+    expect(document.querySelector('.review-state [data-review-state-action="return"]')).toBeTruthy();
+    await fireEvent.click(screen.getByRole("button", { name: "查看普通历史" }));
+    await waitFor(() => expect(activeViewId()).toBe("history"));
+    await waitFor(() => expect(mocks.api.historyPage).toHaveBeenCalled(), { timeout: 8000 });
+    // 普通历史不按任务范围过滤，也没有任务行。
+    expect(mocks.api.historyPage.mock.calls.every((call) => !(call[5] as { scope?: string } | undefined)?.scope?.startsWith("range:"))).toBe(true);
     expect(screen.queryByRole("button", { name: /任务净差异/ })).toBeNull();
     expect(mocks.api.taskReview).not.toHaveBeenCalled();
   });
@@ -576,9 +649,9 @@ describe("cliora v2 审查链接", () => {
     mocks.api.refreshStatus.mockResolvedValue(clean);
     mocks.api.clioraReviewReturn.mockResolvedValue({ worktreeState: "clean", uncommitted: 0 });
     await mountShell();
-    await waitFor(() => expect(screen.getByRole("button", { name: /返回 cliora/ })).toBeTruthy());
+    await waitFor(() => expect(completionAction("return")).toBeTruthy());
 
-    await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
+    await clickReturn();
     await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith(...returned(REVIEW_A, SESSION_A, "reviewed", null)));
     await waitFor(() => expect(document.body.textContent).toContain("本次没有提交或合入，工作区没有未提交的改动"));
 
@@ -586,7 +659,7 @@ describe("cliora v2 审查链接", () => {
     mocks.api.clioraReviewReturn.mockClear();
     mocks.api.clioraReviewReturn.mockResolvedValue({ worktreeState: "dirty", uncommitted: 2 });
     recordClioraCommit(WORKTREE, COMMITTED);
-    await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
+    await clickReturn();
     await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith(...returned(REVIEW_A, SESSION_A, "committed", COMMITTED)));
     await waitFor(() => expect(document.body.textContent).toContain("提交或合入结果以待复核声明发送，工作区还有 2 个未提交的改动"));
     expect(document.body.textContent).not.toContain("本次只做了浏览");
@@ -600,9 +673,9 @@ describe("cliora v2 审查链接", () => {
     mocks.api.refreshStatus.mockResolvedValue(clean);
     mocks.api.clioraReviewReturn.mockResolvedValue({ worktreeState: "dirty", uncommitted: 1 });
     await mountShell();
-    await waitFor(() => expect(screen.getByRole("button", { name: /返回 cliora/ })).toBeTruthy());
+    await waitFor(() => expect(completionAction("return")).toBeTruthy());
 
-    await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
+    await clickReturn();
     await waitFor(() => expect(document.body.textContent).toContain("本次没有提交或合入，工作区还有 1 个未提交的改动"));
     expect(document.body.textContent).not.toContain("本次没有提交或合入，工作区没有未提交的改动");
   });
@@ -612,9 +685,9 @@ describe("cliora v2 审查链接", () => {
     mocks.api.openRepository.mockResolvedValue({ ...openedAt(WORKTREE), snapshot: { generation: 4, branch, files: [] } });
     mocks.api.clioraReviewReturn.mockResolvedValue({ worktreeState: "unknown", uncommitted: null });
     await mountShell();
-    await waitFor(() => expect(screen.getByRole("button", { name: /返回 cliora/ })).toBeTruthy());
+    await waitFor(() => expect(completionAction("return")).toBeTruthy());
 
-    await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
+    await clickReturn();
     await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith(...returned(REVIEW_A, SESSION_A, "reviewed", null)));
     await waitFor(() => expect(document.body.textContent).toContain("这次没有读到工作区状态，已按未知发送"));
 
@@ -622,7 +695,7 @@ describe("cliora v2 审查链接", () => {
     mocks.api.clioraReviewReturn.mockClear();
     mocks.api.clioraReviewReturn.mockResolvedValue(undefined);
     mocks.api.refreshStatus.mockRejectedValue({ code: "git_failed", message: "读取状态失败。" });
-    await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
+    await clickReturn();
     await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(document.body.textContent).toContain("本次没有提交或合入，这次没有读到工作区状态。"));
     expect(document.body.textContent).not.toContain("本次没有提交或合入，工作区没有未提交的改动");
@@ -635,56 +708,67 @@ describe("cliora v2 审查链接", () => {
       { source: { protocolVersion: 3, workspaceId: null, repositoryId: null, workspaceName: null, reviewId: REVIEW_B, sessionId: SESSION_B, worktreePath: OTHER_WORKTREE, baseline: COMMITTED }, result: null, lastReturn: null },
     ], expiredPending: 0 });
     mocks.api.openRepository.mockResolvedValue(openedAt(WORKTREE)); await mountShell();
-    await waitFor(() => expect(screen.queryByRole("button", { name: "选择 Cliora 审查来源" })).toBeTruthy());
-    expect(await menuValues("选择 Cliora 审查来源")).toHaveLength(3);
-    await pickMenu("选择 Cliora 审查来源", REVIEW_A);
+    await openRecentRepo();
+    expect(await sourceMenuIds()).toHaveLength(2);
+    await pickSource(REVIEW_A);
     await waitFor(() => expect(clioraReview.source?.reviewId).toBe(REVIEW_A));
     mocks.api.openRepository.mockRejectedValueOnce({ code: "path_missing", message: "B 目录失效" });
-    await pickMenu("选择 Cliora 审查来源", REVIEW_B);
+    await pickSource(REVIEW_B);
     await waitFor(() => expect(document.body.textContent).toContain("B 目录失效"));
-    await fireEvent.click(screen.getByText("管理审查来源（2）"));
-    await fireEvent.click(screen.getByRole("button", { name: `关闭审查来源 ${REVIEW_B.slice(0, 8)}` }));
+    const menu = await openSourceMenu();
+    await fireEvent.click(within(menu).getByRole("button", { name: `关闭审查来源 ${REVIEW_B.slice(0, 8)}` }));
     await waitFor(() => expect(mocks.api.clioraReviewForget).toHaveBeenCalledWith(REVIEW_B, SESSION_B));
     expect(clioraReview.source?.reviewId).toBe(REVIEW_A);
     expect(clioraReview.sources.map(source => source.reviewId)).toEqual([REVIEW_A]);
   });
 
-  it("只剩一个未选中的来源时可直接关闭，不必先切换过去", async () => {
+  it("未选中的来源可在来源菜单直接关闭，不必先切换过去；关闭不自动选择其他来源", async () => {
     mocks.api.clioraReviewSources.mockResolvedValue({ sources: [
       { source: { protocolVersion: 3, workspaceId: null, repositoryId: null, workspaceName: null, reviewId: REVIEW_A, sessionId: SESSION_A, worktreePath: WORKTREE, baseline: BASELINE }, result: null, lastReturn: null },
       { source: { protocolVersion: 3, workspaceId: null, repositoryId: null, workspaceName: null, reviewId: REVIEW_B, sessionId: SESSION_B, worktreePath: OTHER_WORKTREE, baseline: COMMITTED }, result: null, lastReturn: null },
     ], expiredPending: 0 });
     mocks.api.openRepository.mockImplementation(async (path: string) => openedAt(path));
     await mountShell();
-    await waitFor(() => expect(screen.queryByRole("button", { name: "选择 Cliora 审查来源" })).toBeTruthy());
+    await openRecentRepo();
+    // 当前仓库不是任何来源的工作树：工作台说明「未选择审查来源」。
+    await openReviewView();
+    expect(screen.getByText("未选择审查来源", { selector: ".review-state-title" })).toBeTruthy();
 
-    // 关掉一个后只剩一个、且没有选中：不必先切换过去，直接关闭。
-    await fireEvent.click(screen.getByText("管理审查来源（2）"));
-    await fireEvent.click(screen.getByRole("button", { name: `关闭审查来源 ${REVIEW_B.slice(0, 8)}` }));
+    // 关掉一个后只剩一个、且没有选中：不必先切换过去，直接关闭（没有意见，不需要确认）。
+    let menu = await openSourceMenu();
+    await fireEvent.click(within(menu).getByRole("button", { name: `关闭审查来源 ${REVIEW_B.slice(0, 8)}` }));
     await waitFor(() => expect(clioraReview.sources.map((source) => source.reviewId)).toEqual([REVIEW_A]));
     expect(clioraReview.source).toBeNull();
-    await fireEvent.click(screen.getByRole("button", { name: "关闭审查来源" }));
+    menu = await openSourceMenu();
+    await fireEvent.click(within(menu).getByRole("button", { name: `关闭审查来源 ${REVIEW_A.slice(0, 8)}` }));
     await waitFor(() => expect(mocks.api.clioraReviewForget).toHaveBeenCalledWith(REVIEW_A, SESSION_A));
     await waitFor(() => expect(clioraReview.sources).toHaveLength(0));
+    expect(screen.queryByRole("dialog", { name: "关闭审查来源" })).toBeNull();
     expect(mocks.api.openRepository).not.toHaveBeenCalledWith(WORKTREE, expect.anything());
+    expect(mocks.api.openRepository).not.toHaveBeenCalledWith(OTHER_WORKTREE, expect.anything());
+    // 没有来源后工作台如实说明，并给出回到改动/历史的动作。
+    await screen.findByText("没有审查来源");
+    expect(screen.getByRole("button", { name: "回到改动" })).toBeTruthy();
   });
 
-  it("审查栏右端的关闭按钮关闭全部来源并收起这一行", async () => {
+  it("来源菜单的「关闭全部来源」关闭全部来源，审查条已经不存在", async () => {
     mocks.api.clioraReviewSources.mockResolvedValue({ sources: [
       { source: { protocolVersion: 3, workspaceId: null, repositoryId: null, workspaceName: null, reviewId: REVIEW_A, sessionId: SESSION_A, worktreePath: WORKTREE, baseline: BASELINE }, result: null, lastReturn: null },
       { source: { protocolVersion: 3, workspaceId: null, repositoryId: null, workspaceName: null, reviewId: REVIEW_B, sessionId: SESSION_B, worktreePath: OTHER_WORKTREE, baseline: COMMITTED }, result: null, lastReturn: null },
     ], expiredPending: 0 });
     mocks.api.openRepository.mockImplementation(async (path: string) => openedAt(path));
     await mountShell();
-    await waitFor(() => expect(screen.queryByRole("button", { name: "选择 Cliora 审查来源" })).toBeTruthy());
-    await fireEvent.click(screen.getByRole("button", { name: "关闭 Cliora 审查" }));
+    await openRecentRepo();
+    expect(document.querySelector(".review-strip")).toBeNull();
+    const menu = await openSourceMenu();
+    await fireEvent.click(within(menu).getByRole("button", { name: "关闭全部来源" }));
     await waitFor(() => expect(mocks.api.clioraReviewForget).toHaveBeenCalledWith(REVIEW_A, SESSION_A));
     expect(mocks.api.clioraReviewForget).toHaveBeenCalledWith(REVIEW_B, SESSION_B);
-    await waitFor(() => expect(document.querySelector(".review-strip")).toBeNull());
-    expect(clioraReview.sources).toHaveLength(0);
+    await waitFor(() => expect(clioraReview.sources).toHaveLength(0));
+    expect(clioraReview.source).toBeNull();
   });
 
-  it("审查来源管理弹层支持点击条目切换、Esc 关闭归还焦点，且审查条支持一键回到任务净差异与关闭提示", async () => {
+  it("来源菜单支持点击条目切换、Esc 关闭归还焦点；切到其他视图再回到审查会重读任务；恢复提示可关闭", async () => {
     mocks.api.clioraReviewSources.mockResolvedValue({
       sources: [
         { source: { protocolVersion: 3, workspaceId: null, repositoryId: null, workspaceName: null, reviewId: REVIEW_A, sessionId: SESSION_A, worktreePath: WORKTREE, baseline: BASELINE }, result: null, lastReturn: null },
@@ -694,34 +778,38 @@ describe("cliora v2 审查链接", () => {
     });
     mocks.api.openRepository.mockImplementation(async (path: string) => openedAt(path));
     await mountShell();
+    await openRecentRepo();
+    await openReviewView();
 
-    // 恢复提示带可关闭按钮。
+    // 恢复提示在来源卡里，带可关闭按钮。
     const dismiss = await screen.findByRole("button", { name: "关闭审查提示" });
     await fireEvent.click(dismiss);
     expect(screen.queryByRole("button", { name: "关闭审查提示" })).toBeNull();
 
-    // 打开管理弹层：Esc 关闭并把焦点归还给「管理审查来源（2）」按钮。
-    const trigger = screen.getByRole("button", { name: "管理审查来源（2）" });
+    // 打开来源菜单：Esc 关闭并把焦点归还给来源卡。
+    const trigger = screen.getByRole("button", { name: "选择 Cliora 审查来源" });
     await fireEvent.click(trigger);
-    expect(screen.getByRole("dialog", { name: "管理审查来源" })).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "审查来源" })).toBeTruthy();
     await fireEvent.keyDown(window, { key: "Escape" });
-    expect(screen.queryByRole("dialog", { name: "管理审查来源" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "审查来源" })).toBeNull();
     expect(document.activeElement).toBe(trigger);
 
-    // 再次打开管理弹层，直接点击第二条来源切换工作树与审查来源。
+    // 再次打开菜单，直接点击第二条来源切换工作树与审查来源。
     await fireEvent.click(trigger);
-    const pop = screen.getByRole("dialog", { name: "管理审查来源" });
+    const pop = screen.getByRole("dialog", { name: "审查来源" });
     const rowB = pop.querySelector<HTMLElement>(`[data-review-source-id="${REVIEW_B}"] .review-source-switch`)!;
     await fireEvent.click(rowB);
     await waitFor(() => expect(clioraReview.source?.reviewId).toBe(REVIEW_B));
-    expect(screen.queryByRole("dialog", { name: "管理审查来源" })).toBeNull();
-
-    // 切换到「改动」视图后，审查条出现「查看任务净差异」，一键跳回任务净差异。
-    await fireEvent.click(screen.getByRole("button", { name: /^改动/ }));
-    const jump = await screen.findByRole("button", { name: "查看任务净差异" });
-    mocks.api.taskReview.mockClear();
-    await fireEvent.click(jump);
+    expect(screen.queryByRole("dialog", { name: "审查来源" })).toBeNull();
     await waitFor(() => expect(mocks.api.taskReview).toHaveBeenCalledWith(OTHER_WORKTREE, COMMITTED, expect.anything(), expect.anything()));
+
+    // 切换到「改动」视图后再回到审查：任务按最新状态重读，来源保持不变。
+    await fireEvent.click(screen.getByRole("button", { name: /^改动/ }));
+    await waitFor(() => expect(activeViewId()).toBe("changes"));
+    mocks.api.taskReview.mockClear();
+    await openReviewView();
+    await waitFor(() => expect(mocks.api.taskReview).toHaveBeenCalledWith(OTHER_WORKTREE, COMMITTED, expect.anything(), expect.anything()));
+    expect(clioraReview.source?.reviewId).toBe(REVIEW_B);
   });
 
   it("twiglane://workspace?v=2 深链先走预览、取消即丢弃来源意图，关闭重开不会复现旧预览", async () => {
@@ -785,25 +873,29 @@ describe("cliora v2 审查链接", () => {
     expect(mocks.api.clioraReviewRequest).not.toHaveBeenCalled();
   });
 
-  it("同一会话对同一工作树重复发起时，下拉标出发起次序与审查号，不再出现两行一样的文字", async () => {
+  it("同一会话对同一工作树重复发起时，来源菜单标出最新/较早发起，详情里给出各自的审查号", async () => {
     mocks.api.clioraReviewSources.mockResolvedValue({ sources: [
-      { source: { protocolVersion: 3, workspaceId: null, repositoryId: null, workspaceName: null, reviewId: REVIEW_A, sessionId: SESSION_A, worktreePath: WORKTREE, baseline: BASELINE }, result: null, lastReturn: null },
-      { source: { protocolVersion: 3, workspaceId: null, repositoryId: null, workspaceName: null, reviewId: REVIEW_B, sessionId: SESSION_A, worktreePath: WORKTREE, baseline: BASELINE }, result: null, lastReturn: null },
+      { source: { protocolVersion: 3, workspaceId: null, repositoryId: null, workspaceName: null, reviewId: REVIEW_A, sessionId: SESSION_A, worktreePath: WORKTREE, baseline: BASELINE }, result: null, lastReturn: null, acceptedAt: 1_000 },
+      { source: { protocolVersion: 3, workspaceId: null, repositoryId: null, workspaceName: null, reviewId: REVIEW_B, sessionId: SESSION_A, worktreePath: WORKTREE, baseline: BASELINE }, result: null, lastReturn: null, acceptedAt: 2_000 },
     ], expiredPending: 0 });
     mocks.api.openRepository.mockResolvedValue(openedAt(WORKTREE)); await mountShell();
-    await waitFor(() => expect(screen.queryByRole("button", { name: "选择 Cliora 审查来源" })).toBeTruthy());
-    await fireEvent.click(screen.getByRole("button", { name: "选择 Cliora 审查来源" }));
-    const rows = await waitFor(() => {
-      const nodes = [...document.querySelectorAll<HTMLElement>(".popover [role=option]")].filter((node) => node.dataset.value);
-      expect(nodes).toHaveLength(2);
-      return nodes;
-    });
+    await openRecentRepo();
+    const menu = await openSourceMenu();
+    const rows = [...menu.querySelectorAll<HTMLElement>("[data-review-source-id]")];
+    expect(rows).toHaveLength(2);
     const texts = rows.map((node) => node.textContent ?? "");
     expect(new Set(texts).size).toBe(2);
-    expect(texts[0]).toContain("第 1 次发起");
-    expect(texts[0]).toContain(`审查 ${REVIEW_A.slice(0, 8)}`);
-    expect(texts[1]).toContain("最新发起");
-    expect(texts[1]).toContain(`审查 ${REVIEW_B.slice(0, 8)}`);
+    // 接受时间较新的一项是「最新发起」，排在前面；ID 只在详情里出现。
+    expect(rows[0].dataset.reviewSourceId).toBe(REVIEW_B);
+    expect(texts[0]).toContain("最新发起");
+    expect(texts[1]).toContain("较早发起");
+    expect(texts[0]).not.toContain(REVIEW_B);
+    await fireEvent.click(within(rows[1]).getByRole("button", { name: /来源详情/ }));
+    const details = rows[1].querySelector(".review-source-details")!;
+    expect(details.textContent).toContain(REVIEW_A);
+    expect(details.textContent).toContain(SESSION_A);
+    expect(details.textContent).toContain(WORKTREE);
+    expect(details.textContent).toContain("v3");
   });
 
   it("accepted 迟到期间普通切到 B，保留 A 来源但不改 B 仓库或任务起点", async () => {
@@ -825,7 +917,7 @@ describe("cliora v2 审查链接", () => {
     expect(document.querySelector(".project-context-path")?.textContent).toContain(OTHER_WORKTREE);
     expect(mocks.api.taskReview).not.toHaveBeenCalledWith(OTHER_WORKTREE, BASELINE, expect.anything(), expect.anything());
     expect(mocks.api.taskReview).not.toHaveBeenCalled();
-    await pickMenu("选择 Cliora 审查来源", REVIEW_A);
+    await pickSource(REVIEW_A);
     await waitFor(() => expect(clioraReview.source?.reviewId).toBe(REVIEW_A));
     expect(document.querySelector(".project-context-path")?.textContent).toContain(WORKTREE);
     expect(clioraBaseline()).toBe(BASELINE);
@@ -868,19 +960,19 @@ describe("cliora v2 审查链接", () => {
     ], expiredPending: 1 });
     mocks.api.openRepository.mockImplementation(async (path: string) => openedAt(path));
     await mountShell();
-    await waitFor(() => expect(screen.queryByRole("button", { name: "选择 Cliora 审查来源" })).toBeTruthy());
-    expect(await menuValues("选择 Cliora 审查来源")).toHaveLength(3);
+    await openRecentRepo();
+    expect(await sourceMenuIds()).toHaveLength(2);
     expect(clioraReview.source).toBeNull();
     expect(document.body.textContent).toContain("1 条尚未接受的来源已失效");
     expect(mocks.api.clioraReviewSources).toHaveBeenCalledWith(true);
-    await pickMenu("选择 Cliora 审查来源", REVIEW_A);
+    await pickSource(REVIEW_A);
     await waitFor(() => expect(clioraReview.source?.reviewId).toBe(REVIEW_A));
     expect(clioraBaseline()).toBe(BASELINE);
     expect(clioraReview.result?.headOid).toBe(COMMITTED);
     expect(clioraReview.lastReturn?.revision).toBe(2);
-    expect(screen.getByText("已保留上次返回尝试，接收结果以 Cliora 为准")).toBeTruthy();
+    await waitFor(() => expect(screen.getByText("已保留上次返回尝试，接收结果以 Cliora 为准")).toBeTruthy());
     expect(mocks.api.clioraReviewReceipt).not.toHaveBeenCalled();
-    await pickMenu("选择 Cliora 审查来源", REVIEW_B);
+    await pickSource(REVIEW_B);
     await waitFor(() => expect(clioraReview.source?.reviewId).toBe(REVIEW_B));
     expect(clioraReview.result).toBeNull();
   });
@@ -902,14 +994,14 @@ describe("cliora v2 审查链接", () => {
     await waitFor(() => expect(clioraReview.source?.reviewId).toBe(REVIEW_B));
     expect(clioraReview.result).toBeNull();
     expect(clioraBaseline()).toBe(COMMITTED);
-    expect(await menuValues("选择 Cliora 审查来源")).toHaveLength(3);
-    await pickMenu("选择 Cliora 审查来源", REVIEW_A);
+    expect(await sourceMenuIds()).toHaveLength(2);
+    await pickSource(REVIEW_A);
     await waitFor(() => expect(clioraReview.source?.reviewId).toBe(REVIEW_A));
     expect(clioraBaseline()).toBe(BASELINE);
     expect(clioraReview.result?.headOid).toBe(COMMITTED);
-    await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
+    await clickReturn();
     await waitFor(() => expect(mocks.api.clioraReviewReturn).toHaveBeenCalledWith(...returned(REVIEW_A, SESSION_A, "committed", COMMITTED)));
-    await fireEvent.click(screen.getByRole("button", { name: "关闭此审查来源" }));
+    await fireEvent.click(within(await openSourceMenu()).getByRole("button", { name: "关闭此审查来源" }));
     await waitFor(() => expect(mocks.api.clioraReviewForget).toHaveBeenCalledWith(REVIEW_A, SESSION_A));
     expect(clioraReview.sources.map((source) => source.reviewId)).toEqual([REVIEW_B]);
   });
@@ -920,7 +1012,10 @@ describe("cliora v2 审查链接", () => {
     await waitFor(() => expect(document.querySelector(".welcome-recent button")).toBeTruthy());
     await fireEvent.click(document.querySelector<HTMLButtonElement>(".welcome-recent button")!);
     await waitFor(() => expect(mocks.api.openRepository).toHaveBeenCalledWith("C:/work/demo", expect.any(Number)));
-    expect(screen.queryByRole("button", { name: /返回 cliora/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "返回 Cliora" })).toBeNull();
+    // 普通独立仓库没有审查目标：切换条上不出现「审查」。
+    await waitFor(() => expect(document.querySelector('.workbench-view[data-active="true"] nav[aria-label="视图"]')).toBeTruthy());
+    expect(document.querySelector('[data-view="review"]')).toBeNull();
     expect(mocks.api.clioraReviewReceipt).not.toHaveBeenCalled();
     expect(mocks.api.clioraReviewReturn).not.toHaveBeenCalled();
   });
@@ -1105,9 +1200,12 @@ describe("Cliora 远端审查入口", () => {
         }),
       ),
     );
-    // 打开后主窗口显示真实主机与远端路径，并给出返回入口；没有独立的远端弹层。
+    // 打开后主窗口显示真实主机与远端路径，进入审查工作台，返回入口在完成栏；没有独立的远端弹层。
     await waitFor(() => expect(document.querySelector("[data-remote-repository]")).toBeTruthy());
     expect(screen.queryByRole("dialog", { name: "Cliora 远端审查" })).toBeNull();
+    await waitFor(() => expect(activeViewId()).toBe("review"));
+    // 远程来源不支持送回意见：完成栏只有返回。
+    expect(completionAction("feedback")).toBeNull();
     await fireEvent.click(await screen.findByRole("button", { name: "返回 Cliora" }));
     await waitFor(() => expect(mocks.api.remoteReturnReview).toHaveBeenCalledWith("ssh://remote-a/srv/worktree"));
     // 同名本机路径从未被打开，也没有走本机审查回执。
@@ -1254,7 +1352,7 @@ describe("feedback-v1 准备送回", () => {
     mocks.api.taskReview.mockResolvedValue(taskFor(BASELINE));
     mocks.api.loadTaskDiff.mockImplementation(async (_worktree: string, _base: string, _head: string, path: string) => diffFor(path));
     await mountShell();
-    await waitFor(() => expect(screen.getByRole("button", { name: /返回 cliora/ })).toBeTruthy());
+    await waitFor(() => expect(completionAction("return")).toBeTruthy());
     await waitFor(() => expect(document.querySelector("[data-comment-line]")).toBeTruthy(), { timeout: 8000 });
   }
 
@@ -1276,14 +1374,17 @@ describe("feedback-v1 准备送回", () => {
     await openTaskWithDiff();
 
     // 没有意见时按钮是禁用的：不会凭空生成 feedbackId。
-    const empty = screen.getByRole("button", { name: "准备把这批意见送回原任务" });
-    expect((empty as HTMLButtonElement).disabled).toBe(true);
+    // 没有意见时完成栏没有送回动作：不会凭空生成 feedbackId；主动作是返回 Cliora。
+    expect(completionAction("feedback")).toBeNull();
     expect(mocks.api.prepareReviewFeedback).not.toHaveBeenCalled();
 
     await composeComment("这一行要在失败时保留上一份结果。");
     await waitFor(() => expect(document.body.textContent).toContain("1 条意见"));
 
-    await fireEvent.click(screen.getByRole("button", { name: "准备把这批意见送回原任务" }));
+    const send = completionAction("feedback")!;
+    expect(send.textContent).toContain("送回 1 条意见");
+    expect(send.disabled).toBe(false);
+    await fireEvent.click(send);
     await waitFor(() => expect(mocks.api.prepareReviewFeedback).toHaveBeenCalledTimes(1));
     const request = mocks.api.prepareReviewFeedback.mock.calls[0][0];
     expect(request).toMatchObject({
@@ -1302,7 +1403,9 @@ describe("feedback-v1 准备送回", () => {
     expect(mocks.api.commitChanges).not.toHaveBeenCalled();
     expect(mocks.api.clioraReviewReturn).not.toHaveBeenCalled();
     await waitFor(() => expect(document.body.textContent).toContain("已准备 1 条意见"));
+    await waitFor(() => expect(document.querySelector('.review-completion [data-status="handoff"]')?.textContent).toContain("已准备 1 条意见，已打开 Cliora 等待确认"));
     expect(document.body.textContent).not.toContain("已发送");
+    expect(document.body.textContent).not.toContain("已执行");
   });
 
   it("文件只改内容、范围形状不变：代次前进后旧意见失效，准备按钮不再送出过期批次", async () => {
@@ -1324,9 +1427,9 @@ describe("feedback-v1 准备送回", () => {
     // 旧批次整体失效：界面上说清是内容被重新读过，而不是含糊成范围变化。
     await waitFor(() => expect(document.body.textContent).toContain("任务范围没变"), { timeout: 8000 });
     expect(document.body.textContent).toContain("不会自动对应到新行号");
-    await waitFor(() => expect(document.body.textContent).toContain("还没有意见"));
-    const prepare = screen.getByRole("button", { name: "准备把这批意见送回原任务" });
-    expect((prepare as HTMLButtonElement).disabled, "过期批次没有可送的内容").toBe(true);
+    await waitFor(() => expect(document.querySelector('.review-completion [data-status="comments"]')?.textContent).toBe("没有待送回的意见"));
+    expect(completionAction("feedback"), "过期批次没有可送的内容").toBeNull();
+    expect(document.querySelector('.review-completion [data-status="stale"]')?.textContent).toContain("1 条意见已失效，不会送回");
     expect(mocks.api.prepareReviewFeedback).not.toHaveBeenCalled();
     expect(mocks.api.terminalWrite).not.toHaveBeenCalled();
   });
@@ -1340,11 +1443,12 @@ describe("feedback-v1 准备送回", () => {
     await composeComment("这条意见要留在界面上。");
     await waitFor(() => expect(document.body.textContent).toContain("1 条意见"));
 
-    await fireEvent.click(screen.getByRole("button", { name: "准备把这批意见送回原任务" }));
+    await fireEvent.click(completionAction("feedback")!);
     await waitFor(() => expect(document.body.textContent).toContain("没有准备好"));
-    // 意见仍在，任务仍可继续编辑；没有发送、没有 Git 写入。
+    // 意见仍在，任务仍可继续编辑；没有发送、没有 Git 写入。完成栏给出重试。
     expect(document.body.textContent).toContain("1 条意见");
-    await fireEvent.click(screen.getByRole("button", { name: "准备把这批意见送回原任务" }));
+    await waitFor(() => expect(completionAction("feedback")?.textContent).toContain("重试送回 1 条意见"));
+    await fireEvent.click(completionAction("feedback")!);
     await waitFor(() => expect(mocks.api.prepareReviewFeedback).toHaveBeenCalledTimes(2));
     expect(mocks.api.terminalWrite).not.toHaveBeenCalled();
     expect(mocks.api.clioraReviewReturn).not.toHaveBeenCalled();

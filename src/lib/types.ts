@@ -2,13 +2,13 @@ export type Theme = "light" | "dark" | "system";
 /** 分叉拉取预选的方式。旧设置没有这项时按合并。 */
 export type PullIntegration = "merge" | "rebase";
 /**
- * 主视图三个：改动、历史、文件。三者同时保活，切换不重挂组件；
+ * 主视图四个：改动、历史、文件与审查。四者同时保活，切换不重挂组件；
  * 临时保存、合并等低频任务进 modal 槽位。
- * cliora 审查的任务范围不是独立视图：它是历史里按「起点..HEAD」过滤后的顶部一行。
+ * 审查是独立工作台：只在存在审查目标（本地已接受来源或远程审查来源）时出现。
  */
-export type WorkspaceView = "changes" | "files" | "history";
+export type WorkspaceView = "changes" | "files" | "history" | "review";
 /**
- * 命令可用性用的视图：历史里选中了「任务净差异」行时记为 task，
+ * 命令可用性用的视图：审查工作台里有任务范围时记为 task，
  * 审阅队列、整文件暂存等命令据此作用在任务范围上。
  */
 export type CommandView = WorkspaceView | "task";

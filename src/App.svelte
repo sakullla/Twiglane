@@ -24,30 +24,31 @@
     clioraBaseline,
     clioraReview,
     clioraReturnOutcome,
+    clioraSourceAcceptedAt,
     forgetClioraSourceUnless,
     hydrateClioraReviews,
     clioraSourceEpoch,
     sameWorktreePath,
     watchClioraReviewLinks,
-    type ClioraReviewSource,
   } from "./lib/cliora-review.svelte";
   import {
+    commentDraftCount,
     commentLines,
     commentsIn,
     staleBatches as staleCommentBatches,
+    unsentCommentCount,
     type CommentScope,
     type ReviewCommentAnchor,
   } from "./lib/review-comments.svelte";
   import {
-    clioraProjectLabel as projectLabel,
-    clioraRepoName,
-    clioraRepeatLabel as repeatLabel,
-    clioraSourceOptions as sourceOptions,
-    clioraSourceRanks as sourceRanks,
-    clioraSourceText as sourceText,
     createReviewActions,
+    reviewSourceEntries,
+    type ReviewCloseImpact,
     type TaskScopeSnapshot,
   } from "./lib/review-actions.svelte";
+  import { reviewCompletion, type ReviewCompletionModel, type ReviewWorktreeState } from "./lib/review-completion";
+  import { relativeTime } from "./lib/ui";
+  import type { ReviewWorkbenchBlock } from "./lib/components/review/ReviewWorkbench.svelte";
   import { fileEditor, type EditContext } from "./lib/file-editor.svelte";
   import { normalizeError } from "./lib/errors";
   import { showMergeAbort } from "./lib/resolve";
@@ -154,7 +155,9 @@
   import ScopeModal from "./lib/components/ScopeModal.svelte";
   import SettingsModal from "./lib/components/SettingsModal.svelte";
   import StashModal from "./lib/components/StashModal.svelte";
-  import TaskReview from "./lib/components/TaskReview.svelte";
+  import ReviewWorkbench from "./lib/components/review/ReviewWorkbench.svelte";
+  import ReviewSourceCard from "./lib/components/review/ReviewSourceCard.svelte";
+  import ReviewCompletionBar from "./lib/components/review/ReviewCompletionBar.svelte";
   import TerminalPanel, { TERMINAL_CLOSE_REQUESTED_EVENT } from "./lib/components/TerminalPanel.svelte";
   import StatusBar from "./lib/components/StatusBar.svelte";
   import TitleBar from "./lib/components/TitleBar.svelte";
@@ -510,11 +513,9 @@
    * 不会退回当前 HEAD、默认分支或上一次用过的起点（R1）。
    */
   let taskRequest = $state.raw<TaskRequest | null>(null);
-  /** 历史详情区正在显示「任务净差异」：审阅、整文件暂存等命令此时作用在任务范围上。 */
-  let taskFocus = $state(false);
-  /** 任务净差异的摘要：历史顶部那一行显示它。 */
-  let taskSummary = $state.raw<TaskSummary | null>(null);
   let taskRequestNonce = 0;
+  /** 工作台「范围内提交」的落点：历史按任务范围过滤（nonce 每次跳转递增）。 */
+  let historyRange = $state.raw<{ baseline: string; nonce: number } | null>(null);
   /** 任务视图自己的文件导航与差异块导航，与改动、历史各留一份。 */
   let taskNav = $state.raw<FileNavState | null>(null);
   let taskHunk = $state<HunkNavReport | null>(null);
@@ -791,8 +792,13 @@
     openRecent: (path) => openRecent(path),
     openTaskReview: (baseline) => openTaskReview(baseline),
     closeTask: () => closeTask(),
-    closeReviewManager: (refocus) => closeReviewManager(refocus),
+    closeReviewManager: () => {},
     clearSourcesNotice: () => (clioraSourcesNotice = ""),
+    clearTaskReview: () => clearTaskReview(),
+  });
+  // 记住每个来源最近一次生效的意见范围：关闭非当前来源时据此计算未送回的意见。
+  $effect(() => {
+    reviewActions.rememberScope(commentScope);
   });
   let taskSelectedPath = $state<string | null>(null);
   let taskReviewNav = $state.raw<ReviewQueueState | null>(null);
@@ -807,8 +813,8 @@
   let reviewCounts = $derived(
     reviewSummaryIn(changesTarget ?? { worktree: "", scope: CHANGES_SCOPE }, opened ? reviewPaths(opened.snapshot.files) : []),
   );
-  /** 任务净差异是否就是当前审阅对象：只在历史视图里选中顶部那一行时成立。 */
-  let inTask = $derived(workspaceView === "history" && taskFocus && taskRequest !== null);
+  /** 任务净差异是否就是当前审阅对象：审查视图里有任务范围请求时成立。 */
+  let inTask = $derived(workspaceView === "review" && taskRequest !== null);
   let activeReviewedSet = $derived(inTask ? taskReviewedSet : reviewedSet);
   /** 命令与按钮作用的文件：任务视图用任务页自己的选择，改动视图用改动列表的选择。 */
   let activeSelectedPath = $derived(inTask ? taskSelectedPath : (selected?.path ?? null));
@@ -819,6 +825,201 @@
   let activeReviewNav = $derived(
     inTask ? taskReviewNav : workspaceView === "changes" ? changesReviewNav : null,
   );
+
+  /*
+   * 审查工作台（R1、R6、R7）：审查目标、来源菜单、完成栏模型与关闭确认都从这里派生。
+   * 审查目标 = 本地已接受来源或远程审查来源；没有目标时「审查」视图不出现。
+   */
+  let remoteReviewId = $derived(remoteRepoState?.reviewId ?? null);
+  let hasReviewTarget = $derived(clioraReview.sources.length > 0 || remoteReviewId !== null);
+  /** 当前工作台的来源身份：远程来源用其 reviewId，本地用当前选中的来源。 */
+  let workbenchId = $derived(remoteReviewId ?? clioraReview.source?.reviewId ?? null);
+  let reviewSourceKind = $derived<"local" | "remote" | "none">(
+    remoteReviewId ? "remote" : clioraReview.source && opened && sameWorktreePath(clioraReview.source.worktreePath, opened.summary.path) ? "local" : "none",
+  );
+  let staleCommentCount = $derived(
+    clioraReview.source ? staleCommentBatches(clioraReview.source.reviewId).reduce((sum, batch) => sum + batch.comments.length, 0) : 0,
+  );
+  /** 当前来源工作树的真实状态：只用来源工作树自己的快照，别的仓库或没读到时按未知处理。 */
+  let reviewWorktree = $derived.by<ReviewWorktreeState>(() => {
+    const source = clioraReview.source;
+    if (!source || !opened || !sameWorktreePath(source.worktreePath, opened.summary.path)) return { state: "unknown" };
+    const count = opened.snapshot.files.length;
+    return count > 0 ? { state: "dirty", count } : { state: "clean" };
+  });
+  let remoteReturnState = $state<{ reviewId: string; state: "returned" | "failed"; message: string; count: number } | null>(null);
+  const BUSY_COMPLETION_REASON = "正在读取或写入，完成后再试。";
+  let completionModel = $derived.by<ReviewCompletionModel>(() => {
+    const kind = reviewSourceKind;
+    if (kind === "remote") {
+      const returned = remoteReturnState?.reviewId === remoteReviewId ? remoteReturnState : null;
+      return reviewCompletion({
+        source: "remote",
+        commentCount: 0,
+        draftCount: 0,
+        staleCount: 0,
+        handoff: { state: "idle" },
+        gitResult: { kind: "none" },
+        worktree: { state: "unknown" },
+        returnState: remoteReturning
+          ? { state: "returning" }
+          : returned?.state === "returned"
+            ? { state: "returned", revision: returned.count }
+            : returned?.state === "failed"
+              ? { state: "failed", message: returned.message }
+              : { state: "idle" },
+        writeLocked: writeLocked || remoteRepoState?.pending === true,
+        writeLockedReason: remoteRepoState?.pending ? "远端操作结果待确认，重新打开这个远端仓库核对后再返回。" : BUSY_COMPLETION_REASON,
+        canFeedback: false,
+      });
+    }
+    const source = clioraReview.source;
+    const reviewId = kind === "local" && source ? source.reviewId : null;
+    const result = clioraReview.result;
+    return reviewCompletion({
+      source: kind,
+      commentCount: taskComments.length,
+      unsentCount: unsentCommentCount(commentScope),
+      draftCount: reviewId ? commentDraftCount(reviewId) : 0,
+      staleCount: staleCommentCount,
+      handoff: reviewActions.feedbackPreparing && reviewId ? { state: "preparing" } : reviewActions.handoffOf(reviewId),
+      gitResult: result ? { kind: result.outcome, oid: result.headOid } : { kind: "none" },
+      worktree: reviewActions.returnOf(reviewId).state === "returned" && reviewId && reviewActions.returnedWorktree[reviewId]
+        ? reviewActions.returnedWorktree[reviewId]
+        : reviewWorktree,
+      returnState: reviewActions.returning && reviewId ? { state: "returning" } : reviewActions.returnOf(reviewId),
+      writeLocked,
+      writeLockedReason: BUSY_COMPLETION_REASON,
+      canFeedback: commentScope !== null && !commentScopeOutdated,
+      feedbackBlockedReason: commentScopeOutdated
+        ? "工作区在这次读取之后又变化了，先重新读取任务再准备送回。"
+        : "任务范围还没有读取完成，先等读取结束。",
+    });
+  });
+  /** 命令面板里两个完成动作的禁用原因：与完成栏按钮同源。 */
+  function completionReason(model: ReviewCompletionModel, id: "feedback" | "return"): string | null {
+    const action = model.primary?.id === id ? model.primary : model.secondary?.id === id ? model.secondary : null;
+    if (!action) {
+      if (id === "feedback") return reviewSourceKind === "none" ? "当前仓库没有选中的审查来源" : "先写一条意见，再送回原任务";
+      return "当前仓库没有选中的审查来源";
+    }
+    return action.disabled ? (action.reason ?? "当前不可用") : null;
+  }
+
+  /** 来源菜单：人类可读信息在前，ID、路径与协议版本在详情里。 */
+  let reviewSources = $derived(
+    reviewSourceEntries(clioraReview.sources, clioraReview.source?.reviewId ?? null, opened?.summary.path ?? null, projects, {
+      acceptedAt: (reviewId) => clioraSourceAcceptedAt(reviewId),
+      comments: (reviewId) => ({ ...reviewActions.commentCounts(reviewId), drafts: commentDraftCount(reviewId) }),
+      progress: (source) => {
+        if (source.reviewId === clioraReview.source?.reviewId && taskReviewNav) {
+          return { reviewed: taskReviewNav.total - taskReviewNav.remaining, total: taskReviewNav.total };
+        }
+        const baseline = source.baseline?.trim();
+        if (!baseline) return { reviewed: 0, total: null };
+        return { reviewed: Object.keys(reviewTokens({ worktree: source.worktreePath, scope: taskReviewScope(baseline) })).length, total: null };
+      },
+      relative: (ms) => relativeTime(ms / 1000),
+    }),
+  );
+  let reviewProgress = $derived(
+    taskReviewNav && inTask ? { reviewed: taskReviewNav.total - taskReviewNav.remaining, total: taskReviewNav.total } : null,
+  );
+
+  /** 工作台的整页状态（外壳层面）：没有来源、未选择来源、来源失效、版本不兼容。 */
+  let reviewBlock = $derived.by<ReviewWorkbenchBlock | null>(() => {
+    if (reviewSourceKind === "remote") return null;
+    const source = clioraReview.source;
+    if (!source || reviewSourceKind === "none") {
+      const some = clioraReview.sources.length > 0;
+      return {
+        kind: "no-source",
+        title: some ? "未选择审查来源" : "没有审查来源",
+        message: some
+          ? "当前仓库没有选中的审查来源。用左上角的来源卡选择一个来源，或回到改动、历史继续普通操作。"
+          : "审查来源已关闭或尚未发起。仓库与阅读记录都保留；需要审查时从 Cliora 重新发起。",
+        actions: [
+          { id: "changes", label: "回到改动", icon: "file-diff", primary: true, run: () => runCommand("view.changes") },
+          { id: "history", label: "查看历史", icon: "history", run: () => runCommand("view.history") },
+        ],
+      };
+    }
+    const issue = reviewActions.issueOf(source.reviewId);
+    if (issue?.kind === "expired") {
+      return {
+        kind: "source-expired",
+        title: "审查来源已失效",
+        message: "这个来源已经不被 Twiglane 认可（应用重启或来源已关闭）。关闭它，再从原 Cliora 会话重新发起审查；仓库没有改动。",
+        detail: issue.message,
+        actions: [
+          { id: "close", label: "关闭此来源", icon: "x", primary: true, disabledReason: writeLocked ? BUSY_COMPLETION_REASON : null, run: () => requestCloseSources([source.reviewId], "current") },
+          { id: "changes", label: "回到改动", icon: "file-diff", run: () => runCommand("view.changes") },
+        ],
+      };
+    }
+    if (issue?.kind === "version") {
+      return {
+        kind: "version-incompatible",
+        title: "审查协议版本不兼容",
+        message: "这个来源使用的协议版本与当前 Twiglane 不兼容，无法送回意见或返回结果。请升级后从 Cliora 重新发起审查。",
+        detail: `${issue.message}（来源协议 v${source.protocolVersion}）`,
+        actions: [
+          { id: "close", label: "关闭此来源", icon: "x", primary: true, disabledReason: writeLocked ? BUSY_COMPLETION_REASON : null, run: () => requestCloseSources([source.reviewId], "current") },
+        ],
+      };
+    }
+    return null;
+  });
+
+  /** 审查视图在切换条上的标记：意见数与状态点。审查视图本身打开着时也保留这一项。 */
+  let reviewSwitch = $derived(
+    hasReviewTarget || workspaceView === "review"
+      ? { comments: taskComments.length, tone: (reviewBlock && reviewBlock.kind !== "no-source") || reviewActions.issueOf(workbenchId) ? "warn" as const : "ok" as const }
+      : null,
+  );
+
+  /*
+   * 关闭来源（当前 / 单个 / 全部）：有未送回意见或草稿时先确认，取消后一切原样；
+   * 没有会丢的内容时直接关闭。关闭从不自动选择其他来源。
+   */
+  let reviewClose = $state<{ ids: string[]; scope: "current" | "single" | "all"; impacts: ReviewCloseImpact[] } | null>(null);
+
+  function requestCloseSources(ids: string[], scope: "current" | "single" | "all") {
+    if (switchBlocked(commandState)) {
+      notice(switchBlockedReason(commandState));
+      return;
+    }
+    const impacts = ids.map((id) => reviewActions.closeImpact(id)).filter((impact) => impact.unsent > 0 || impact.drafts > 0);
+    if (impacts.length === 0) {
+      void performCloseSources(ids, scope);
+      return;
+    }
+    reviewClose = { ids, scope, impacts };
+  }
+
+  async function performCloseSources(ids: string[], scope: "current" | "single" | "all") {
+    reviewClose = null;
+    if (scope === "all") {
+      await closeAllClioraReviews();
+      return;
+    }
+    for (const id of ids) await closeClioraReview(id);
+  }
+
+  function copyCloseImpacts() {
+    const pending = reviewClose;
+    if (!pending) return;
+    void copyText(pending.impacts.map((impact) => impact.text).filter(Boolean).join("\n\n"), "未送回的意见");
+  }
+
+  /** 完成栏的「返回 Cliora」：本地来源走原生返回，远程来源走远端返回。 */
+  async function returnFromReview(): Promise<void> {
+    if (reviewSourceKind === "remote") {
+      await returnRemoteReview();
+      return;
+    }
+    await returnToCliora();
+  }
 
   let snapshotFiles = $derived(opened?.snapshot.files);
   let filesByPath = $derived.by(() => {
@@ -928,6 +1129,11 @@
   let commandState = $derived<CommandState>({
     hasRepo: opened !== null,
     workspaceView: inTask ? "task" : workspaceView,
+    reviewWorkbench: {
+      available: hasReviewTarget,
+      feedbackReason: completionReason(completionModel, "feedback"),
+      returnReason: completionReason(completionModel, "return"),
+    },
     taskModal,
     sidebarHidden,
     // 任务级 modal 层占着单槽时写动作同样不可用：命令可用性与执行 guard 读同一份判定，
@@ -1148,6 +1354,15 @@
         return;
       case "view.history":
         showHistory();
+        return;
+      case "view.review":
+        showReview();
+        return;
+      case "review.feedback":
+        void prepareTaskFeedback();
+        return;
+      case "review.return":
+        void returnFromReview();
         return;
       case "file.prev":
         activeNav?.onPrev();
@@ -1730,7 +1945,6 @@
     // 换仓库清掉任务起点、导航与已解析范围：旧仓库的起点对新仓库不成立。
     taskRequest = context?.taskRequest ?? null;
     taskRequestNonce += 1;
-    taskSummary = null;
     taskNav = null;
     taskHunk = null;
     taskScope = context?.taskScope ?? null;
@@ -2090,7 +2304,7 @@
     if (revealed === false) {
       // 文件树里定位不到（例如刚被删除或移动）：不把人放在什么都没选中的文件视图里，回到原来的差异并说明。
       if (editOrigin?.path === path) editOrigin = null;
-      if (view === "task") useView("history");
+      if (view === "task") useView("review");
       else showChanges();
       notice(`没能在文件树里定位 ${path}，没有进入编辑。文件可能已被删除或移动，刷新后再试。`);
       return;
@@ -2111,7 +2325,7 @@
       fileEditor.close(current.summary.path, origin.path);
     }
     if (origin.view === "task") {
-      useView("history");
+      useView("review");
       return;
     }
     const file = current.snapshot.files.find((item) => item.path === origin.path);
@@ -2356,8 +2570,8 @@
       historyPanel ??= import("./lib/components/HistoryPanel.svelte");
       return;
     }
-    if (view === "files") {
-      // 文件视图不画改动差异：在途响应作废，回到改动视图时再按当前选择重读。
+    if (view === "files" || view === "review") {
+      // 文件与审查视图不画改动差异：在途响应作废，回到改动视图时再按当前选择重读。
       diffToken += 1;
       diffLoading = false;
       return;
@@ -2374,17 +2588,35 @@
   }
 
   /**
-   * cliora 审查链接带着起点进来：历史按「起点..HEAD」过滤，并选中顶部「任务净差异」。
-   * 链接没有起点时不建立任务范围（不拿 HEAD 或默认分支补），只打开普通历史并说明原因。
+   * cliora 审查链接带着起点进来：直接进入审查工作台并读取任务净差异。
+   * 链接没有起点时不建立任务范围（不拿 HEAD 或默认分支补），工作台停在「无起点」状态，
+   * 给出「查看普通历史」与「返回 Cliora」两个动作。
    */
   function openTaskReview(baseline: string | null) {
     const value = baseline?.trim() ?? "";
     taskRequestNonce += 1;
     taskRequest = value === "" ? null : { baseline: value, origin: "cliora", nonce: taskRequestNonce };
-    if (!taskRequest) {
-      taskSummary = null;
-      notice("cliora 审查链接没有携带起点，已打开普通提交历史。");
-    }
+    useView("review");
+  }
+
+  /** 进入审查视图：只有存在审查目标（或已经在审查视图里）时才切换。 */
+  function showReview() {
+    if (!hasReviewTarget && workspaceView !== "review") return;
+    useView("review");
+  }
+
+  /** 当前来源被关闭：撤下任务范围请求；不自动选择其他来源。 */
+  function clearTaskReview() {
+    taskRequest = null;
+    taskNav = null;
+    taskHunk = null;
+  }
+
+  /** 工作台「范围内提交」：转到历史并按任务范围过滤，历史里有「回到审查」。 */
+  function showReviewCommits() {
+    const baseline = taskScope?.baselineOid ?? taskRequest?.baseline ?? null;
+    if (!baseline) return;
+    historyRange = { baseline, nonce: (historyRange?.nonce ?? 0) + 1 };
     historyPath = null;
     historyQuery = "";
     useView("history");
@@ -3332,65 +3564,6 @@
   let clioraLinkSerial = 0;
   let clioraLinkQueue = Promise.resolve();
   let clioraSourcesNotice = $state("");
-  let reviewManagerOpen = $state(false);
-  let reviewManagerAnchor = $state<HTMLDivElement | null>(null);
-  let reviewManagerTrigger = $state<HTMLButtonElement | null>(null);
-  let reviewManagerStyle = $state("");
-
-  $effect(() => {
-    if (clioraReview.sources.length <= 1) reviewManagerOpen = false;
-  });
-
-  function measureReviewManager() {
-    if (!reviewManagerTrigger || typeof window === "undefined") return;
-    const MARGIN = 8;
-    const GAP = 6;
-    const rect = reviewManagerTrigger.getBoundingClientRect();
-    const fit = Math.min(560, window.innerWidth - MARGIN * 2);
-    const left = Math.max(MARGIN, Math.min(rect.right - fit, window.innerWidth - fit - MARGIN));
-    const top = Math.min(rect.bottom + GAP, Math.max(MARGIN, window.innerHeight - 160));
-    const maxHeight = Math.max(150, window.innerHeight - top - MARGIN);
-    reviewManagerStyle = `position:fixed;top:${top}px;left:${left}px;right:auto;width:${fit}px;max-height:${maxHeight}px`;
-  }
-
-  function closeReviewManager(refocus = true) {
-    if (!reviewManagerOpen) return;
-    reviewManagerOpen = false;
-    if (refocus) reviewManagerTrigger?.focus({ preventScroll: true });
-  }
-
-  function toggleReviewManager() {
-    if (reviewManagerOpen) {
-      closeReviewManager(true);
-      return;
-    }
-    measureReviewManager();
-    reviewManagerOpen = true;
-  }
-
-  $effect(() => {
-    if (!reviewManagerOpen || typeof window === "undefined") return;
-    const onOutside = (event: MouseEvent) => {
-      const target = event.target as Node | null;
-      if (!target || reviewManagerAnchor?.contains(target)) return;
-      closeReviewManager(false);
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.isComposing || event.defaultPrevented) return;
-      event.preventDefault();
-      event.stopPropagation();
-      closeReviewManager(true);
-    };
-    const onResize = () => measureReviewManager();
-    window.addEventListener("mousedown", onOutside, true);
-    window.addEventListener("keydown", onKey, true);
-    window.addEventListener("resize", onResize);
-    return () => {
-      window.removeEventListener("mousedown", onOutside, true);
-      window.removeEventListener("keydown", onKey, true);
-      window.removeEventListener("resize", onResize);
-    };
-  });
 
   /**
    * 入站 `twiglane://workspace?v=2&file=<abs-path>&repository=<member-uuid>`（更新版本沿用同一契约）：只请求预览并带上
@@ -3762,12 +3935,21 @@
   async function returnRemoteReview() {
     const key = remoteKey;
     const epoch = repositoryEpoch;
+    const reviewId = remoteReviewId;
     if (!key || remoteReturning) return;
     remoteReturning = true;
     try {
       const returned = await api.remoteReturnReview(key);
+      if (reviewId) {
+        const count = (remoteReturnState?.reviewId === reviewId ? remoteReturnState.count : 0) + 1;
+        remoteReturnState = { reviewId, state: "returned", message: returned.message, count };
+      }
       if (epoch === repositoryEpoch && remoteKey === key) phaseNote = returned.message;
     } catch (error) {
+      if (reviewId) {
+        const count = remoteReturnState?.reviewId === reviewId ? remoteReturnState.count : 0;
+        remoteReturnState = { reviewId, state: "failed", message: normalizeError(error).message, count };
+      }
       if (epoch === repositoryEpoch && remoteKey === key) showError(error);
     } finally {
       remoteReturning = false;
@@ -3960,24 +4142,6 @@
     return reviewActions.closeAllClioraReviews();
   }
 
-  const clioraSourceRanks = $derived(sourceRanks(clioraReview.sources));
-
-  function clioraRepeatLabel(source: ClioraReviewSource): string | null {
-    return repeatLabel(source, clioraSourceRanks);
-  }
-
-  function clioraSourceText(source: ClioraReviewSource): string {
-    return sourceText(source, clioraSourceRanks);
-  }
-
-  const clioraSourceOptions = $derived<SelectMenuOption[]>(
-    sourceOptions(clioraReview.sources, opened ? opened.summary.path : null, projects),
-  );
-
-  function clioraProjectLabel(source: ClioraReviewSource): string {
-    return projectLabel(source, projects);
-  }
-
   /** 两个仓库路径是否指向同一处：只抹平分隔符与尾部斜杠，Windows 下不区分大小写。 */
   function samePath(a: string, b: string): boolean {
     return checkoutKey(a) === checkoutKey(b);
@@ -4149,7 +4313,6 @@
         historyPath = null;
         filesNav = null;
         taskRequest = null;
-        taskSummary = null;
         taskNav = null;
         taskHunk = null;
         taskScope = null;
@@ -4694,7 +4857,7 @@
    * 这些层的状态分散在各组件里，所以看 modal 计数和 DOM，不逐个枚举。
    */
   function anyLayerOpen(): boolean {
-    return openModalCount() > 0 || document.querySelector(".menu, .popover, .review-source-pop, [role='menu']") !== null;
+    return openModalCount() > 0 || document.querySelector(".menu, .popover, .review-source-menu, [role='menu']") !== null;
   }
 
   /** 菜单事件没有按键目标，只看当前焦点是不是文本框。 */
@@ -5313,7 +5476,7 @@
           headOid: clioraReview.result?.headOid ?? null,
         }
       : null}
-    onClioraReturn={returnToCliora}
+    onReviewOpen={() => runCommand("view.review")}
   >
     {#snippet context()}
       <!-- 业务项目只在建过项目后出现：没有项目的用户不必看到这个概念，管理入口留在仓库弹层与命令面板里。
@@ -5341,130 +5504,6 @@
     {/snippet}
   </TitleBar>
 
-  <!-- Cliora 审查来源：只有真的保留了来源（或有一条需要读到的说明）时才出现，平时不占一行。 -->
-  {#if clioraReview.sources.length > 0 || clioraSourcesNotice || clioraReview.lastReturn}
-    <div class="review-strip" aria-label="保留的 Cliora 审查">
-      <span class="review-strip-mark" aria-hidden="true"><Icon name="sparkle" size={13} /></span>
-      <span class="review-strip-title">Cliora 审查</span>
-      {#if clioraReview.sources.length > 0}
-        <SelectMenu
-          class="review-strip-select"
-          variant="chip"
-          label="选择 Cliora 审查来源"
-          value={clioraReview.source?.reviewId ?? ""}
-          text={clioraReview.source ? clioraSourceText(clioraReview.source) : "选择审查来源"}
-          title={writeLocked ? switchBlockedReason(commandState) : clioraReview.source?.worktreePath}
-          disabled={writeLocked}
-          disabledReason={writeLocked ? switchBlockedReason(commandState) : undefined}
-          options={clioraSourceOptions}
-          searchPlaceholder="搜索仓库、项目或会话"
-          width={420}
-          onChange={(value) => void chooseClioraReview(value)}
-        />
-      {/if}
-      {#if clioraReview.source}
-        {@const project = clioraProjectLabel(clioraReview.source)}
-        <span class="review-strip-meta" title={clioraReview.source.worktreePath}>
-          {#if clioraReview.source.workspaceId}<span class="review-strip-project"><Icon name="layers" size={11} />{project}</span>{/if}
-          <bdi class="review-strip-path">{clioraReview.source.worktreePath}</bdi>
-        </span>
-      {/if}
-      {#if clioraSourcesNotice}
-        <span class="review-strip-notice">
-          <span class="review-strip-note" role="status">{clioraSourcesNotice}</span>
-          <button
-            type="button"
-            class="icon-btn sm review-strip-dismiss"
-            aria-label="关闭审查提示"
-            title="关闭这条提示"
-            onclick={() => (clioraSourcesNotice = "")}
-          >
-            <Icon name="x" size={12} />
-          </button>
-        </span>
-      {/if}
-      {#if clioraReview.lastReturn}<span class="review-strip-note">已保留上次返回尝试，接收结果以 Cliora 为准</span>{/if}
-      <span class="spacer"></span>
-      {#if clioraReview.source && (clioraBaseline() !== null ? !(workspaceView === "history" && taskFocus) : workspaceView !== "history")}
-        <button
-          type="button"
-          class="btn btn-secondary btn-sm review-strip-jump"
-          aria-label="查看任务净差异"
-          title="回到 Cliora 审查起点范围，查看任务净差异"
-          onclick={() => openTaskReview(clioraBaseline())}
-        ><Icon name="file-diff" size={13} />任务净差异</button>
-      {/if}
-      {#if clioraReview.source}
-        <button class="btn btn-ghost btn-sm" disabled={writeLocked} title={writeLocked ? switchBlockedReason(commandState) : "关闭后仓库、阅读记录和草稿都保留"} onclick={() => void closeClioraReview()}>关闭此审查来源</button>
-      {:else if clioraReview.sources.length === 1}
-        <!-- 只剩一个来源且没有选中它：直接关闭，不必先切换过去。 -->
-        <button
-          class="btn btn-ghost btn-sm"
-          disabled={writeLocked}
-          title={writeLocked ? switchBlockedReason(commandState) : `关闭 ${clioraRepoName(clioraReview.sources[0])} 的审查来源；仓库、阅读记录和草稿都保留`}
-          onclick={() => void closeClioraReview(clioraReview.sources[0].reviewId)}
-        >关闭审查来源</button>
-      {/if}
-      {#if clioraReview.sources.length > 1}
-        <div class="review-source-manager" bind:this={reviewManagerAnchor}>
-          <button
-            type="button"
-            class="btn btn-ghost btn-sm review-source-manager-trigger"
-            aria-haspopup="dialog"
-            aria-expanded={reviewManagerOpen}
-            title="来源仅在本次运行保留；重启后请从 Cliora 重新发起。结果只属于对应仓库。"
-            bind:this={reviewManagerTrigger}
-            onclick={toggleReviewManager}
-          >管理审查来源（{clioraReview.sources.length}）</button>
-          {#if reviewManagerOpen}
-            <div
-              class="review-source-pop"
-              role="dialog"
-              aria-label="管理审查来源"
-              tabindex="-1"
-              style={reviewManagerStyle}
-            >
-              <ul aria-label="全部审查来源">
-                {#each clioraReview.sources as source (source.reviewId)}
-                  <li data-review-source-id={source.reviewId} class:current={clioraReview.source?.reviewId === source.reviewId}>
-                    <button
-                      type="button"
-                      class="review-source-switch"
-                      disabled={writeLocked}
-                      title={writeLocked ? switchBlockedReason(commandState) : `切换到 ${source.worktreePath}`}
-                      onclick={() => {
-                        closeReviewManager(false);
-                        void chooseClioraReview(source.reviewId);
-                      }}
-                    >
-                      <span class="review-source-text" title={source.worktreePath}>
-                        <strong>{clioraRepoName(source)}</strong>
-                        <small>{clioraProjectLabel(source)} · 会话 {source.sessionId.slice(0, 8)}{#if clioraRepeatLabel(source)} · {clioraRepeatLabel(source)}{/if} · 审查 {source.reviewId.slice(0, 8)}</small>
-                      </span>
-                    </button>
-                    <button class="btn btn-ghost btn-sm" type="button" disabled={writeLocked} title={writeLocked ? switchBlockedReason(commandState) : undefined} onclick={() => void closeClioraReview(source.reviewId)} aria-label={`关闭审查来源 ${source.reviewId.slice(0, 8)}`}>关闭来源</button>
-                  </li>
-                {/each}
-              </ul>
-              <small>{clioraReview.sources.length}/8 · 来源仅在本次运行保留；重启后请从 Cliora 重新发起。结果只属于对应仓库。</small>
-            </div>
-          {/if}
-        </div>
-      {/if}
-      <button
-        type="button"
-        class="icon-btn sm review-strip-close"
-        aria-label="关闭 Cliora 审查"
-        disabled={writeLocked && clioraReview.sources.length > 0}
-        title={writeLocked && clioraReview.sources.length > 0
-          ? switchBlockedReason(commandState)
-          : clioraReview.sources.length > 1
-            ? `关闭全部 ${clioraReview.sources.length} 个审查来源并收起这一行；仓库、阅读记录和草稿都保留`
-            : "关闭审查并收起这一行；仓库、阅读记录和草稿都保留"}
-        onclick={() => void closeAllClioraReviews()}
-      ><Icon name="x" size={14} /></button>
-    </div>
-  {/if}
   <!-- 标题栏项目标签的可见内容：图标 + 项目名 +「项目外 / 名单待处理」。名称可省略，状态字不参与省略。 -->
   {#snippet projectChipContent()}
     <Icon name="layers" size={14} />
@@ -5629,14 +5668,9 @@
           远端仓库 {remoteRepoState?.host ?? opened?.summary.host ?? ""} · {remoteRepoState?.path ?? opened?.summary.remotePath ?? ""}
         {/if}
       </span>
-      {#if remoteRepoState?.reviewId}
-        <button
-          type="button"
-          class="btn btn-sm btn-secondary"
-          title={remoteReturning ? "正在向原 Cliora 会话返回结果" : writeLocked ? "当前有写入在途，完成后才能返回" : "把这次审查的真实结果发回原 Cliora 会话"}
-          disabled={remoteReturning || writeLocked}
-          onclick={() => void returnRemoteReview()}
-        >{remoteReturning ? "正在返回…" : "返回 Cliora"}</button>
+      {#if remoteRepoState?.reviewId && workspaceView !== "review"}
+        <!-- 返回入口统一在审查工作台底部的完成栏；这里只给一个进入工作台的入口。 -->
+        <button type="button" class="btn btn-sm btn-ghost" onclick={() => runCommand("view.review")}>打开审查</button>
       {/if}
     </div>
   {/if}
@@ -5647,7 +5681,7 @@
     <main class="content" data-app-main tabindex="-1">
       {#snippet paneHead()}
         <div class="pane-head">
-          <ViewSwitcher view={workspaceView} {changeCount} showFiles={filesViewEnabled} taskActive={taskRequest !== null && workspaceView !== "history"} onView={(view) => runCommand(`view.${view}`)} />
+          <ViewSwitcher view={workspaceView} {changeCount} showFiles={filesViewEnabled} review={reviewSwitch} onView={(view) => runCommand(`view.${view}`)} />
           <span class="spacer"></span>
           <button
             type="button"
@@ -5661,54 +5695,24 @@
         </div>
         <MergeBanner {conflictCount} {mergeInProgress} operation={mergeOperation} canContinue={mergeCanContinue} canAbort={mergeAbortable} abortBlocked={writeLocked} onOpen={() => runCommand("task.merge")} onAbort={() => runCommand("task.abortMerge")} />
       {/snippet}
-      {#snippet taskDetailView(visible: boolean)}
-  {#if opened}
-    <TaskReview
-      {opened}
-      active={workspaceView === "history"}
-      {visible}
-      request={taskRequest}
-      {nextId}
-      fullFile={diffFullFile}
-      onFullFile={setFullFile}
-      onGeneration={adoptGeneration}
-      onNotice={notice}
-      onFailure={announceTaskFailure}
-      onFileHistory={openFileHistory}
-      onReadDocument={openDocument}
-      onFileNav={(nav) => (taskNav = nav)}
-      onHunkNav={reportTaskHunk}
-      reviewed={taskReviewedSet}
-      {reviewBusy}
-      reviewNote={taskReviewNote}
-      hideReviewed={taskHideReviewed}
-      onToggleReview={(path) => void toggleReviewed(path)}
-      onHideReviewed={(next) => (taskHideReviewed = next)}
-      onStageFile={stageTaskFile}
-      onUnstageFile={unstageTaskFile}
-      onStageFiles={(paths) => void runBatch("stage", paths)}
-      onUnstageFiles={(paths) => void runBatch("unstage", paths)}
-      onCopyPaths={(paths) => void copyText(paths.join("\n"), paths.length > 1 ? `${paths.length} 个相对路径` : "相对路径")}
-      stageSideFor={taskFileStage}
-      writeLocked={writeLocked}
-      onOpenUnstaged={openUnstagedDiff}
-      onOpenChanges={showChanges}
-      onSnapshot={adoptTaskScope}
-      onSelection={(path) => (taskSelectedPath = path)}
-      onReviewNav={(nav) => (taskReviewNav = nav)}
-      onSummary={(summary) => (taskSummary = summary)}
-      onEditFile={filesViewEnabled ? (path, line) => void editInFiles(path, line, "task") : undefined}
-      comments={taskComments}
-      commentKeys={taskCommentKeys}
-      commentNotice={commentScope ? reviewActions.feedbackNotice ?? staleCommentNotice ?? commentScopeOutdatedNotice : null}
-      onAddComment={addReviewComment}
-      onEditComment={editReviewComment}
-      onDeleteComment={deleteReviewComment}
-      onPrepareFeedback={commentScope ? () => void prepareTaskFeedback() : undefined}
-      feedbackPreparing={reviewActions.feedbackPreparing}
-    />
-  {/if}
-{/snippet}
+      {#snippet reviewSourceCard()}
+        <ReviewSourceCard
+          entries={reviewSources}
+          remote={reviewSourceKind === "remote" && remoteRepoState ? { host: remoteRepoState.host, path: remoteRepoState.path, reviewId: remoteRepoState.reviewId ?? "" } : null}
+          progress={reviewProgress}
+          blockedReason={writeLocked ? switchBlockedReason(commandState) : null}
+          notice={clioraSourcesNotice || null}
+          onDismissNotice={() => (clioraSourcesNotice = "")}
+          lastReturn={clioraReview.lastReturn !== null}
+          onChoose={(reviewId) => void chooseClioraReview(reviewId)}
+          onClose={requestCloseSources}
+        />
+      {/snippet}
+      {#snippet reviewCompletionBar()}
+        {#if reviewSourceKind !== "none"}
+          <ReviewCompletionBar model={completionModel} onFeedback={() => void prepareTaskFeedback()} onReturn={() => void returnFromReview()} />
+        {/if}
+      {/snippet}
 
 {#snippet paneResizer()}
         <PaneResizer
@@ -5960,14 +5964,72 @@
                   {branchGroups}
                   {paneHead}
                   {paneResizer}
-                  taskRange={taskRequest ? { baseline: taskRequest.baseline, nonce: taskRequest.nonce } : null}
-                  taskSummary={taskSummary ? { ...taskSummary, reviewed: taskReviewNav ? taskReviewNav.total - taskReviewNav.remaining : 0 } : null}
-                  taskDetail={taskDetailView}
-                  onTaskFocus={(focused) => (taskFocus = focused)}
+                  taskRange={historyRange}
+                  onReturnToReview={hasReviewTarget ? () => runCommand("view.review") : undefined}
                 />
               {/await}
             {/if}
           </div>
+          {#if hasReviewTarget || workspaceView === "review"}
+          <div
+            class="workbench-view"
+            data-view-scope="review"
+            data-active={workspaceView === "review"}
+            aria-hidden={workspaceView !== "review"}
+            inert={workspaceView !== "review"}
+          >
+            <div class="review-view">
+              <ReviewWorkbench
+                {paneHead}
+                {opened}
+                active={workspaceView === "review"}
+                request={taskRequest}
+                {nextId}
+                fullFile={diffFullFile}
+                onFullFile={setFullFile}
+                onGeneration={adoptGeneration}
+                onNotice={notice}
+                onFailure={announceTaskFailure}
+                onFileHistory={openFileHistory}
+                onReadDocument={openDocument}
+                onFileNav={(nav) => (taskNav = nav)}
+                onHunkNav={reportTaskHunk}
+                reviewed={taskReviewedSet}
+                {reviewBusy}
+                reviewNote={taskReviewNote}
+                hideReviewed={taskHideReviewed}
+                onToggleReview={(path) => void toggleReviewed(path)}
+                onHideReviewed={(next) => (taskHideReviewed = next)}
+                onStageFile={stageTaskFile}
+                onUnstageFile={unstageTaskFile}
+                onStageFiles={(paths) => void runBatch("stage", paths)}
+                onUnstageFiles={(paths) => void runBatch("unstage", paths)}
+                onCopyPaths={(paths) => void copyText(paths.join("\n"), paths.length > 1 ? `${paths.length} 个相对路径` : "相对路径")}
+                stageSideFor={taskFileStage}
+                writeLocked={writeLocked}
+                onOpenUnstaged={openUnstagedDiff}
+                onOpenChanges={showChanges}
+                onSnapshot={adoptTaskScope}
+                onSelection={(path) => (taskSelectedPath = path)}
+                onReviewNav={(nav) => (taskReviewNav = nav)}
+                onEditFile={filesViewEnabled ? (path, line) => void editInFiles(path, line, "task") : undefined}
+                comments={taskComments}
+                commentKeys={taskCommentKeys}
+                commentNotice={commentScope ? reviewActions.feedbackNotice ?? staleCommentNotice ?? commentScopeOutdatedNotice : null}
+                onAddComment={addReviewComment}
+                onEditComment={editReviewComment}
+                onDeleteComment={deleteReviewComment}
+                {workbenchId}
+                sourceCard={reviewSourceCard}
+                completion={reviewCompletionBar}
+                block={reviewBlock}
+                onShowHistory={showHistory}
+                onReturnToCliora={() => void returnFromReview()}
+                onShowCommits={showReviewCommits}
+              />
+            </div>
+          </div>
+          {/if}
         </div>
       {:else}
         <Welcome
@@ -6262,6 +6324,46 @@
   </Modal>
 {/if}
 
+{#if reviewClose}
+  {@const pendingClose = reviewClose}
+  {@const unsent = pendingClose.impacts.reduce((sum, impact) => sum + impact.unsent, 0)}
+  {@const drafts = pendingClose.impacts.reduce((sum, impact) => sum + impact.drafts, 0)}
+  <ConfirmDialog
+    title={pendingClose.scope === "all" ? "关闭全部审查来源" : "关闭审查来源"}
+    titleId="review-close-title"
+    icon="alert"
+    tone="warning"
+    message={`关闭后这些来源里${unsent > 0 ? ` ${unsent} 条未送回的意见` : ""}${unsent > 0 && drafts > 0 ? "和" : ""}${drafts > 0 ? ` ${drafts} 条意见草稿` : ""}会被丢弃，无法找回。仓库与阅读记录保留。`}
+    targets={pendingClose.impacts.map((impact) => {
+      const entry = reviewSources.find((item) => item.reviewId === impact.reviewId);
+      return {
+        icon: "sparkle" as const,
+        name: entry ? `${entry.projectLabel} · ${entry.repoName}` : impact.reviewId.slice(0, 8),
+        detail: [impact.unsent > 0 ? `${impact.unsent} 条未送回的意见` : "", impact.drafts > 0 ? `${impact.drafts} 条草稿` : ""].filter(Boolean).join(" · "),
+      };
+    })}
+    targetsLabel="会丢失内容的来源"
+    notes={[{ tone: "info", text: "不会自动切换到其他来源；需要时从来源菜单选择。" }]}
+    confirmLabel="仍然关闭"
+    confirmIcon="x"
+    onConfirm={() => void performCloseSources(pendingClose.ids, pendingClose.scope)}
+    onCancel={() => (reviewClose = null)}
+  >
+    <div class="review-close-copy">
+      <button type="button" class="btn btn-secondary btn-sm" onclick={copyCloseImpacts}>
+        <Icon name="copy" size={13} />复制意见
+      </button>
+      <button
+        type="button"
+        class="btn btn-ghost btn-sm"
+        onclick={() => {
+          copyCloseImpacts();
+          void performCloseSources(pendingClose.ids, pendingClose.scope);
+        }}
+      >复制意见后关闭</button>
+    </div>
+  </ConfirmDialog>
+{/if}
 {#if terminalClose}
   <!-- 原生关窗被活动终端拦下：取消不改进程；确认先等待终止成功再关闭，失败留在这一层。 -->
   <ConfirmDialog

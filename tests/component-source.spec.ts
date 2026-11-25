@@ -5,12 +5,17 @@ import { describe, expect, it } from "vitest";
 
 const root = path.resolve(__dirname, "..");
 const componentsDir = path.join(root, "src/lib/components");
+/** 组件目录含子目录（如 review/）：同样的源码约束适用于所有组件。 */
 const sources = [
-  ...readdirSync(componentsDir)
+  ...readdirSync(componentsDir, { recursive: true, encoding: "utf8" })
     .filter((name) => name.endsWith(".svelte"))
     .map((name) => path.join(componentsDir, name)),
   path.join(root, "src/App.svelte"),
-].map((file) => ({ name: path.basename(file), text: readFileSync(file, "utf8") }));
+].map((file) => ({ name: path.relative(componentsDir, file), text: readFileSync(file, "utf8") }));
+
+it("审查工作台子目录的组件也在约束范围内", () => {
+  expect(sources.map((source) => source.name)).toEqual(expect.arrayContaining([path.join("review", "ReviewWorkbench.svelte"), path.join("review", "ReviewCompletionBar.svelte")]));
+});
 
 /** 从 start 起找到标签结束的 >：跳过 {} 表达式和引号里的 >。 */
 function tagEnd(text: string, start: number): number {

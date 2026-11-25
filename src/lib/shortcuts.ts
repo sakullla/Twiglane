@@ -15,11 +15,12 @@ export interface KeyLike {
   shiftKey?: boolean;
 }
 
-/** 数字键与左栏切换条同序：1 改动、2 历史、3 文件。 */
+/** 数字键与左栏切换条同序：1 改动、2 历史、3 文件、4 审查。 */
 const DIGIT_VIEWS: Record<string, string> = {
   "1": "view.changes",
   "2": "view.history",
   "3": "view.files",
+  "4": "view.review",
 };
 
 const KEY_COMMANDS: Record<string, string> = {

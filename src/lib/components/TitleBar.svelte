@@ -26,7 +26,10 @@
    * 刷新、发布分支、只关联上游都不在这里，远程管理收在同步菜单底部。
    * 仓库与分支弹层由外壳挂载，这里只把触发按钮交出去，并显示展开状态。
    */
-  /** 来自 cliora 的审查来源；有来源时标题栏给出「返回 cliora」入口。 */
+  /**
+   * 来自 cliora 的审查来源：标题栏只给一个轻量的「审查」标识（点击进入审查视图），
+   * 不放返回或交接按钮——这些动作统一在审查工作台底部的完成栏里。
+   */
   interface ClioraBadge {
     reviewId: string;
     outcome: "reviewed" | "committed" | "merged";
@@ -57,8 +60,8 @@
     repoNames?: string[];
     /** 当前仓库由 cliora 审查链接打开时的来源与最新结果；独立仓库为 null。 */
     cliora?: ClioraBadge | null;
-    /** 返回 cliora 原会话。只回送结果，不执行 Git 写入。 */
-    onClioraReturn?: () => void;
+    /** 进入审查工作台。只切换视图，不返回、不交接。 */
+    onReviewOpen?: () => void;
     /** 品牌与仓库之间的上下文位（业务项目）；由外壳提供，没有项目时不占位。 */
     context?: Snippet;
     onBrand: () => void;
@@ -106,7 +109,7 @@
     openSwitcher = null,
     repoNames = [],
     cliora = null,
-    onClioraReturn,
+    onReviewOpen,
     context,
     onBrand,
     onPalette,
@@ -480,15 +483,14 @@
         {#if clioraSummary}<span class="cliora-result" title="提交或合入结果以待复核声明发送，cliora 会重新读取真实 HEAD">{clioraSummary}</span>{/if}
         <button
           type="button"
-          class="branch-pill cliora-return"
+          class="branch-pill cliora-badge"
           data-titlebar-control
-          aria-label={clioraSummary ? `返回 cliora（${clioraSummary}）` : "返回 cliora"}
-          title="返回发起这次审查的 cliora 会话；不修改仓库、不关闭当前仓库"
-          onclick={() => onClioraReturn?.()}
+          aria-label="打开审查工作台"
+          title="这个仓库正在接受 Cliora 审查：进入审查工作台（送回意见与返回 Cliora 都在工作台底部）"
+          onclick={() => onReviewOpen?.()}
         >
           <Icon name="sparkle" size={13} />
-          <span>返回 cliora</span>
-          <Icon name="arrow-right" size={13} />
+          <span>审查</span>
         </button>
       </div>
     {/if}
@@ -576,13 +578,13 @@
     white-space: nowrap;
   }
 
-  .cliora-return {
+  .cliora-badge {
     gap: var(--space-6);
     background: var(--accent-soft);
     color: var(--accent-text);
   }
 
-  .cliora-return:hover:not(:disabled) {
+  .cliora-badge:hover:not(:disabled) {
     background: var(--accent-soft);
     border-color: var(--accent);
   }

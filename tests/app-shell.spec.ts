@@ -550,6 +550,9 @@ const R11_ACTIONS: { id: string; title: string }[] = [
 
 /** 原清单之外后加的视图命令：文件切换、改动块跳转、聚焦搜索。 */
 const ADDED_COMMAND_IDS = [
+  "view.review",
+  "review.feedback",
+  "review.return",
   "file.prev",
   "file.next",
   "review.prev",
@@ -576,6 +579,9 @@ const ADDED_COMMAND_IDS = [
   "terminal.new",
 ];
 const ADDED_COMMAND_TITLES = [
+  "审查",
+  "送回意见",
+  "返回 Cliora",
   "上一个文件",
   "下一个文件",
   "上一个未审阅文件",
@@ -639,8 +645,8 @@ async function openRepo() {
 }
 
 /**
- * 模拟运行中收到 cliora 审查链接：外壳打开同一个工作树，历史按任务范围过滤并选中「任务净差异」。
- * 任务范围没有独立视图，这是唯一的入口。
+ * 模拟运行中收到 cliora 审查链接：外壳打开同一个工作树并直接进入顶级「审查」视图（R1）。
+ * 任务不再藏在历史里；返回的是审查工作台根节点。
  */
 async function enterTaskFromCliora(baseline: string) {
   mocks.clioraReviewRequest.mockResolvedValue({ reviewId: "review-1", sessionId: "session-1", worktreePath: repoPath, baseline });
@@ -648,9 +654,30 @@ async function enterTaskFromCliora(baseline: string) {
   await waitFor(() => expect(deepLink.handler).toBeTruthy());
   deepLink.handler!(["twiglane://review?v=1&reviewId=review-1"]);
   await waitFor(() => expect(mocks.taskReview).toHaveBeenCalledWith(repoPath, baseline, expect.any(Number), expect.any(Number)), { timeout: 8000 });
-  const row = await screen.findByRole("button", { name: /任务净差异/ }, { timeout: 8000 });
-  expect(row.getAttribute("aria-pressed")).toBe("true");
-  return document.querySelector<HTMLElement>('.workbench-view[data-view-scope="history"] .task-detail')!;
+  await waitFor(() => expect(document.querySelector('.workbench-view[data-view-scope="review"][data-active="true"] .review-workbench')).toBeTruthy(), { timeout: 8000 });
+  // 历史里不再有「任务净差异」行。
+  expect(screen.queryByRole("button", { name: /任务净差异/ })).toBeNull();
+  return document.querySelector<HTMLElement>('.workbench-view[data-view-scope="review"] .review-workbench')!;
+}
+
+/** 进入顶级「审查」视图，再点底部完成栏的「返回 Cliora」：返回入口只在这里（R6）。 */
+async function clickReviewReturn() {
+  const active = () => document.querySelector('.workbench-view[data-active="true"] [aria-current="page"]')?.getAttribute("data-view");
+  if (active() !== "review") {
+    const item = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>('.workbench-view[data-active="true"] nav[aria-label="视图"] [data-view="review"]');
+      if (!found) throw new Error("切换条上没有审查项");
+      return found;
+    });
+    await fireEvent.click(item);
+  }
+  await waitFor(() => expect(active()).toBe("review"));
+  const button = await waitFor(() => {
+    const found = document.querySelector<HTMLButtonElement>('.workbench-view[data-active="true"] .review-completion [data-completion-action="return"]');
+    if (!found) throw new Error("完成栏没有返回入口");
+    return found;
+  });
+  await fireEvent.click(button);
 }
 
 /** 合并会话夹具：只有 operation 与 canAbort 影响左栏提示。 */
@@ -1156,7 +1183,7 @@ describe("连续审阅队列与真实写入边界（R2、R4、R6）", () => {
     render(App);
     await openRepo();
     const taskView = await enterTaskFromCliora(TASK_BASE);
-    await waitFor(() => expect(activeView()).toBe("history"));
+    await waitFor(() => expect(activeView()).toBe("review"));
 
     await within(taskView).findByRole("listbox", { name: "任务文件" });
 
@@ -1176,10 +1203,10 @@ describe("连续审阅队列与真实写入边界（R2、R4、R6）", () => {
     expect(mocks.stageHunks).not.toHaveBeenCalled();
     expect(mocks.stageLines).not.toHaveBeenCalled();
 
-    // 回到历史：任务净差异仍是选中项（保活），整文件暂存只写真实索引，任务净差异本身不被应用。
-    await press("2");
-    await waitFor(() => expect(activeView()).toBe("history"));
-    expect(screen.getByRole("button", { name: /任务净差异/ }).getAttribute("aria-pressed")).toBe("true");
+    // 回到审查视图：工作台保活、选中文件不丢，整文件暂存只写真实索引，任务净差异本身不被应用。
+    await press("4");
+    await waitFor(() => expect(activeView()).toBe("review"));
+    await waitFor(() => expect(within(taskView).getByRole("listbox", { name: "任务文件" })).toBeTruthy());
     await fireEvent.click(within(taskView).getByRole("button", { name: "暂存 src/App.svelte 到索引" }));
     await waitFor(() => expect(mocks.stageFiles).toHaveBeenCalledWith(repoPath, ["src/App.svelte"], 4, expect.any(Number)));
     expect(mocks.stageHunks).not.toHaveBeenCalled();
@@ -1688,11 +1715,14 @@ describe("应用外壳", () => {
     const titles = options.map((option) => option.firstElementChild?.textContent?.trim());
     expect(titles.filter((title) => !ADDED_COMMAND_TITLES.includes(title ?? ""))).toEqual(R11_ACTIONS.map((action) => action.title));
     expect(titles, "同组命令连续，文件切换紧跟两个视图").toEqual(expect.arrayContaining(ADDED_COMMAND_TITLES));
-    // 三个视图与快捷键同序（改动、提交历史、文件），文件切换紧跟着它们。
+    // 四个视图与快捷键同序（改动、提交历史、文件、审查），审查的两个完成动作紧随其后，文件切换再跟着它们。
     expect(titles.indexOf("提交历史")).toBe(titles.indexOf("改动") + 1);
     expect(titles.indexOf("文件")).toBe(titles.indexOf("提交历史") + 1);
-    expect(titles.indexOf("上一个文件")).toBe(titles.indexOf("文件") + 1);
-    expect(titles.indexOf("下一个文件")).toBe(titles.indexOf("文件") + 2);
+    expect(titles.indexOf("审查")).toBe(titles.indexOf("文件") + 1);
+    expect(titles.indexOf("送回意见")).toBe(titles.indexOf("审查") + 1);
+    expect(titles.indexOf("返回 Cliora")).toBe(titles.indexOf("审查") + 2);
+    expect(titles.indexOf("上一个文件")).toBe(titles.indexOf("返回 Cliora") + 1);
+    expect(titles.indexOf("下一个文件")).toBe(titles.indexOf("返回 Cliora") + 2);
 
     // 不可用的条目必须就地给出原因，不允许静默失败。
     for (const option of options) {
@@ -3698,20 +3728,21 @@ describe("cliora 来源展示", () => {
     });
     render(App);
     await openRepo();
-    expect(screen.getByRole("button", { name: /返回 cliora/ })).toBeTruthy();
+    // 有来源时切换条出现「审查」项（返回入口在审查视图的完成栏）。
+    await waitFor(() => expect(document.querySelector('.workbench-view[data-active="true"] nav[aria-label="视图"] [data-view="review"]')).toBeTruthy());
 
     await press("3");
     await waitFor(() =>
       expect(document.querySelector('.workbench-view[data-active="true"] [aria-current="page"]')?.getAttribute("data-view")).toBe("files"),
     );
     // 切换视图不清来源。
-    expect(screen.getByRole("button", { name: /返回 cliora/ })).toBeTruthy();
+    expect(document.querySelector('.workbench-view[data-active="true"] nav[aria-label="视图"] [data-view="review"]')).toBeTruthy();
 
     const tree = await screen.findByRole("tree", { name: "仓库文件" });
     await fireEvent.click(await within(tree).findByRole("treeitem", { name: /App\.svelte/ }));
     await waitFor(() => expect(mocks.repositoryFileContent).toHaveBeenCalled());
 
-    await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
+    await clickReviewReturn();
     await waitFor(() => expect(mocks.clioraReviewReturn).toHaveBeenCalledWith(reviewId, sessionId, "reviewed", null));
     expect(mocks.stageFiles).not.toHaveBeenCalled();
     expect(mocks.commitChanges).not.toHaveBeenCalled();
@@ -3743,7 +3774,7 @@ describe("cliora 来源展示", () => {
     }
     expect(screen.getByLabelText("已审阅 6 个，共 6 个改动文件")).toBeTruthy();
     // 全部审阅完成只是本地记录：返回来源仍声明 reviewed，没有任何 Git 写入。
-    await fireEvent.click(screen.getByRole("button", { name: /返回 cliora/ }));
+    await clickReviewReturn();
     await waitFor(() => expect(mocks.clioraReviewReturn).toHaveBeenCalledWith(reviewId, sessionId, "reviewed", null));
     for (const name of [
       "stageFiles",
@@ -3764,10 +3795,12 @@ describe("cliora 来源展示", () => {
     recordClioraMerge(repoPath, mergedOid);
     render(App);
     await openRepo();
+    await press("4");
+    // 合入结果在审查视图完成栏，作为待 Cliora 复核的声明，与工作区状态分项。
     await waitFor(() =>
-      expect(screen.getByText("已合入 " + mergedOid.slice(0, 7))).toBeTruthy(),
+      expect(document.querySelector('.review-completion [data-status="git"]')?.textContent).toContain("已合入 " + mergedOid.slice(0, 7)),
     );
-    expect(screen.getByRole("button", { name: /返回 cliora/ })).toBeTruthy();
+    expect(document.querySelector('.review-completion [data-completion-action="return"]')).toBeTruthy();
   });
 });
 

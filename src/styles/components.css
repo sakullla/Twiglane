@@ -2732,39 +2732,9 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 
 
 
-/* ---------- 任务净差异（cliora 审查，R1、R4、R5、R6） ----------
-   任务范围不是独立视图：历史按「起点..HEAD」过滤后，列表顶部一行「任务净差异」，
-   选中它时历史详情区换成这里的布局——头部说明范围，左边任务文件队列，右边净差异。
-   形状沿用提交详情（commit-head / 左文件右差异），不引入新的装饰层级。 */
-/* 历史切换项上的小圆点：有 cliora 任务范围时提醒从历史进入审查，选中历史后不再显示。 */
-.view-task-dot { position: absolute; top: 4px; right: 6px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
-
-/* 历史列表顶部的任务净差异行：与提交行同一套悬停/选中语义，图标位换成任务图标。 */
-.history-task-row {
-  position: relative;
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  flex: none;
-  margin: 0 var(--space-8) var(--space-6);
-  padding: 7px 10px 7px var(--space-8);
-  border-radius: var(--radius);
-  background: var(--surface-3);
-  color: var(--fg);
-  text-align: left;
-  transition: background var(--duration-fast) var(--ease);
-}
-.history-task-row:hover { background: var(--hover); }
-.history-task-row[aria-pressed="true"] { background: var(--accent-soft); }
-.history-task-row[aria-pressed="true"]::before { content: ""; position: absolute; left: -1px; top: 9px; bottom: 9px; width: 2.5px; border-radius: 2px; background: var(--accent); }
-.history-task-row:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
-.history-task-row .diff-stats { flex: none; }
-.history-task-icon { display: grid; place-items: center; flex: none; width: 22px; height: 22px; margin-top: 1px; border-radius: 50%; background: var(--accent-soft); color: var(--accent-text); }
-.history-task-row[aria-pressed="true"] .history-task-icon { background: var(--accent); color: var(--accent-fg); }
-.history-task-warn { color: var(--danger-text); }
-.history-task-done { color: var(--success-text); }
-
-/* 详情区里的任务净差异：占满详情高度，头部 + 暂存范围一行 + 左文件右差异。 */
+/* ---------- 任务净差异（cliora 审查工作台，R1、R4、R5、R6） ----------
+   任务净差异在顶级「审查」视图里：左边来源卡与任务文件队列，右边头部、净差异与完成栏。
+   形状沿用提交详情（commit-head / 左文件右差异），工作台外壳样式在 review.css。 */
 .task-detail { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--surface); }
 .task-byline { row-gap: var(--space-4); }
 .task-range { display: inline-flex; align-items: center; gap: var(--space-6); min-width: 0; }

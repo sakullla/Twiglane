@@ -4,7 +4,7 @@
  * 这里只验前端运行期状态：什么算一条意见、上限、范围变化后旧意见不再对应新行号。
  * 真实交接文件、权限、digest 与深链由 Rust 侧（src-tauri/src/cliora_feedback.rs）覆盖。
  */
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   MAX_BODY_BYTES,
   MAX_COMMENTS,
@@ -12,6 +12,10 @@ import {
   adoptCommentScope,
   anchorKey,
   anchorLabel,
+  clearCommentDraft,
+  commentDraft,
+  commentDraftCount,
+  commentsSignature,
   commentLineKey,
   commentLines,
   commentsIn,
@@ -19,10 +23,16 @@ import {
   editComment,
   feedbackComments,
   forgetComments,
+  hasCommentDraft,
+  preparedSignature,
   previewComments,
   previewText,
+  recordPreparedComments,
   resetReviewComments,
+  setCommentDraft,
   staleBatches,
+  unsentCommentCount,
+  unsentComments,
   type CommentScope,
   type ReviewCommentAnchor,
 } from "../src/lib/review-comments.svelte";
@@ -221,5 +231,117 @@ describe("预览与交接内容", () => {
     });
     // 交接内容里没有 URL、绝对路径或任何 Git 语义。
     expect(JSON.stringify(comments)).not.toContain("/work/team/demo");
+  });
+});
+
+describe("按来源的意见草稿槽", () => {
+  it("保存锚点、正文与编辑 id，按 reviewId 隔离，读取得到副本", () => {
+    const other = "0f0e0d0c-0b0a-4908-8706-050403020100";
+    expect(commentDraft(REVIEW)).toBeNull();
+    setCommentDraft(REVIEW, { anchor: anchor(), body: "还没写完" });
+    setCommentDraft(other, { anchor: anchor({ path: "docs/guide.md", newNo: 3 }), body: "另一个来源" });
+
+    const draft = commentDraft(REVIEW)!;
+    expect(draft).toEqual({ anchor: anchor(), body: "还没写完", editingId: null });
+    expect(commentDraft(other)?.anchor?.path).toBe("docs/guide.md");
+    // 读取得到的是副本：改它不会影响槽里的内容。
+    draft.anchor!.path = "mutated";
+    draft.body = "mutated";
+    expect(commentDraft(REVIEW)?.anchor?.path).toBe("src/lib/api.ts");
+    expect(commentDraft(REVIEW)?.body).toBe("还没写完");
+
+    // 合并写入：只改正文，锚点保留。
+    setCommentDraft(REVIEW, { body: "写完了" });
+    expect(commentDraft(REVIEW)).toEqual({ anchor: anchor(), body: "写完了", editingId: null });
+    expect(hasCommentDraft(REVIEW)).toBe(true);
+    expect(commentDraftCount(REVIEW)).toBe(1);
+
+    clearCommentDraft(REVIEW);
+    expect(commentDraft(REVIEW)).toBeNull();
+    expect(commentDraft(other)?.body).toBe("另一个来源");
+  });
+
+  it("只有正文不为空才算会丢失的草稿；全部清空等同删除", () => {
+    setCommentDraft(REVIEW, { anchor: anchor(), body: "   " });
+    expect(hasCommentDraft(REVIEW)).toBe(false);
+    expect(commentDraftCount(REVIEW)).toBe(0);
+    setCommentDraft(REVIEW, { editingId: "x", anchor: null, body: "改一下" });
+    expect(commentDraft(REVIEW)).toEqual({ anchor: null, body: "改一下", editingId: "x" });
+    setCommentDraft(REVIEW, { editingId: null, body: "" });
+    expect(commentDraft(REVIEW)).toBeNull();
+  });
+
+  it("草稿不参与上限校验，也不进入交接批次", () => {
+    const current = scope();
+    setCommentDraft(REVIEW, { anchor: anchor(), body: "x".repeat(MAX_BODY_BYTES + 10) });
+    expect(commentsIn(current)).toEqual([]);
+    expect(feedbackComments(current)).toEqual([]);
+    // 保存时才走原校验：超过 16 KiB 照旧拒绝，草稿正文不被清空。
+    expect(() => addComment(current, anchor(), commentDraft(REVIEW)!.body)).toThrow("16 KiB");
+    expect(commentDraft(REVIEW)?.body.length).toBe(MAX_BODY_BYTES + 10);
+  });
+
+  it("关闭来源与测试重置会一起清掉草稿", () => {
+    setCommentDraft(REVIEW, { anchor: anchor(), body: "草稿" });
+    forgetComments(REVIEW);
+    expect(commentDraft(REVIEW)).toBeNull();
+    setCommentDraft(REVIEW, { anchor: anchor(), body: "草稿" });
+    resetReviewComments();
+    expect(commentDraft(REVIEW)).toBeNull();
+  });
+});
+
+describe("最近成功准备的签名与未送回意见", () => {
+  it("从未准备时整批都未送回；准备后只有新增或改过的意见算未送回", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1_000);
+      const current = scope();
+      adoptCommentScope(current);
+      const first = addComment(current, anchor(), "第一条");
+      const second = addComment(current, anchor({ newNo: 13 }), "第二条");
+      expect(preparedSignature(REVIEW)).toBeNull();
+      expect(unsentCommentCount(current)).toBe(2);
+      expect(unsentCommentCount(null)).toBe(0);
+
+      recordPreparedComments(current);
+      expect(preparedSignature(REVIEW)).toBe(commentsSignature(current));
+      expect(unsentComments(current)).toEqual([]);
+
+      vi.setSystemTime(2_000);
+      editComment(current, first.id, "第一条（改过）");
+      const third = addComment(current, anchor({ newNo: 14 }), "第三条");
+      expect(unsentComments(current).map((comment) => comment.id).sort()).toEqual([first.id, third.id].sort());
+      expect(preparedSignature(REVIEW)).not.toBe(commentsSignature(current));
+      // 删掉一条已送回的意见不会让别的意见变成未送回。
+      deleteComment(current, second.id);
+      expect(unsentCommentCount(current)).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("批次身份变化后，之前的准备不代表新批次", () => {
+    const current = scope();
+    adoptCommentScope(current);
+    addComment(current, anchor(), "第一条");
+    recordPreparedComments(current);
+    expect(unsentCommentCount(current)).toBe(0);
+
+    const next = scope({ generation: 5 });
+    adoptCommentScope(next);
+    // 旧批次照原规则整批失效，新批次为空。
+    expect(staleBatches(REVIEW)).toHaveLength(1);
+    expect(commentsIn(next)).toEqual([]);
+    addComment(next, anchor(), "按新内容重写");
+    expect(unsentCommentCount(next)).toBe(1);
+  });
+
+  it("关闭来源时清掉签名", () => {
+    const current = scope();
+    addComment(current, anchor(), "第一条");
+    recordPreparedComments(current);
+    forgetComments(REVIEW);
+    expect(preparedSignature(REVIEW)).toBeNull();
   });
 });

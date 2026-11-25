@@ -62,12 +62,32 @@ export interface StaleCommentBatch {
   reason: string;
 }
 
+/**
+ * 每个来源一份正在写的意见草稿：锚点（新增时）、正文与正在编辑的意见 id。
+ * 切换文件、视图与来源都不丢；只有显式清除或关闭来源时才删除。仍只存内存。
+ */
+export interface CommentDraft {
+  anchor: ReviewCommentAnchor | null;
+  body: string;
+  editingId: string | null;
+}
+
+/** 最近一次成功准备送回的批次签名：批次身份 + 每条意见的 id@updatedAt。 */
+interface PreparedSignature {
+  scopeKey: string;
+  entries: string[];
+}
+
 const store = $state({
   batches: {} as Record<string, ReviewComment[]>,
   /** 每个来源最近一次失效的批次：只用于说明，不参与任何定位。 */
   stale: {} as Record<string, StaleCommentBatch[]>,
   /** reviewId → 当前生效的 scope（失效说明需要分清是范围变了还是只有内容被重读）。 */
   active: {} as Record<string, CommentScope>,
+  /** reviewId → 意见草稿槽。 */
+  drafts: {} as Record<string, CommentDraft>,
+  /** reviewId → 最近一次成功准备的签名（用于计算「未送回」的意见）。 */
+  prepared: {} as Record<string, PreparedSignature>,
 });
 
 /**
@@ -275,6 +295,88 @@ export function feedbackComments(scope: CommentScope): ReviewFeedbackComment[] {
   }));
 }
 
+/* ------------------------------------------------------------------ *
+ * 草稿槽：按 reviewId 保存，不参与上限校验（保存时才走 addComment/editComment）。
+ * ------------------------------------------------------------------ */
+
+export function commentDraft(reviewId: string): CommentDraft | null {
+  const draft = store.drafts[reviewId];
+  return draft ? { anchor: draft.anchor ? { ...draft.anchor } : null, body: draft.body, editingId: draft.editingId } : null;
+}
+
+/** 写入（合并）草稿；锚点与编辑 id 都为空且正文为空时等同清除。 */
+export function setCommentDraft(reviewId: string, patch: Partial<CommentDraft>): CommentDraft | null {
+  const previous = store.drafts[reviewId] ?? { anchor: null, body: "", editingId: null };
+  const next: CommentDraft = {
+    anchor: patch.anchor !== undefined ? (patch.anchor ? { ...patch.anchor } : null) : previous.anchor,
+    body: patch.body !== undefined ? patch.body : previous.body,
+    editingId: patch.editingId !== undefined ? patch.editingId : previous.editingId,
+  };
+  if (next.anchor === null && next.editingId === null && next.body === "") {
+    clearCommentDraft(reviewId);
+    return null;
+  }
+  store.drafts = { ...store.drafts, [reviewId]: next };
+  return commentDraft(reviewId);
+}
+
+export function clearCommentDraft(reviewId: string): void {
+  if (!Object.hasOwn(store.drafts, reviewId)) return;
+  const drafts = { ...store.drafts };
+  delete drafts[reviewId];
+  store.drafts = drafts;
+}
+
+/** 草稿是否有会丢失的内容：只有正文不为空才算（打开空编辑器不算草稿）。 */
+export function hasCommentDraft(reviewId: string): boolean {
+  return (store.drafts[reviewId]?.body.trim() ?? "") !== "";
+}
+
+/** 草稿数（当前每个来源最多一条），供完成栏与关闭确认计算。 */
+export function commentDraftCount(reviewId: string): number {
+  return hasCommentDraft(reviewId) ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------ *
+ * 最近成功准备的签名：「未送回」= 当前批次里不在最近一次成功准备签名内的意见。
+ * ------------------------------------------------------------------ */
+
+function signatureEntry(comment: ReviewComment): string {
+  return comment.id + "@" + comment.updatedAt;
+}
+
+/** 当前批次的签名字符串（批次身份 + 排序后的 id@updatedAt）。 */
+export function commentsSignature(scope: CommentScope): string {
+  return [commentScopeKey(scope), ...commentsIn(scope).map(signatureEntry).sort()].join("\n");
+}
+
+/** 准备送回成功后调用：记录这一刻当前批次的签名。 */
+export function recordPreparedComments(scope: CommentScope): void {
+  store.prepared = {
+    ...store.prepared,
+    [scope.reviewId]: { scopeKey: commentScopeKey(scope), entries: commentsIn(scope).map(signatureEntry) },
+  };
+}
+
+/** 最近一次成功准备的签名；从未成功准备时为 null。 */
+export function preparedSignature(reviewId: string): string | null {
+  const prepared = store.prepared[reviewId];
+  return prepared ? [prepared.scopeKey, ...[...prepared.entries].sort()].join("\n") : null;
+}
+
+/** 当前批次里还没送回的意见：新增、改过，或批次身份已变（之前准备的不算这一批）。 */
+export function unsentComments(scope: CommentScope): ReviewComment[] {
+  const comments = commentsIn(scope);
+  const prepared = store.prepared[scope.reviewId];
+  if (!prepared || prepared.scopeKey !== commentScopeKey(scope)) return comments;
+  const sent = new Set(prepared.entries);
+  return comments.filter((comment) => !sent.has(signatureEntry(comment)));
+}
+
+export function unsentCommentCount(scope: CommentScope | null): number {
+  return scope ? unsentComments(scope).length : 0;
+}
+
 /** 显式关闭来源时一起丢掉它的意见：这些意见只属于那个 reviewId。 */
 export function forgetComments(reviewId: string): void {
   const prefix = reviewId + "|";
@@ -289,6 +391,10 @@ export function forgetComments(reviewId: string): void {
   const active = { ...store.active };
   delete active[reviewId];
   store.active = active;
+  clearCommentDraft(reviewId);
+  const prepared = { ...store.prepared };
+  delete prepared[reviewId];
+  store.prepared = prepared;
 }
 
 /** 测试用：清空全部意见与失效记录。 */
@@ -296,4 +402,6 @@ export function resetReviewComments(): void {
   store.batches = {};
   store.stale = {};
   store.active = {};
+  store.drafts = {};
+  store.prepared = {};
 }

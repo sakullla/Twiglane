@@ -23,41 +23,40 @@
     beginClioraReview,
     clioraBaseline,
     clioraReview,
-    clioraReturnNotice,
     clioraReturnOutcome,
-    clioraSourceMatches,
     forgetClioraSourceUnless,
-    forgetClioraReview,
-    selectClioraSource,
     hydrateClioraReviews,
     clioraSourceEpoch,
     sameWorktreePath,
     watchClioraReviewLinks,
+    type ClioraReviewSource,
   } from "./lib/cliora-review.svelte";
   import {
-    addComment as addTaskCommentRecord,
-    adoptCommentScope,
     commentLines,
     commentsIn,
-    deleteComment as deleteTaskCommentRecord,
-    editComment as editTaskCommentRecord,
-    feedbackComments,
-    forgetComments,
     staleBatches as staleCommentBatches,
     type CommentScope,
     type ReviewCommentAnchor,
   } from "./lib/review-comments.svelte";
+  import {
+    clioraProjectLabel as projectLabel,
+    clioraRepoName,
+    clioraRepeatLabel as repeatLabel,
+    clioraSourceOptions as sourceOptions,
+    clioraSourceRanks as sourceRanks,
+    clioraSourceText as sourceText,
+    createReviewActions,
+    type TaskScopeSnapshot,
+  } from "./lib/review-actions.svelte";
   import { fileEditor, type EditContext } from "./lib/file-editor.svelte";
   import { normalizeError } from "./lib/errors";
   import { showMergeAbort } from "./lib/resolve";
   import { clampWidth, FALLBACK_POLL_MS, fitPaneWidth, shouldPoll } from "./lib/layout";
   import {
     CHANGES_SCOPE,
-    applyReviewReverificationIn,
     beginReviewProgress,
     isReviewedIn,
     markReviewedIn,
-    pruneReviewProgressIn,
     reviewPaths,
     reviewSessionSummary,
     hydrateStoredReviewProgress,
@@ -358,18 +357,7 @@
   }
   /** 项目下拉里「管理项目…」的哨兵值：选中它只打开管理弹窗，不改变当前项目。 */
 
-  /**
-   * 任务页报告的已解析范围。`generation` 是这次读取被校验过的仓库代次：起点、HEAD 与
-   * 未提交状态的形状都没变、只有已修改文件的内容被改写时，rangeVersion 不变而代次前进。
-   * 任务快照 token、审阅进度与行意见都以它为身份，旧结论不会挂到已经变化的内容上。
-   */
-  interface TaskScopeSnapshot {
-    worktree: string;
-    baselineOid: string;
-    headOid: string;
-    rangeVersion: string;
-    generation: number;
-  }
+  // TaskScopeSnapshot（任务页报告的已解析范围）定义在 review-actions。
   interface ReadingContext {
     view: WorkspaceView; selected: FileSelection | null; selectedSet: FileSelection[]; query: string;
     historyPath: string | null; historyQuery: string; taskRequest: TaskRequest | null;
@@ -745,8 +733,6 @@
    * 任务审阅意见（R5）：只在当前来源的当前任务范围里成立。范围一变就整批失效，
    * 不把旧行号映射到新内容上；准备送回是唯一会写交接文件与打开深链的动作。
    */
-  let feedbackPreparing = $state(false);
-  let feedbackNotice = $state<string | null>(null);
   let commentScope = $derived.by<CommentScope | null>(() => {
     const source = clioraReview.source;
     const scope = taskScope;
@@ -789,6 +775,27 @@
       ? "工作区在这次读取之后又变化了，这批意见挂的行可能已经不是原来那一行；先重新读取任务，再写或送回意见。"
       : null,
   );
+  /** 审查处理函数（意见、送回、重验、来源选择/关闭/返回）：App 只提供当前值与界面能力。 */
+  const reviewActions = createReviewActions({
+    opened: () => opened,
+    taskScope: () => taskScope,
+    taskTarget: () => taskTarget,
+    commentScope: () => commentScope,
+    commentScopeOutdated: () => commentScopeOutdated,
+    nextId: () => nextId(),
+    notice: (message, tone) => notice(message, tone),
+    showError: (error) => showError(error),
+    setReviewNote: (message) => (reviewNote = message),
+    setTaskReviewNote: (message) => (taskReviewNote = message),
+    confirmEditorLeave: (purpose) => confirmEditorLeave(purpose),
+    refresh: () => refresh(),
+    switchBlocked: () => switchBlocked(commandState),
+    openRecent: (path) => openRecent(path),
+    openTaskReview: (baseline) => openTaskReview(baseline),
+    closeTask: () => closeTask(),
+    closeReviewManager: (refocus) => closeReviewManager(refocus),
+    clearSourcesNotice: () => (clioraSourcesNotice = ""),
+  });
   let taskSelectedPath = $state<string | null>(null);
   let taskReviewNav = $state.raw<ReviewQueueState | null>(null);
   let changesTarget = $derived<ReviewTarget | null>(
@@ -2412,48 +2419,9 @@
     void reverifyReviewed();
   }
 
-  /**
-   * 刷新后只重验已标记的路径：token 相同保留，内容或状态变化、文件消失、
-   * 无法确认时取消对应标记，其他文件不受影响。没有标记时不发任何请求。
-   * 改动范围只重验改动快照；任务范围由任务页读取后再重验，两条范围互不作证。
-   */
-  async function reverifyReviewed(): Promise<void> {
-    const current = opened;
-    if (!current) return;
-    const target: ReviewTarget = { worktree: current.summary.path, scope: CHANGES_SCOPE };
-    const marked = Object.keys(reviewTokens(target));
-    if (marked.length === 0) return;
-    const alive = reviewPaths(current.snapshot.files);
-    const dropped = pruneReviewProgressIn(target, alive);
-    if (dropped.length > 0) {
-      reviewNote = `${dropped.length} 个文件已不在改动列表里，已撤销对应的已审阅标记。`;
-    }
-    const aliveSet = new Set(alive);
-    const targets = marked.filter((path) => aliveSet.has(path));
-    if (targets.length === 0) return;
-    const serial = ++reviewSerial;
-    const repo = current.summary.path;
-    const results: { path: string; token: string | null; reason?: string }[] = [];
-    for (const path of targets) {
-      try {
-        const result = await api.repositoryReviewToken(repo, path, current.generation, nextId());
-        results.push({
-          path,
-          token: result.state === "current" ? result.token : null,
-          reason: result.message,
-        });
-      } catch (error) {
-        const failure = normalizeError(error);
-        // stale 说明已经有新一代：下一次刷新会重验，不在这里重复请求。
-        if (failure.code === "stale") return;
-        results.push({ path, token: null, reason: `无法确认快照：${failure.message}` });
-      }
-      if (serial !== reviewSerial || opened?.summary.path !== repo) return;
-    }
-    const invalidations = applyReviewReverificationIn(target, results);
-    if (invalidations.length > 0) {
-      reviewNote = `${invalidations.length} 个文件的快照已变化，已撤销对应的已审阅标记。`;
-    }
+  /** 改动范围的审阅进度重验（实现见 review-actions）。 */
+  function reverifyReviewed(): Promise<void> {
+    return reviewActions.reverifyReviewed();
   }
 
   /**
@@ -2463,135 +2431,30 @@
   function adoptTaskScope(scope: TaskScopeSnapshot | null): void {
     taskScope = scope;
     taskSelectedPath = scope ? taskSelectedPath : null;
-    // 任务范围或读取代次变了：上一批意见整体失效，不猜新行号；提示在意见栏里如实说出来。
-    if (scope && commentScope) adoptCommentScope(commentScope);
-    if (!scope) feedbackNotice = null;
-    if (scope) void reverifyTaskReviewed();
-    else taskReviewNav = null;
+    // 意见批次失效、交接结论收起与任务范围重验都在 review-actions 里按原顺序完成。
+    reviewActions.afterTaskScope(scope);
+    if (!scope) taskReviewNav = null;
   }
 
-  /** 新增一条行意见：只写当前运行期内存，不改 Git、不发送提示词。 */
+  function reverifyTaskReviewed(): Promise<void> {
+    return reviewActions.reverifyTaskReviewed();
+  }
+
+  /* 行意见增删改与准备送回：只写当前运行期内存；送回由原生核对后才唤起 Cliora。 */
   function addReviewComment(anchor: ReviewCommentAnchor, body: string): void {
-    const scope = commentScope;
-    if (!scope) throw new Error("当前没有任务范围，这条意见没有保存。");
-    // 读取代次落后时先别往过期批次里写：那批意见马上会整体失效，写了也会丢。
-    if (commentScopeOutdated) throw new Error("工作区在这次读取之后又变化了，先重新读取任务再写意见。");
-    addTaskCommentRecord(scope, anchor, body);
-    feedbackNotice = null;
+    reviewActions.addComment(anchor, body);
   }
 
   function editReviewComment(id: string, body: string): void {
-    const scope = commentScope;
-    if (!scope) throw new Error("当前没有任务范围，这条意见没有保存。");
-    if (!editTaskCommentRecord(scope, id, body)) throw new Error("这条意见已经不在当前批次里，请重新读取任务。");
-    feedbackNotice = null;
+    reviewActions.editComment(id, body);
   }
 
   function deleteReviewComment(id: string): void {
-    const scope = commentScope;
-    if (scope) deleteTaskCommentRecord(scope, id);
-    feedbackNotice = null;
+    reviewActions.deleteComment(id);
   }
 
-  /**
-   * 显式准备送回原任务：原生校验来源、结果版本、工作树与任务起点，写私有一次性文件并回读
-   * 核对后才打开只带标识与 digest 的深链。失败时不唤起 Cliora，意见与原任务都保留。
-   */
-  async function prepareTaskFeedback(): Promise<void> {
-    const scope = commentScope;
-    const source = clioraReview.source;
-    if (!scope || !source) {
-      notice("当前没有可送回的任务来源。", "warn");
-      return;
-    }
-    const comments = feedbackComments(scope);
-    if (comments.length === 0) {
-      // 失效的批次不会回到当前范围里：这里要如实说「已经失效」，不能让用户以为只是没写。
-      const invalidated = staleCommentBatches(source.reviewId).length > 0;
-      notice(
-        invalidated
-          ? "上一批意见已经失效，不会送回；请按当前任务内容重新写一批。"
-          : "先写一条意见，再准备送回原任务。",
-        "warn",
-      );
-      return;
-    }
-    // 任务页还没按最新代次重读：这批意见锚的行可能已经变了，绝不把过期批次送出去。
-    if (commentScopeOutdated) {
-      notice("工作区在这次任务读取之后又变化了，先重新读取任务再准备送回；这批意见不会送出。", "warn");
-      return;
-    }
-    if (feedbackPreparing) return;
-    feedbackPreparing = true;
-    feedbackNotice = null;
-    try {
-      const prepared = await api.prepareReviewFeedback({
-        reviewId: source.reviewId,
-        sessionId: source.sessionId,
-        // 结果版本以这条来源最近一次 returned 的序号为准；从未返回过就是 0。
-        resultRevision: clioraReview.lastReturn?.revision ?? 0,
-        worktreePath: scope.worktree,
-        rangeVersion: scope.rangeVersion,
-        baselineOid: scope.baselineOid,
-        headOid: scope.headOid,
-        comments,
-      });
-      feedbackNotice = "已准备 " + prepared.commentCount + " 条意见（批次 " + prepared.feedbackId.slice(0, 8) + "）。到 Cliora 里确认预览后再发送，这里没有发送任何内容。";
-      notice(feedbackNotice);
-    } catch (error) {
-      // 失败不打开 cliora：意见、原任务与所有草稿都保留，用户可以重新准备。
-      feedbackNotice = "这批意见没有准备好，Cliora 没有被唤起。意见仍保留，可以再试一次。";
-      showError(error);
-    } finally {
-      feedbackPreparing = false;
-    }
-  }
-
-  /**
-   * 任务范围的重验：只重验已标记路径，token 相同保留；内容、暂存、未跟踪、冲突或
-   * 删除状态变化只撤销受影响的那条，其他进度、草稿与真实暂存都不动。
-   */
-  async function reverifyTaskReviewed(): Promise<void> {
-    const scope = taskScope;
-    const target = taskTarget;
-    if (!scope || !target) return;
-    const marked = Object.keys(reviewTokens(target));
-    if (marked.length === 0) return;
-    const serial = ++taskReviewSerial;
-    const results: { path: string; token: string | null; reason?: string }[] = [];
-    for (const path of marked) {
-      try {
-        const result = await api.taskReviewToken(
-          scope.worktree,
-          scope.baselineOid,
-          scope.headOid,
-          path,
-          opened?.generation ?? 0,
-          nextId(),
-        );
-        results.push({
-          path,
-          token: result.state === "current" ? result.token : null,
-          reason: result.message,
-        });
-      } catch (error) {
-        const failure = normalizeError(error);
-        if (failure.code === "stale") return;
-        results.push({ path, token: null, reason: `无法确认快照：${failure.message}` });
-      }
-      if (
-        serial !== taskReviewSerial ||
-        taskScope?.worktree !== scope.worktree ||
-        taskScope?.baselineOid !== scope.baselineOid ||
-        taskScope?.headOid !== scope.headOid
-      ) {
-        return;
-      }
-    }
-    const invalidations = applyReviewReverificationIn(target, results);
-    if (invalidations.length > 0) {
-      taskReviewNote = `${invalidations.length} 个文件的快照已变化，已撤销对应的已审阅标记。`;
-    }
+  function prepareTaskFeedback(): Promise<void> {
+    return reviewActions.prepareFeedback();
   }
 
   /** 当前视图的审阅范围：任务视图用任务页解析出的范围，改动视图固定为当前未提交改动。 */
@@ -4078,152 +3941,43 @@
     }
   }
 
-  /**
-   * 返回发起这次审查的 cliora 会话：只回送最新结果，不执行任何 Git 写入，也不关闭仓库、
-   * 不清空草稿。没有来源时按钮不显示，这里再挡一次。
-   */
-  async function refreshClioraSources() {
-    const epoch = clioraSourceEpoch();
-    try {
-      const snapshot = await api.clioraReviewSources();
-      if (snapshot && Array.isArray(snapshot.sources)) hydrateClioraReviews(snapshot.sources, epoch);
-    } catch { /* Keep current sources; a failed refresh cannot invent a new result. */ }
+  /* 来源刷新、返回、选择与关闭：实现见 review-actions，这里只做接线。 */
+  function refreshClioraSources(): Promise<void> {
+    return reviewActions.refreshClioraSources();
   }
 
-  async function returnToCliora() {
-    const source = clioraReview.source;
-    if (!source || !opened || !clioraSourceMatches(opened.summary.path)) return;
-    // 返回来源前未保存的草稿必须有结论：保存只写工作区，不会变成提交或合入结果。
-    if (!(await confirmEditorLeave("返回 cliora"))) return;
-    if (clioraReview.source?.reviewId !== source.reviewId) return;
-    const { outcome, headOid } = clioraReturnOutcome();
-    // 工作区声明由后端按来源工作树读取真实 Git 状态填写，前端不声明。这里刷新一次只为
-    // 后端没给出结果时提示仍按真实快照说明；当前仓库已不是来源工作树就当作没读到。
-    const fresh = await refresh().catch(() => false);
-    if (clioraReview.source?.reviewId !== source.reviewId) return;
-    const current = opened;
-    const localUncommitted =
-      fresh && current && clioraSourceMatches(current.summary.path) ? current.snapshot.files.length : null;
-    try {
-      const sent = await api.clioraReviewReturn(source.reviewId, source.sessionId, outcome, headOid);
-      await refreshClioraSources();
-      // 普通保存不制造提交或合入结果；工作区还有未提交修改时如实说出来，不再说「只做了浏览」。
-      notice(clioraReturnNotice(outcome, sent, localUncommitted));
-    } catch (error) {
-      if (normalizeError(error).code === "source_result_changed") {
-        await refreshClioraSources();
-      }
-      showError(error);
-    }
+  function returnToCliora(): Promise<void> {
+    return reviewActions.returnToCliora();
   }
 
-  async function chooseClioraReview(reviewId: string) {
-    if (!reviewId) { selectClioraSource(null); closeTask(); return; }
-    const source = clioraReview.sources.find((item) => item.reviewId === reviewId);
-    if (!source || switchBlocked(commandState)) return;
-    if (!opened || !samePath(opened.summary.path, source.worktreePath)) await openRecent(source.worktreePath);
-    if (!opened || !samePath(opened.summary.path, source.worktreePath)) return;
-    if (selectClioraSource(reviewId)) openTaskReview(clioraBaseline());
+  function chooseClioraReview(reviewId: string): Promise<void> {
+    return reviewActions.chooseClioraReview(reviewId);
   }
 
-  async function closeClioraReview(reviewId = clioraReview.source?.reviewId) {
-    const source = clioraReview.sources.find((item) => item.reviewId === reviewId);
-    if (!source || switchBlocked(commandState)) return;
-    const wasActive = clioraReview.source?.reviewId === source.reviewId;
-    try {
-      await api.clioraReviewForget(source.reviewId, source.sessionId);
-      forgetClioraReview(source.reviewId);
-      forgetComments(source.reviewId);
-      if (wasActive) closeTask();
-      notice("已关闭此审查来源；仓库、阅读记录和草稿仍保留。需要审查时从 Cliora 重新发起。");
-    } catch (error) { showError(error); }
+  function closeClioraReview(reviewId?: string): Promise<void> {
+    return reviewActions.closeClioraReview(reviewId);
   }
 
-  /**
-   * 完全关闭 Cliora 审查：关闭全部来源并收起审查栏。仓库、阅读记录和草稿都保留；
-   * 某个来源关闭失败时其余照常关闭，失败的原因如实说明。
-   */
-  async function closeAllClioraReviews() {
-    if (switchBlocked(commandState)) return;
-    const sources = [...clioraReview.sources];
-    const wasActive = Boolean(clioraReview.source);
-    closeReviewManager(false);
-    let failure: unknown = null;
-    for (const source of sources) {
-      try {
-        await api.clioraReviewForget(source.reviewId, source.sessionId);
-        forgetClioraReview(source.reviewId);
-        forgetComments(source.reviewId);
-      } catch (error) {
-        failure ??= error;
-      }
-    }
-    clioraSourcesNotice = "";
-    if (wasActive) closeTask();
-    if (failure) showError(failure);
-    else if (sources.length > 0) notice("已关闭全部审查来源；仓库、阅读记录和草稿仍保留。需要审查时从 Cliora 重新发起。");
+  function closeAllClioraReviews(): Promise<void> {
+    return reviewActions.closeAllClioraReviews();
   }
 
-  /** 审查来源的仓库名：工作区路径最后一段，比整条路径好认。 */
-  function clioraRepoName(source: (typeof clioraReview.sources)[number]): string {
-    return source.worktreePath.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || source.worktreePath;
+  const clioraSourceRanks = $derived(sourceRanks(clioraReview.sources));
+
+  function clioraRepeatLabel(source: ClioraReviewSource): string | null {
+    return repeatLabel(source, clioraSourceRanks);
   }
 
-  /**
-   * 来源下拉：仓库名为主，第二行是项目、会话、任务起点与审查号。
-   * 同一会话对同一工作树重复发起时，行文字原本完全一样；这里按到达顺序标出「最新 / 较早第 N 次」，
-   * 并给出起点与审查号，用户能分清要回报哪一次。当前仓库的来源排在前面。
-   */
-  const clioraSourceRanks = $derived.by(() => {
-    const groups = new Map<string, string[]>();
-    for (const source of clioraReview.sources) {
-      const key = source.sessionId + "\u0000" + checkoutKey(source.worktreePath);
-      groups.set(key, [...(groups.get(key) ?? []), source.reviewId]);
-    }
-    const ranks = new Map<string, { order: number; total: number }>();
-    for (const ids of groups.values()) ids.forEach((id, index) => ranks.set(id, { order: index + 1, total: ids.length }));
-    return ranks;
-  });
-
-  function clioraRepeatLabel(source: (typeof clioraReview.sources)[number]): string | null {
-    const rank = clioraSourceRanks.get(source.reviewId);
-    if (!rank || rank.total < 2) return null;
-    return rank.order === rank.total ? "最新发起" : `第 ${rank.order} 次发起`;
+  function clioraSourceText(source: ClioraReviewSource): string {
+    return sourceText(source, clioraSourceRanks);
   }
 
-  function clioraSourceText(source: (typeof clioraReview.sources)[number]): string {
-    const repeat = clioraRepeatLabel(source);
-    return clioraRepoName(source) + (repeat ? ` · ${repeat}` : "");
-  }
+  const clioraSourceOptions = $derived<SelectMenuOption[]>(
+    sourceOptions(clioraReview.sources, opened ? opened.summary.path : null, projects),
+  );
 
-  const clioraSourceOptions = $derived<SelectMenuOption[]>([
-    { value: "", label: "不使用审查来源", detail: "独立操作当前仓库，不回报给 Cliora", icon: "x" },
-    ...[...clioraReview.sources]
-      .sort((a, b) => Number(!!opened && samePath(b.worktreePath, opened.summary.path)) - Number(!!opened && samePath(a.worktreePath, opened.summary.path)))
-      .map((source) => {
-        const repeat = clioraRepeatLabel(source);
-        const parts = [
-          clioraProjectLabel(source),
-          `会话 ${source.sessionId.slice(0, 8)}`,
-          source.baseline ? `起点 ${source.baseline.slice(0, 7)}` : "无起点",
-          `审查 ${source.reviewId.slice(0, 8)}`,
-        ];
-        return {
-          value: source.reviewId,
-          label: clioraRepoName(source),
-          detail: parts.join(" · "),
-          badge: projectInitial(clioraRepoName(source)),
-          hue: hueOf(source.worktreePath),
-          tag: repeat ?? (opened && samePath(source.worktreePath, opened.summary.path) ? "当前仓库" : undefined),
-        };
-      }),
-  ]);
-
-  function clioraProjectLabel(source: (typeof clioraReview.sources)[number]): string {
-    if (!source.workspaceId) return "独立仓库";
-    const project = projects.projects.find((item) => item.manifest.workspaceId === source.workspaceId);
-    const membership = project && source.repositoryId && project.manifest.repositories.some((repo) => repo.id === source.repositoryId);
-    return (source.workspaceName ?? project?.manifest.name ?? source.workspaceId.slice(0, 8)) + (!project ? "（项目未关联）" : !membership ? "（仓库未关联）" : "");
+  function clioraProjectLabel(source: ClioraReviewSource): string {
+    return projectLabel(source, projects);
   }
 
   /** 两个仓库路径是否指向同一处：只抹平分隔符与尾部斜杠，Windows 下不区分大小写。 */
@@ -5948,12 +5702,12 @@
       onEditFile={filesViewEnabled ? (path, line) => void editInFiles(path, line, "task") : undefined}
       comments={taskComments}
       commentKeys={taskCommentKeys}
-      commentNotice={commentScope ? feedbackNotice ?? staleCommentNotice ?? commentScopeOutdatedNotice : null}
+      commentNotice={commentScope ? reviewActions.feedbackNotice ?? staleCommentNotice ?? commentScopeOutdatedNotice : null}
       onAddComment={addReviewComment}
       onEditComment={editReviewComment}
       onDeleteComment={deleteReviewComment}
       onPrepareFeedback={commentScope ? () => void prepareTaskFeedback() : undefined}
-      feedbackPreparing={feedbackPreparing}
+      feedbackPreparing={reviewActions.feedbackPreparing}
     />
   {/if}
 {/snippet}

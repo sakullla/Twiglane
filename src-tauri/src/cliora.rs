@@ -140,6 +140,8 @@ pub struct ReviewSourceSnapshot {
     pub source: ReviewRequest,
     pub result: Option<SourceGitResult>,
     pub last_return: Option<SourceReturnResult>,
+    /// 前端接受（accepted 回执）时的本地毫秒时间戳。仅内部 IPC 用于显示，不进入 v3 链接、回执或 meta。
+    pub accepted_at: Option<u64>,
 }
 
 /// 一条已解析链接的来源：reviewId、sessionId 与链接指定的工作树。
@@ -148,6 +150,8 @@ struct SourceEntry {
     result: Option<SourceGitResult>,
     last_return: Option<SourceReturnResult>,
     result_revision: u64,
+    /// 只在提升为正式来源时写入；待定来源保持 None。
+    accepted_at: Option<u64>,
     original_path: String,
     request: ReviewRequest,
 }
@@ -160,6 +164,10 @@ struct SourceBook {
     pending: std::collections::VecDeque<SourceEntry>,
     /// 已被前端接受（真正打开并建立来源）的审查。返回时只按这里读取工作树。
     accepted: std::collections::VecDeque<SourceEntry>,
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_millis() as u64).unwrap_or(0)
 }
 
 /// 审查来源 reviewId → 工作树路径，只放在内存里（与前端来源一样不落盘）。
@@ -194,7 +202,7 @@ impl ReviewSources {
         if book.accepted.len() + book.pending.len() >= MAX_REVIEW_SOURCES {
             return Err(AppError::new("source_capacity", "已保留 8 个审查来源。请在来源列表明确关闭一项，再从 Cliora 重新发起。"));
         }
-        book.pending.push_back(SourceEntry { result: None, last_return: None, result_revision: 0, original_path: request.worktree_path.clone(), request: request.clone() });
+        book.pending.push_back(SourceEntry { result: None, last_return: None, result_revision: 0, accepted_at: None, original_path: request.worktree_path.clone(), request: request.clone() });
         Ok(())
     }
 
@@ -213,6 +221,7 @@ impl ReviewSources {
             .ok_or_else(|| AppError::new("source_expired", "审查来源不存在，未发送回执。"))?;
         let mut entry = book.pending.remove(index).expect("pending entry exists");
         entry.request.worktree_path = path;
+        entry.accepted_at = Some(now_millis());
         book.accepted.push_back(entry);
         Ok(())
     }
@@ -234,7 +243,7 @@ impl ReviewSources {
 
     /// Only accepted sources are hydrated. Pending opens cannot become invented UI sources.
     pub fn snapshots(&self) -> Vec<ReviewSourceSnapshot> {
-        self.lock().accepted.iter().map(|entry| ReviewSourceSnapshot { source: entry.request.clone(), result: entry.result.clone(), last_return: entry.last_return.clone() }).collect()
+        self.lock().accepted.iter().map(|entry| ReviewSourceSnapshot { source: entry.request.clone(), result: entry.result.clone(), last_return: entry.last_return.clone(), accepted_at: entry.accepted_at }).collect()
     }
 
     /// Called only at the native success boundary of an existing protected Git write.
@@ -244,8 +253,7 @@ impl ReviewSources {
         let Ok(root) = crate::git::ops::canonical_existing(std::path::Path::new(path)) else { return; };
         let mut book = self.lock();
         let Some(entry) = book.accepted.iter_mut().find(|entry| entry.request.review_id == review_id && std::path::Path::new(&entry.request.worktree_path) == root) else { return; };
-        let recorded_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|duration| duration.as_millis() as u64).unwrap_or(0);
-        entry.result = Some(SourceGitResult { outcome, head_oid: head_oid.into(), recorded_at });
+        entry.result = Some(SourceGitResult { outcome, head_oid: head_oid.into(), recorded_at: now_millis() });
     }
 
     pub fn remember_return(&self, revision: u64, declaration: &ReviewReturn) -> Result<(), AppError> {
@@ -1406,6 +1414,45 @@ mod tests {
         assert!(sources.stage_request(&request("pending", "/work/b")).is_err());
         assert_eq!(sources.expire_pending(), 0);
         for index in 0..7 { sources.stage_request(&request(&format!("new-{index}"), "/work/new")).unwrap(); }
+    }
+
+    #[test]
+    fn accepted_at_is_recorded_on_accept_only_and_stays_out_of_protocol_urls() {
+        let sources = ReviewSources::default();
+        let v3 = ReviewRequest { protocol_version: 3, ..request(REVIEW, "/work/a") };
+        sources.stage_request(&v3).unwrap();
+        assert!(sources.lock().pending[0].accepted_at.is_none(), "pending sources carry no acceptedAt");
+        assert!(sources.snapshots().is_empty());
+        let before = now_millis();
+        sources.accept_path(REVIEW, SESSION, "/work/a".into()).unwrap();
+        let after = now_millis();
+        let snapshots = sources.snapshots();
+        let accepted_at = snapshots[0].accepted_at.expect("accepted source has acceptedAt");
+        assert!(before <= accepted_at && accepted_at <= after);
+        // A duplicate accept keeps the original timestamp.
+        sources.accept_path(REVIEW, SESSION, "/work/a".into()).unwrap();
+        assert_eq!(sources.snapshots()[0].accepted_at, Some(accepted_at));
+        let json = serde_json::to_value(&snapshots[0]).unwrap();
+        assert_eq!(json["acceptedAt"], accepted_at);
+        assert!(json.get("accepted_at").is_none());
+        assert!(json["source"].get("acceptedAt").is_none(), "the request identity never carries acceptedAt");
+        let revision = sources.next_result_revision(REVIEW, SESSION).unwrap();
+        let declaration = ReviewReturn { review_id: REVIEW.into(), session_id: SESSION.into(), outcome: Outcome::Reviewed, head_oid: None, worktree_state: WorktreeState::Clean, meta: Vec::new() };
+        let request = sources.request_for(REVIEW, SESSION, true).unwrap();
+        let urls = [
+            source_event_url(&request, None, accepted_url(REVIEW, SESSION).unwrap()).unwrap(),
+            source_event_url(&request, None, rejected_url(REVIEW, SESSION, "not_a_worktree").unwrap()).unwrap(),
+            source_event_url(&request, Some(revision), returned_url(&declaration).unwrap()).unwrap(),
+        ];
+        for url in urls {
+            let lower = url.to_ascii_lowercase();
+            assert!(!lower.contains("acceptedat") && !lower.contains("accepted_at"), "{url}");
+            assert!(!url.contains(&accepted_at.to_string()), "{url}");
+        }
+        sources.remember_return(revision, &declaration).unwrap();
+        let json = serde_json::to_value(&sources.snapshots()[0]).unwrap();
+        assert!(json["lastReturn"]["declaration"].get("acceptedAt").is_none());
+        assert!(json["lastReturn"]["declaration"]["meta"].as_array().unwrap().is_empty());
     }
 
 }

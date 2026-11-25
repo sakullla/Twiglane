@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  beginClioraReview, captureClioraReview, clioraSourceEpoch, clioraBaseline, clioraReview, clioraReturnOutcome,
+  beginClioraReview, captureClioraReview, clioraSourceAcceptedAt, clioraSourceEpoch, clioraBaseline, clioraReview, clioraReturnOutcome,
   forgetClioraReview, forgetClioraSourceUnless, hydrateClioraReviews, recordClioraCommit, resetClioraReview,
   sameWorktreePath, selectClioraSource,
 } from "../src/lib/cliora-review.svelte";
@@ -81,6 +81,38 @@ describe("multiple Cliora sources", () => {
     selectClioraSource("A"); expect(clioraReview.result?.headOid).toBe("c".repeat(40)); expect(clioraReview.lastReturn?.revision).toBe(2);
     selectClioraSource("B"); expect(clioraReview.result).toBeNull(); expect(clioraBaseline()).toBe("b".repeat(40));
     hydrateClioraReviews([]); expect(clioraReview.sources).toHaveLength(0);
+  });
+
+  it("keeps native acceptedAt per source and treats a missing or invalid value as null", () => {
+    const a = source("A", "/work/shared"); const b = source("B", "/work/shared", "b".repeat(40)); const c = source("C", "/work/c");
+    hydrateClioraReviews([
+      { source: a, result: null, lastReturn: null, acceptedAt: 1_700_000_000_000 },
+      { source: b, result: null, lastReturn: null, acceptedAt: 1_700_000_500_000 },
+      { source: c, result: null, lastReturn: null },
+    ]);
+    expect(clioraSourceAcceptedAt("A")).toBe(1_700_000_000_000);
+    expect(clioraSourceAcceptedAt("B")).toBe(1_700_000_500_000);
+    expect(clioraSourceAcceptedAt("C")).toBeNull();
+    expect(clioraSourceAcceptedAt("missing")).toBeNull();
+    expect(clioraReview.acceptedAt).toBeNull();
+    forgetClioraSourceUnless("/work/shared");
+    selectClioraSource("B"); expect(clioraReview.acceptedAt).toBe(1_700_000_500_000);
+    selectClioraSource("A"); expect(clioraReview.acceptedAt).toBe(1_700_000_000_000);
+    expect(clioraReview.source).not.toHaveProperty("acceptedAt");
+    hydrateClioraReviews([{ source: a, result: null, lastReturn: null, acceptedAt: Number.NaN }, { source: c, result: null, lastReturn: null, acceptedAt: null }]);
+    expect(clioraSourceAcceptedAt("A")).toBeNull();
+    expect(clioraSourceAcceptedAt("C")).toBeNull();
+  });
+
+  it("stamps a newly accepted source locally without resetting a known one", () => {
+    beginClioraReview({ ...source("A", "/work/a"), acceptedAt: 42 });
+    expect(clioraSourceAcceptedAt("A")).toBe(42);
+    expect(clioraReview.source).not.toHaveProperty("acceptedAt");
+    beginClioraReview({ ...source("A", "/work/a"), acceptedAt: 99 });
+    expect(clioraSourceAcceptedAt("A")).toBe(42);
+    const before = Date.now();
+    beginClioraReview(source("B", "/work/b"));
+    expect(clioraSourceAcceptedAt("B")).toBeGreaterThanOrEqual(before);
   });
 
   it("uses the same platform-aware path identity for sources and local review progress", () => {

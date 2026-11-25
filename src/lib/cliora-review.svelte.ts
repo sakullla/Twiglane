@@ -32,6 +32,15 @@ export interface ClioraSourceSnapshot {
   source: ClioraReviewSource;
   result: ClioraReviewResult | null;
   lastReturn: { revision: number; declaration: { reviewId: string; sessionId: string; outcome: ClioraOutcome; headOid: string | null; worktreeState: ClioraWorktreeState; meta: [string, string][] } } | null;
+  /** 原生接受该来源时的毫秒时间戳（内部 IPC，仅用于显示）；旧快照缺失时为 null。 */
+  acceptedAt: number | null;
+}
+
+/** 原生快照输入：旧进程的快照可能没有 acceptedAt。 */
+export type ClioraSourceSnapshotInput = Omit<ClioraSourceSnapshot, "acceptedAt"> & { acceptedAt?: number | null };
+
+function validAcceptedAt(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
 }
 
 export const MAX_REVIEW_SOURCES = 8;
@@ -49,7 +58,14 @@ export const clioraReview = {
   get sources(): ClioraReviewSource[] { return Object.values(store.entries).map((entry) => entry.source); },
   get source(): ClioraReviewSource | null { return store.activeReviewId ? store.entries[store.activeReviewId]?.source ?? null : null; },
   get result(): ClioraReviewResult | null { return store.activeReviewId ? store.entries[store.activeReviewId]?.result ?? null : null; },
+  /** 当前来源的接受时间；没有来源或未知时为 null。 */
+  get acceptedAt(): number | null { return store.activeReviewId ? store.entries[store.activeReviewId]?.acceptedAt ?? null : null; },
 };
+
+/** 按来源读取接受时间（来源菜单显示相对时间与最新/较早）。 */
+export function clioraSourceAcceptedAt(reviewId: string): number | null {
+  return store.entries[reviewId]?.acceptedAt ?? null;
+}
 
 /** Reuse project checkout semantics: POSIX case and literal backslashes are significant. */
 export function sameWorktreePath(a: string, b: string): boolean {
@@ -57,23 +73,24 @@ export function sameWorktreePath(a: string, b: string): boolean {
 }
 
 /** The link itself explicitly selects its source. Existing IDs never reset a result or baseline. */
-export function beginClioraReview(input: Pick<ClioraReviewSource, "reviewId" | "sessionId" | "worktreePath" | "baseline"> & Partial<ClioraReviewSource>, activate = true): void {
-  const source: ClioraReviewSource = { ...input, protocolVersion: input.protocolVersion ?? 2, workspaceId: input.workspaceId ?? null, repositoryId: input.repositoryId ?? null, workspaceName: input.workspaceName ?? null };
+export function beginClioraReview(input: Pick<ClioraReviewSource, "reviewId" | "sessionId" | "worktreePath" | "baseline"> & Partial<ClioraReviewSource> & { acceptedAt?: number | null }, activate = true): void {
+  const { acceptedAt: acceptedInput, ...fields } = input;
+  const source: ClioraReviewSource = { ...fields, protocolVersion: fields.protocolVersion ?? 2, workspaceId: fields.workspaceId ?? null, repositoryId: fields.repositoryId ?? null, workspaceName: fields.workspaceName ?? null };
   const known = store.entries[source.reviewId];
   if (known && (known.source.sessionId !== source.sessionId || !sameWorktreePath(known.source.worktreePath, source.worktreePath))) {
     throw new Error("审查标识已绑定其它来源，请从 Cliora 重新发起。");
   }
   if (!known && clioraReview.sources.length >= MAX_REVIEW_SOURCES) throw new Error("审查来源已满，请明确关闭一个来源后重新发起。");
-  if (!known) { store.entries = { ...store.entries, [source.reviewId]: { source, result: null, lastReturn: null } }; mutationEpoch += 1; }
+  if (!known) { store.entries = { ...store.entries, [source.reviewId]: { source, result: null, lastReturn: null, acceptedAt: acceptedInput === undefined ? Date.now() : validAcceptedAt(acceptedInput) } }; mutationEpoch += 1; }
   // A receipt can complete after ordinary navigation. Retain its source without changing that view.
   if (activate) { store.currentPath = source.worktreePath; selectClioraSource(source.reviewId); }
 }
 
 /** Hydrate only the current native process. Full process restart returns no sources. */
-export function hydrateClioraReviews(snapshots: ClioraSourceSnapshot[], expectedEpoch = mutationEpoch): boolean {
+export function hydrateClioraReviews(snapshots: ClioraSourceSnapshotInput[], expectedEpoch = mutationEpoch): boolean {
   if (expectedEpoch !== mutationEpoch) return false;
   if (snapshots.length > MAX_REVIEW_SOURCES) throw new Error("原生审查来源超出上限，请重新启动并从 Cliora 重新发起。");
-  store.entries = Object.fromEntries(snapshots.map((entry) => [entry.source.reviewId, { source: { ...entry.source }, result: entry.result ? { ...entry.result } : null, lastReturn: entry.lastReturn }]));
+  store.entries = Object.fromEntries(snapshots.map((entry) => [entry.source.reviewId, { source: { ...entry.source }, result: entry.result ? { ...entry.result } : null, lastReturn: entry.lastReturn, acceptedAt: validAcceptedAt(entry.acceptedAt) }]));
   mutationEpoch += 1;
   if (store.currentPath) forgetClioraSourceUnless(store.currentPath);
   else store.activeReviewId = null;

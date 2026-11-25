@@ -1379,10 +1379,15 @@ describe("外壳样式契约", () => {
     expect(ruleBody(layoutCss, '.workspace[data-sidebar="hidden"] .changes')).toMatch(/grid-template-columns:\s*0 0 minmax\(0, 1fr\)/);
     expect(ruleBody(layoutCss, '.workspace[data-sidebar="hidden"] .history-layout')).toMatch(/grid-template-columns:\s*0 0 minmax\(0, 1fr\)/);
     // display:none 会丢滚动位置；visibility 同时让隐藏的控件不可聚焦。
-    const hidden = ruleBody(layoutCss, '.workspace[data-sidebar="hidden"] .pane');
-    expect(hidden).toMatch(/visibility:\s*hidden/);
-    expect(hidden).not.toMatch(/display:\s*none/);
-    expect(ruleBody(layoutCss, '.workspace[data-sidebar="hidden"] .resizer')).toMatch(/visibility:\s*hidden/);
+    for (const layout of [".changes", ".history-layout"]) {
+      const hidden = ruleBody(layoutCss, `.workspace[data-sidebar="hidden"] ${layout} > .pane`);
+      expect(hidden).toMatch(/visibility:\s*hidden/);
+      expect(hidden).not.toMatch(/display:\s*none/);
+      expect(ruleBody(layoutCss, `.workspace[data-sidebar="hidden"] ${layout} > .resizer`)).toMatch(/visibility:\s*hidden/);
+    }
+    // 只隐藏左栏右沿那一根：任务文件栏、提交详情文件栏的拖动条在左栏收起后仍要能拖（回归）。
+    expect(ruleBodies(layoutCss, '.workspace[data-sidebar="hidden"] .resizer')).toEqual([]);
+    expect(ruleBodies(layoutCss, '.workspace[data-sidebar="hidden"] .pane')).toEqual([]);
   });
 
   it("左栏是贴边平面面板，差异不再是圆角卡片", () => {

@@ -787,6 +787,30 @@ export interface ChangeRequestPrepare {
   defaultBranch: string | null;
   generation: number;
   gitlabInstance?: { url: string; remoteFingerprint: string };
+  /** Git 远程地址里的主机名：记住自建 GitLab 实例时的键。旧原生缺这个字段。 */
+  remoteHost?: string;
+  /** 这次使用的 GitLab 实例来自设置里记住的配置。 */
+  instanceSaved?: boolean;
+}
+
+/** MR 草稿原料：来源相对目标多出的提交（新的在前）。 */
+export interface ChangeRequestDraftCommit {
+  subject: string;
+  body: string;
+}
+
+export interface ChangeRequestDraft {
+  commits: ChangeRequestDraftCommit[];
+  truncated: boolean;
+}
+
+/** 设置里记住的自建 GitLab 实例（按 Git 远程主机名）。 */
+export interface GitLabInstanceEntry {
+  host: string;
+  url: string;
+  savedAtMs: number;
+  /** 钥匙串里是否已有这个实例的令牌；读不到时为 null。 */
+  tokenConfigured: boolean | null;
 }
 
 /** 令牌状态只有布尔值：原生永不把令牌本身交给前端。 */

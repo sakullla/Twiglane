@@ -41,6 +41,16 @@ pub(crate) trait RepositoryReader {
         branch: &str,
         generation: u64,
     ) -> impl Future<Output = Result<(bool, u64), AppError>> + Send;
+    /// 来源分支相对目标分支多出的提交（只读远程跟踪引用），用于生成 MR 草稿。
+    /// 读不到（例如远端会话没有这项能力）时返回空列表，不阻断创建流程。
+    fn commits(
+        &self,
+        _remote: &str,
+        _source: &str,
+        _target: &str,
+    ) -> impl Future<Output = Result<Vec<DraftCommit>, AppError>> + Send {
+        async { Ok(Vec::new()) }
+    }
 }
 
 struct LocalReader<'a> {
@@ -64,6 +74,33 @@ impl RepositoryReader for LocalReader<'_> {
             self.backend, self.path, remote, branch, generation, internal_request_id(),
         ).await
     }
+
+    async fn commits(&self, remote: &str, source: &str, target: &str) -> Result<Vec<DraftCommit>, AppError> {
+        let raw = sync::change_request_commits(self.backend, self.path, remote, source, target, DRAFT_COMMIT_LIMIT).await?;
+        Ok(raw
+            .into_iter()
+            .map(|(subject, body)| DraftCommit { subject, body })
+            .collect())
+    }
+}
+
+/// 草稿最多读取的提交数：足够写摘要，又不会把超长分支整段搬进描述。
+const DRAFT_COMMIT_LIMIT: usize = 60;
+
+/// MR 草稿用的一条提交：只有标题与正文，不含作者或哈希。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftCommit {
+    pub subject: String,
+    pub body: String,
+}
+
+/// 生成草稿的原料：来源相对目标多出的提交（新的在前）。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRequestDraft {
+    pub commits: Vec<DraftCommit>,
+    pub truncated: bool,
 }
 
 #[derive(Deserialize)]
@@ -124,6 +161,17 @@ pub struct ChangeRequestPrepare {
     pub generation: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     gitlab_instance: Option<remote::GitLabInstance>,
+    /// Git 远程地址里的主机名：记住自建 GitLab 实例时用它作键。
+    pub remote_host: String,
+    /// 这次使用的 GitLab 实例来自设置里记住的配置（不是本次手填，也不是自动识别）。
+    pub instance_saved: bool,
+}
+
+impl ChangeRequestPrepare {
+    /// 本次确认的 GitLab 实例 Web 地址（手填或记住的）。
+    pub fn gitlab_instance_url(&self) -> Option<&str> {
+        self.gitlab_instance.as_ref().map(|instance| instance.url.as_str())
+    }
 }
 
 /// 令牌状态只有布尔值，永不返回令牌本身。
@@ -208,14 +256,18 @@ pub(crate) async fn prepare_with(
 ) -> Result<ChangeRequestPrepare, AppError> {
     ops::require_change_requests(backend)?;
     let git = LocalReader { backend, path, generation, request_id };
-    prepare_for(&git, requested, http, gitlab_instance_url).await
+    // 本次没有手填地址时，按远程主机沿用设置里记住的自建 GitLab 实例。
+    let saved = |host: &str| backend.store.gitlab_instance_for(host);
+    prepare_for_saved(&git, requested, http, gitlab_instance_url, &saved).await
 }
 
-pub(crate) async fn prepare_for(
+/// saved 按 Git 远程主机名查记住的自建 GitLab 实例：本次没有手填地址时优先使用它。
+pub(crate) async fn prepare_for_saved(
     git: &impl RepositoryReader,
     requested: Option<&str>,
     http: &Http,
     gitlab_instance_url: Option<&str>,
+    saved: &(dyn Fn(&str) -> Option<String> + Sync),
 ) -> Result<ChangeRequestPrepare, AppError> {
     let state = git.state().await?;
     current_branch(&state)?;
@@ -227,7 +279,16 @@ pub(crate) async fn prepare_for(
             generation,
         } => {
             let url = remote_url(&state.remotes, &remote)?;
-            let repo = remote::resolve_repository(http, url, gitlab_instance_url).await?;
+            let remote_host = remote::parse_remote_location(url)
+                .map(|location| location.host.to_ascii_lowercase())
+                .unwrap_or_default();
+            let remembered = match gitlab_instance_url {
+                Some(_) => None,
+                None if remote_host.is_empty() => None,
+                None => saved(&remote_host),
+            };
+            let instance_url = gitlab_instance_url.or(remembered.as_deref());
+            let repo = remote::resolve_repository(http, url, instance_url).await?;
             Ok(ChangeRequestPrepare {
                 status: "ready".to_string(),
                 choices: Vec::new(),
@@ -242,7 +303,9 @@ pub(crate) async fn prepare_for(
                 target_branch: state.default_branch.clone().unwrap_or_default(),
                 default_branch: state.default_branch.clone(),
                 generation,
+                instance_saved: remembered.is_some() && repo.gitlab_instance.is_some(),
                 gitlab_instance: repo.gitlab_instance,
+                remote_host,
             })
         }
     }
@@ -267,6 +330,8 @@ fn empty_prepare(
         default_branch: None,
         generation,
         gitlab_instance: None,
+        remote_host: String::new(),
+        instance_saved: false,
     }
 }
 
@@ -412,6 +477,124 @@ pub fn complete_fallback(
         target_branch: pending.target_branch,
         web_prefilled: pending.web_prefilled,
     })
+}
+
+// ---------------------------------------------------------------- draft
+
+/// 读取来源分支相对目标分支多出的提交，作为生成标题与描述的原料。
+/// 只读远程跟踪引用；目标分支在本地没有跟踪引用时返回空列表。
+pub async fn draft(
+    backend: &Backend,
+    path: &str,
+    remote: &str,
+    source: &str,
+    target: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<ChangeRequestDraft, AppError> {
+    ops::require_change_requests(backend)?;
+    let git = LocalReader { backend, path, generation, request_id };
+    draft_for(&git, remote, source, target).await
+}
+
+pub(crate) async fn draft_for(
+    git: &impl RepositoryReader,
+    remote: &str,
+    source: &str,
+    target: &str,
+) -> Result<ChangeRequestDraft, AppError> {
+    let source = validate_target(source)?;
+    let target = validate_target(target)?;
+    if remote.is_empty() || remote.starts_with('-') || remote.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(AppError::new("change_request_remote_missing", "没有这个远程。"));
+    }
+    if source == target {
+        return Ok(ChangeRequestDraft { commits: Vec::new(), truncated: false });
+    }
+    let mut commits = git.commits(remote, &source, &target).await?;
+    let truncated = commits.len() > DRAFT_COMMIT_LIMIT;
+    commits.truncate(DRAFT_COMMIT_LIMIT);
+    Ok(ChangeRequestDraft { commits, truncated })
+}
+
+// ---------------------------------------------------------------- web
+
+/// 不使用令牌，直接在浏览器打开预填好的新建页面，由用户在网页里确认并提交。
+pub async fn open_web(
+    backend: &Backend,
+    input: CreateInput,
+    generation: u64,
+    request_id: u64,
+    opener: &dyn WebOpener,
+    expected: Option<&ExpectedSource>,
+) -> Result<ChangeRequestOutcome, AppError> {
+    ops::require_change_requests(backend)?;
+    let http = Http::default_app()?;
+    let git = LocalReader { backend, path: &input.path, generation, request_id };
+    let pending = web_for(&git, &input, &http, expected).await?;
+    complete_fallback(opener, pending)
+}
+
+pub(crate) async fn web_for(
+    git: &impl RepositoryReader,
+    input: &CreateInput,
+    http: &Http,
+    expected: Option<&ExpectedSource>,
+) -> Result<FallbackPending, AppError> {
+    let title = input.title.trim().to_string();
+    if title.chars().count() > 256 {
+        return Err(AppError::new(
+            "change_request_invalid_input",
+            "标题超过 256 字符，未打开网页。",
+        ));
+    }
+    let target = validate_target(&input.target_branch)?;
+    validate_body(&input.body)?;
+
+    let state = git.state().await?;
+    current_branch(&state)?;
+    let (remote, source) = match select_remote(git, &state, input.remote.as_deref()).await? {
+        RemoteSelection::Ready { remote, source, .. } => (remote, source),
+        RemoteSelection::Choice(_) => {
+            return Err(AppError::new(
+                "change_request_remote_choice",
+                "有多个远程，无法确定在哪里创建。请先选择远程。",
+            ));
+        }
+    };
+    let url = remote_url(&state.remotes, &remote)?;
+    let repo = resolve_expected_repository(http, url, expected).await?;
+    if let Some(expected) = expected {
+        expected.check(&repo, Some(&source))?;
+    }
+    let page = web::fallback_page(repo.provider, &repo.web_url(), &source, &target, &title, &input.body)?;
+    Ok(FallbackPending {
+        url: page.url,
+        web_prefilled: page.prefilled,
+        provider: repo.provider.key().to_string(),
+        provider_label: repo.provider.label().to_string(),
+        repository: repo.full_path(),
+        source_branch: source,
+        target_branch: target,
+    })
+}
+
+// ---------------------------------------------------------------- 记住的 GitLab 实例
+
+pub(crate) use remote::normalize_instance_url;
+
+/// 删除某个实例保存在钥匙串里的令牌（设置里删除实例时可选）。
+pub fn delete_instance_token(instance_url: &str) -> Result<(), AppError> {
+    let url = normalize_instance_url(instance_url)?;
+    let key = format!("{}|{url}/api/v4", provider::Provider::GitLab.key());
+    KeyringStore::new().delete(&key).map_err(|failure| failure.into_error())
+}
+
+/// 查询某个实例在钥匙串里是否已有令牌。
+pub fn instance_token_configured(instance_url: &str) -> Result<bool, AppError> {
+    let url = normalize_instance_url(instance_url)?;
+    let key = format!("{}|{url}/api/v4", provider::Provider::GitLab.key());
+    Ok(KeyringStore::new().load(&key).map_err(|failure| failure.into_error())?.is_some())
 }
 
 // ---------------------------------------------------------------- token

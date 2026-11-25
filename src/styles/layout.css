@@ -122,7 +122,9 @@
 .pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--surface-2); overflow: hidden; }
 /* 隐藏左栏不能用 display:none，否则列表滚动位置会丢；visibility 同时让其中的控件不可聚焦。 */
 .workspace[data-sidebar="hidden"] .changes, .workspace[data-sidebar="hidden"] .history-layout { grid-template-columns: 0 0 minmax(0, 1fr); }
-.workspace[data-sidebar="hidden"] .pane, .workspace[data-sidebar="hidden"] .resizer { visibility: hidden; }
+/* 只隐藏左栏本身与它右沿的拖动条：内容区里的分栏（任务文件栏、提交详情的文件栏）仍要能拖。 */
+.workspace[data-sidebar="hidden"] .changes > .pane, .workspace[data-sidebar="hidden"] .history-layout > .pane,
+.workspace[data-sidebar="hidden"] .changes > .resizer, .workspace[data-sidebar="hidden"] .history-layout > .resizer { visibility: hidden; }
 /* 合并提示：左栏顶部一枚圆角提示条，与左栏同宽、不顶满边，点击进入合并。 */
 .merge-banner { display: flex; align-items: center; gap: var(--space-8); width: calc(100% - var(--space-16)); min-height: 32px; margin: 0 var(--space-8) var(--space-8); padding: 0 var(--space-8) 0 var(--space-12); flex: none; border-radius: var(--radius); background: var(--warning-soft); color: var(--warning-text); font-size: var(--text-sm); font-weight: var(--weight-medium); text-align: left; transition: background var(--duration-fast) var(--ease); }
 .merge-banner:hover { background: color-mix(in srgb, var(--warning) 20%, transparent); }

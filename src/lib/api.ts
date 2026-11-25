@@ -39,6 +39,7 @@ import { REMOTE_HUNKS_UNSTAGEABLE_REASON } from "./types";
 import type {
   BatchDeleteResult,
   BranchState,
+  ChangeRequestDraft,
   ChangeRequestOutcome,
   ChangeRequestPrepare,
   ChangeRequestTokenStatus,
@@ -64,6 +65,7 @@ import type {
   DiffResponse,
   FileHistoryPage,
   GitInfo,
+  GitLabInstanceEntry,
   CherryPickOutcome,
   HistoryPage,
   IgnoreOutcome,
@@ -1883,6 +1885,36 @@ const apiBase = {
       requestId,
       expected: prepared && preparedChangeSource(prepared),
     }),
+  /** MR 草稿原料：来源远程跟踪分支相对目标多出的提交，只读。 */
+  changeRequestDraft: (path: string, remote: string, sourceBranch: string, targetBranch: string, generation: number, requestId: number) =>
+    invoke<ChangeRequestDraft>("change_request_draft", { path, remote, sourceBranch, targetBranch, generation, requestId }),
+  /** 不用令牌：原生按已核对的仓库构造预填的新建网页并用系统浏览器打开，需要用户在网页提交。 */
+  openChangeRequestWeb: (
+    path: string,
+    remote: string,
+    targetBranch: string,
+    title: string,
+    body: string,
+    generation: number,
+    requestId: number,
+    prepared?: ChangeRequestPrepare,
+  ) =>
+    invoke<ChangeRequestOutcome>("change_request_open_web", {
+      path,
+      remote,
+      targetBranch,
+      title,
+      body,
+      generation,
+      requestId,
+      expected: prepared && preparedChangeSource(prepared),
+    }),
+  /** 设置里记住的自建 GitLab 实例。 */
+  changeRequestInstances: () => invoke<GitLabInstanceEntry[]>("change_request_instances"),
+  saveChangeRequestInstance: (host: string, url: string) =>
+    invoke<GitLabInstanceEntry[]>("change_request_save_instance", { host, url }),
+  deleteChangeRequestInstance: (host: string, deleteToken: boolean) =>
+    invoke<GitLabInstanceEntry[]>("change_request_delete_instance", { host, deleteToken }),
   /** 只删除用户显式点选的当前实例令牌；关闭功能开关不会调用它。 */
   deleteChangeRequestToken: (path: string, remote: string, generation: number, requestId: number, prepared?: ChangeRequestPrepare) =>
     invoke<ChangeRequestTokenStatus>("change_request_delete_token", { path, remote, generation, requestId, expected: prepared && preparedChangeSource(prepared) }),
@@ -2536,6 +2568,22 @@ const remoteOverrides: Record<string, unknown> = {
     }
     return remoteChangeRequest<ChangeRequestOutcome>(remoteBridgeSession(path, generation), {
       action: "create", remote, targetBranch, title, body, expected: preparedChangeSource(prepared),
+    });
+  },
+
+  async changeRequestDraft(path: string, remote: string, sourceBranch: string, targetBranch: string, generation: number, requestId: number) {
+    // 远端组件还没有这项只读能力：远端仓库按「没有提交原料」处理，界面退回按分支名生成。
+    if (isRemoteRepositoryKey(path)) return { commits: [], truncated: false } satisfies ChangeRequestDraft;
+    return apiBase.changeRequestDraft(path, remote, sourceBranch, targetBranch, generation, requestId);
+  },
+
+  async openChangeRequestWeb(path: string, remote: string, targetBranch: string, title: string, body: string,
+    generation: number, requestId: number, prepared?: ChangeRequestPrepare) {
+    if (!isRemoteRepositoryKey(path)) {
+      return apiBase.openChangeRequestWeb(path, remote, targetBranch, title, body, generation, requestId, prepared);
+    }
+    return remoteChangeRequest<ChangeRequestOutcome>(remoteBridgeSession(path, generation), {
+      action: "openWeb", remote, targetBranch, title, body, expected: preparedChangeSource(prepared),
     });
   },
 

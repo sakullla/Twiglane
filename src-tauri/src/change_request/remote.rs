@@ -297,6 +297,44 @@ pub(crate) async fn resolve_repository(
     }
 }
 
+/// 校验并规范化用户填写的 GitLab 实例地址，返回不带末尾斜杠的 Web 根地址。
+/// 设置里保存实例与创建对话框里手填走同一套规则。
+pub(crate) fn normalize_instance_url(instance_url: &str) -> Result<String, AppError> {
+    let instance = parse_instance_url(instance_url)?;
+    let prefix = instance.path().trim_end_matches('/');
+    Ok(format!("{}{prefix}", instance.origin().ascii_serialization()))
+}
+
+fn parse_instance_url(instance_url: &str) -> Result<Url, AppError> {
+    let invalid = || AppError::new(
+        "change_request_gitlab_instance",
+        "请输入 GitLab 实例的 HTTP 或 HTTPS 地址，可包含端口和部署子路径。请去掉用户名、查询参数与片段。",
+    );
+    let instance_url = instance_url.trim();
+    if instance_url.len() > 4096 || instance_url.chars().any(char::is_control) {
+        return Err(invalid());
+    }
+    let instance = Url::parse(instance_url).map_err(|_| invalid())?;
+    instance.host_str().ok_or_else(invalid)?;
+    if !matches!(instance.scheme(), "https" | "http")
+        || !instance.username().is_empty()
+        || instance.password().is_some()
+        || instance.query().is_some()
+        || instance.fragment().is_some()
+    {
+        return Err(invalid());
+    }
+    let prefix = instance.path().trim_end_matches('/');
+    if !prefix.is_empty() && prefix[1..].split('/').any(|segment| {
+        segment.is_empty() || !segment.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
+        })
+    }) {
+        return Err(invalid());
+    }
+    Ok(instance)
+}
+
 fn manual_gitlab(
     remote_url: &str,
     location: &RemoteLocation,

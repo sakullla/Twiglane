@@ -2317,6 +2317,13 @@ enum ChangeRequestAction {
         expected: change_request::ExpectedSource,
         credential: ChangeRequestCredential,
     },
+    OpenWeb {
+        remote: String,
+        expected: change_request::ExpectedSource,
+        target_branch: String,
+        title: String,
+        body: String,
+    },
 }
 
 #[derive(Deserialize)]
@@ -2349,7 +2356,24 @@ pub async fn remote_change_request<R: Runtime>(
     let http = change_request::Http::default_app()?;
     match request.action {
         ChangeRequestAction::Prepare { remote, gitlab_instance_url } => {
-            Ok(json!(change_request::prepare_for(&git, remote.as_deref(), &http, gitlab_instance_url.as_deref()).await?))
+            let store = &backend.inner().store;
+            let saved = |host: &str| store.gitlab_instance_for(host);
+            let prepared = change_request::prepare_for_saved(
+                &git, remote.as_deref(), &http, gitlab_instance_url.as_deref(), &saved,
+            ).await?;
+            crate::remember_gitlab_instance(backend.inner(), gitlab_instance_url.is_some(), &prepared);
+            Ok(json!(prepared))
+        }
+        ChangeRequestAction::OpenWeb { remote, expected, target_branch, title, body } => {
+            let input = change_request::CreateInput {
+                path: session.root.clone(),
+                remote: Some(remote),
+                target_branch,
+                title,
+                body,
+            };
+            let pending = change_request::web_for(&git, &input, &http, Some(&expected)).await?;
+            Ok(json!(change_request::complete_fallback(&crate::OpenerHandle(app), pending)?))
         }
         ChangeRequestAction::Create { remote, expected, target_branch, title, body } => {
             let input = change_request::CreateInput {

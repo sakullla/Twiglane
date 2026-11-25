@@ -131,21 +131,35 @@ fn fallback_urls_encode_components_and_degrade_when_too_long() {
     assert!(gitea.url.contains("/compare/main...feat%2Fx%20y?expand=1&title="));
     assert!(gitea.prefilled);
 
-    // GitLab 只有来源分支是官方可核验参数，因此不声称目标/标题/描述已预填。
+    // GitLab 新建页用 merge_request[...] 表单参数预填来源、目标、标题与描述。
     let gitlab = fallback_page(
         Provider::GitLab,
         "https://gitlab.example/acme/app",
         "feat/x y",
         "main",
-        "标题",
-        "描述",
+        "a&b",
+        "x",
     )
     .unwrap();
     assert_eq!(
         gitlab.url,
-        "https://gitlab.example/acme/app/-/merge_requests/new?merge_request%5Bsource_branch%5D=feat%2Fx%20y"
+        "https://gitlab.example/acme/app/-/merge_requests/new?merge_request%5Bsource_branch%5D=feat%2Fx%20y&merge_request%5Btarget_branch%5D=main&merge_request%5Btitle%5D=a%26b&merge_request%5Bdescription%5D=x"
     );
-    assert!(!gitlab.prefilled);
+    assert!(gitlab.prefilled);
+
+    // GitLab 超长时去掉标题与描述，只保留两个分支参数。
+    let long_body = "描".repeat(4000);
+    let gitlab_long = fallback_page(
+        Provider::GitLab,
+        "https://gitlab.example/acme/app",
+        "feature",
+        "main",
+        "t",
+        &long_body,
+    )
+    .unwrap();
+    assert!(gitlab_long.url.ends_with("merge_request%5Bsource_branch%5D=feature&merge_request%5Btarget_branch%5D=main"));
+    assert!(!gitlab_long.prefilled);
 
     // 超长时先省略标题与描述，保留新建表单参数。
     let long_title = "标".repeat(4000);

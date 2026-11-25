@@ -474,7 +474,7 @@
   let sidebarHidden = $state(false);
   let paneWidth = $derived(fitPaneWidth(widths.files, windowWidth));
   /** 设置 modal 打开时要定位的分区；由 Git 诊断入口置为 runtime、更新入口置为 update，其余入口为空。 */
-  let settingsSection = $state<"appearance" | "runtime" | "update" | "terminal" | null>(null);
+  let settingsSection = $state<"appearance" | "runtime" | "update" | "terminal" | "changeRequest" | null>(null);
   /** 当前打开的标题栏弹层；anchor 是触发按钮，关闭后焦点回到这里。 */
   let switcher = $state.raw<{ kind: "repo" | "branch"; anchor: HTMLElement } | null>(null);
   let confirmPath = $state<string | null>(null);
@@ -1467,7 +1467,7 @@
   }
 
   /** 设置 modal：默认落在外观首屏，Git 诊断/更新入口另行指定分区（R10、R1）。 */
-  function openSettings(section: "appearance" | "runtime" | "update" | "terminal" | null = null) {
+  function openSettings(section: "appearance" | "runtime" | "update" | "terminal" | "changeRequest" | null = null) {
     settingsSection = section;
     openTask("settings");
   }
@@ -6740,6 +6740,7 @@
     {nextId}
     onClose={closeTask}
     onNotice={notice}
+    onOpenSettings={() => openSettings("changeRequest")}
   />
 {/if}
 

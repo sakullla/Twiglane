@@ -273,6 +273,11 @@ pub fn run() {
             change_request_token_status,
             change_request_set_token,
             change_request_delete_token,
+            change_request_draft,
+            change_request_open_web,
+            change_request_instances,
+            change_request_save_instance,
+            change_request_delete_instance,
             set_panel_widths,
             save_draft,
             cancel_reads,
@@ -2386,9 +2391,112 @@ async fn change_request_prepare(
     request_id: u64,
     gitlab_instance_url: Option<String>,
 ) -> Result<change_request::ChangeRequestPrepare, AppError> {
-    change_request::prepare(
-        state.inner(), &path, remote.as_deref(), generation, request_id, gitlab_instance_url.as_deref(),
-    ).await
+    let backend = state.inner();
+    let prepared = change_request::prepare(
+        backend, &path, remote.as_deref(), generation, request_id, gitlab_instance_url.as_deref(),
+    ).await?;
+    remember_gitlab_instance(backend, gitlab_instance_url.is_some(), &prepared);
+    Ok(prepared)
+}
+
+/// 用户本次手填的自建 GitLab 地址确认成功后记下来，下次同一远程主机自动沿用。
+/// 记不住只影响下次是否要再填一次，不影响这次创建。
+pub(crate) fn remember_gitlab_instance(
+    backend: &Backend,
+    manual: bool,
+    prepared: &change_request::ChangeRequestPrepare,
+) {
+    if !manual || prepared.remote_host.is_empty() {
+        return;
+    }
+    if let Some(url) = prepared.gitlab_instance_url() {
+        let _ = backend.store.save_gitlab_instance(&prepared.remote_host, url);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command(rename_all = "camelCase")]
+async fn change_request_draft(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    remote: String,
+    source_branch: String,
+    target_branch: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<change_request::ChangeRequestDraft, AppError> {
+    change_request::draft(state.inner(), &path, &remote, &source_branch, &target_branch, generation, request_id).await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command(rename_all = "camelCase")]
+async fn change_request_open_web<R: Runtime>(
+    app: AppHandle<R>,
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    remote: Option<String>,
+    target_branch: String,
+    title: String,
+    body: String,
+    generation: u64,
+    request_id: u64,
+    expected: Option<change_request::ExpectedSource>,
+) -> Result<change_request::ChangeRequestOutcome, AppError> {
+    let input = change_request::CreateInput { path, remote, target_branch, title, body };
+    change_request::open_web(state.inner(), input, generation, request_id, &OpenerHandle(app), expected.as_ref()).await
+}
+
+/// 设置里展示的已记住实例：附带令牌是否已在钥匙串（读不到时为 null）。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitLabInstanceView {
+    host: String,
+    url: String,
+    saved_at_ms: u64,
+    token_configured: Option<bool>,
+}
+
+fn instance_views(entries: Vec<state::GitLabInstanceEntry>) -> Vec<GitLabInstanceView> {
+    entries
+        .into_iter()
+        .map(|entry| GitLabInstanceView {
+            token_configured: change_request::instance_token_configured(&entry.url).ok(),
+            host: entry.host,
+            url: entry.url,
+            saved_at_ms: entry.saved_at_ms,
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn change_request_instances(state: State<'_, Arc<Backend>>) -> Result<Vec<GitLabInstanceView>, AppError> {
+    Ok(instance_views(state.inner().store.gitlab_instances()))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn change_request_save_instance(
+    state: State<'_, Arc<Backend>>,
+    host: String,
+    url: String,
+) -> Result<Vec<GitLabInstanceView>, AppError> {
+    let url = change_request::normalize_instance_url(&url)?;
+    Ok(instance_views(state.inner().store.save_gitlab_instance(&host, &url)?))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn change_request_delete_instance(
+    state: State<'_, Arc<Backend>>,
+    host: String,
+    delete_token: bool,
+) -> Result<Vec<GitLabInstanceView>, AppError> {
+    let store = &state.inner().store;
+    if delete_token {
+        let host_key = host.trim().to_ascii_lowercase();
+        if let Some(entry) = store.gitlab_instances().into_iter().find(|entry| entry.host == host_key) {
+            change_request::delete_instance_token(&entry.url)?;
+        }
+    }
+    Ok(instance_views(store.delete_gitlab_instance(&host)?))
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -803,3 +803,71 @@ async fn missing_token_or_broken_store_never_opens_web() {
     assert!(!error.message.contains("gitea-token"));
     broken.finish();
 }
+
+#[tokio::test]
+async fn remembered_gitlab_instance_is_reused_by_remote_host() {
+    let fixture = crate::test_support::git_fixture("cr-gitlab-remembered");
+    let backend = fixture.backend();
+    enable(&backend);
+    let dir = seed_repo(&fixture, RepoOptions {
+        branch: "feature",
+        remotes: vec![("origin", "ssh://git@Git.Remembered.invalid:2222/team/app.git".into())],
+        tracked: true,
+        upstream: None,
+    });
+    let path = repo_key(&dir);
+    let http = http_with(512 * 1024, 300);
+    let instance = "http://gitlab.remembered.invalid:8080/gitlab";
+    backend.store.save_gitlab_instance("git.remembered.invalid", instance).unwrap();
+
+    // 没有手填地址：按远程主机（不区分大小写）沿用记住的实例，不再探测网络。
+    let prepared = prepare_with(&backend, &path, None, 0, 1, &http, None).await.unwrap();
+    assert!(prepared.instance_saved);
+    assert_eq!(prepared.remote_host, "git.remembered.invalid");
+    assert_eq!(prepared.gitlab_instance_url(), Some(instance));
+    assert_eq!(prepared.repository, "team/app");
+
+    // 本次手填的地址优先于记住的配置，也不标成「已记住」。
+    let other = "https://other.remembered.invalid";
+    let manual = prepare_with(&backend, &path, None, 0, 2, &http, Some(other)).await.unwrap();
+    assert!(!manual.instance_saved);
+    assert_eq!(manual.gitlab_instance_url(), Some(other));
+
+    // 删除后不再沿用。
+    backend.store.delete_gitlab_instance("git.remembered.invalid").unwrap();
+    assert!(backend.store.gitlab_instance_for("git.remembered.invalid").is_none());
+}
+
+#[tokio::test]
+async fn draft_lists_commits_between_remote_tracking_refs() {
+    let fixture = crate::test_support::git_fixture("cr-draft");
+    let backend = fixture.backend();
+    enable(&backend);
+    let dir = seed_repo(&fixture, RepoOptions {
+        branch: "feature",
+        remotes: vec![("origin", "https://github.com/acme/app.git".into())],
+        tracked: false,
+        upstream: None,
+    });
+    git(&dir, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    std::fs::write(dir.join("file.txt"), "one\n").unwrap();
+    git(&dir, &["commit", "-am", "feat: 第一步", "-m", "正文说明"]);
+    std::fs::write(dir.join("file.txt"), "two\n").unwrap();
+    git(&dir, &["commit", "-am", "fix: 第二步"]);
+    git(&dir, &["update-ref", "refs/remotes/origin/feature", "HEAD"]);
+    let path = repo_key(&dir);
+
+    let listed = super::super::draft(&backend, &path, "origin", "feature", "main", 0, 1).await.unwrap();
+    assert!(!listed.truncated);
+    assert_eq!(listed.commits.len(), 2);
+    assert_eq!(listed.commits[0].subject, "fix: 第二步");
+    assert_eq!(listed.commits[1].subject, "feat: 第一步");
+    assert_eq!(listed.commits[1].body, "正文说明");
+
+    // 目标没有跟踪引用时返回空列表而不是报错。
+    let missing = super::super::draft(&backend, &path, "origin", "feature", "develop", 0, 2).await.unwrap();
+    assert!(missing.commits.is_empty());
+
+    // 选项样式的分支名直接拒绝，不进入 git 参数。
+    assert!(super::super::draft(&backend, &path, "origin", "-x", "main", 0, 3).await.is_err());
+}

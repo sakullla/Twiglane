@@ -19,6 +19,7 @@ use crate::git::command::{
     fetch_command, publish_command, pull_ff_command, push_command, remote_names_command,
     push_to_remote_command, push_to_upstream_command,
     remote_add_command, remote_set_url_command, remote_verbose_command, verify_ref_command,
+    change_request_log_command,
     rename_branch_command, worktree_add_command,
     set_upstream_to_command, status_command, switch_command, switch_track_as_command,
     switch_track_command,
@@ -313,6 +314,40 @@ pub(crate) async fn remote_tracking_ref_exists(
         _ => Err(git_failure("remote_failed", &read.output, "无法读取远程分支。")
             .with_generation(read.generation)),
     }
+}
+
+/// MR 草稿的提交原料：refs/remotes/{remote}/{target}..refs/remotes/{remote}/{source}。
+/// 只读、不带 generation 约束；目标或来源跟踪引用缺失时返回空列表。最多读 limit + 1 条，
+/// 让调用方知道是否被截断。
+pub(crate) async fn change_request_commits(
+    backend: &Backend,
+    path: &str,
+    remote: &str,
+    source: &str,
+    target: &str,
+    limit: usize,
+) -> Result<Vec<(String, String)>, AppError> {
+    let root = repo_root(path)?;
+    let git = require_git(backend).await?;
+    let target_ref = format!("refs/remotes/{remote}/{target}");
+    let source_ref = format!("refs/remotes/{remote}/{source}");
+    let (program, args) = change_request_log_command(&git.path, &root, &target_ref, &source_ref, limit + 1);
+    let read = run_git(backend, &repo_key(&root), JobKind::Read, internal_request_id(), program, args, None).await?;
+    if read.output.exit_code != 0 {
+        return Ok(Vec::new());
+    }
+    let text = String::from_utf8_lossy(&read.output.stdout);
+    Ok(text
+        .split('\u{1e}')
+        .filter_map(|record| {
+            let record = record.trim_start_matches(['\n', '\r']);
+            if record.trim().is_empty() {
+                return None;
+            }
+            let (subject, body) = record.split_once('\u{1f}').unwrap_or((record, ""));
+            Some((subject.trim().to_string(), body.trim().to_string()))
+        })
+        .collect())
 }
 
 pub async fn add_remote(

@@ -14,8 +14,8 @@ const MAX_URL_BYTES: usize = 8192;
 #[derive(Debug)]
 pub(crate) struct FallbackPage {
     pub url: String,
-    /// 是否把标题和描述带进网页。GitLab 只有一个官方可核验的来源分支参数，
-    /// 因此只预填来源，不声称目标、标题或描述已带入。
+    /// 是否把标题和描述带进网页。GitLab 的新建页接受 merge_request[...] 表单参数
+    /// （来源、目标、标题与描述），超长时只保留分支参数。
     pub prefilled: bool,
 }
 
@@ -50,13 +50,15 @@ pub(crate) fn fallback_page(
             encode_component(body)
         ),
         Provider::GitLab => format!(
-            "{base}/-/merge_requests/new?merge_request%5Bsource_branch%5D={encoded_source}"
+            "{base}/-/merge_requests/new?merge_request%5Bsource_branch%5D={encoded_source}&merge_request%5Btarget_branch%5D={encoded_target}&merge_request%5Btitle%5D={}&merge_request%5Bdescription%5D={}",
+            encode_component(title),
+            encode_component(body)
         ),
     };
     if page.len() <= MAX_URL_BYTES {
         return Ok(FallbackPage {
             url: page,
-            prefilled: !matches!(provider, Provider::GitLab),
+            prefilled: true,
         });
     }
     // 超长时先去掉标题与描述，保留分支和新建表单参数。
@@ -67,7 +69,9 @@ pub(crate) fn fallback_page(
         Provider::Gitea => {
             format!("{base}/compare/{encoded_target}...{encoded_source}?expand=1")
         }
-        Provider::GitLab => String::new(),
+        Provider::GitLab => format!(
+            "{base}/-/merge_requests/new?merge_request%5Bsource_branch%5D={encoded_source}&merge_request%5Btarget_branch%5D={encoded_target}"
+        ),
     };
     if !shortened.is_empty() && shortened.len() <= MAX_URL_BYTES {
         return Ok(FallbackPage {

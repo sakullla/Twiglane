@@ -609,7 +609,8 @@
                 <Icon name="layers" size={12} />
                 <span class="rs-group-name">{row.group.name}</span>
                 <span class="rs-group-count">{row.group.rows.length} 个工作区</span>
-                <span class="rs-group-path"><bdi>{row.group.mainPath ?? "归属未知"}</bdi></span>
+                <span class="rs-group-line" aria-hidden="true"></span>
+                <span class="sr-only">{row.group.mainPath ?? "归属未知"}</span>
               </div>
             {:else}
               {@const view = row.row}
@@ -618,7 +619,7 @@
               {@const badge = badgeLetters[viewIndex] ?? ""}
               {@const nested = view.linked && row.group.rows.length > 1}
               {@const sentence = statusSentence(view)}
-              <div class="switcher-row rs-row" class:nested role="presentation" data-repo-row={index} style={"top:" + offsets[index] + "px"}>
+              <div class="switcher-row rs-row" class:nested class:last-nested={nested && row.group.rows[row.group.rows.length - 1] === view} role="presentation" data-repo-row={index} style={"top:" + offsets[index] + "px"}>
                 <div
                   id={listId + "-" + viewIndex}
                   class="branch-option switcher-option rs-option"
@@ -687,9 +688,6 @@
                       <span class="rs-chip sync" aria-hidden="true">{#if (view.behind ?? 0) > 0}<span>↓{view.behind}</span>{/if}{#if (view.ahead ?? 0) > 0}<span class="up">↑{view.ahead}</span>{/if}</span>
                     {/if}
                     {#if view.reviewed > 0}<span class="rs-chip accent" aria-hidden="true"><Icon name="eye" size={11} />{view.reviewed}</span>{/if}
-                    {#if view.state === "ready" && !view.dirty && (view.conflicted ?? 0) === 0 && !view.stale}
-                      <span class="rs-clean" aria-hidden="true"><Icon name="check" size={11} /></span>
-                    {/if}
                   </span>
                   {#if view.current}<span class="switcher-current rs-current" aria-hidden="true">当前</span>{/if}
                 </div>
@@ -741,25 +739,26 @@
   .rs-status { display: inline-flex; align-items: center; gap: 4px; flex: none; color: var(--fg-subtle); font-size: var(--text-xs); }
   .rs-status.danger { color: var(--danger-text); }
   .rs-status .spinner { width: 12px; height: 12px; }
-  .rs-group { display: flex; align-items: center; gap: 6px; height: 30px; padding: 8px 12px 0; color: var(--fg-subtle); font-size: var(--text-xs); }
-  .rs-group :global(.icon) { flex: none; color: var(--accent-text); }
-  .rs-group-name { flex: none; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-muted); font-weight: var(--weight-semibold); }
-  .rs-group-count { flex: none; font-variant-numeric: tabular-nums; }
-  .rs-group-path { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: right; font: 10.5px/1 var(--mono); opacity: 0.7; }
-  .rs-group-path bdi { direction: ltr; unicode-bidi: isolate; }
-  .rs-group:not(.leading)::before { content: ""; position: absolute; top: 3px; left: 12px; right: 12px; border-top: 1px solid var(--border); }
+  /* 分组头：名称 + 数量 + 一根延伸到右侧的发丝线；主仓库路径就在第一行里，这里不再重复。 */
+  .rs-group { display: flex; align-items: center; gap: 6px; height: 30px; padding: 10px 12px 0; color: var(--fg-subtle); font-size: var(--text-xs); }
+  .rs-group :global(.icon) { flex: none; color: var(--fg-subtle); }
+  .rs-group-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-muted); font-weight: var(--weight-semibold); letter-spacing: 0.01em; }
+  .rs-group-count { flex: none; padding: 0 6px; border-radius: 999px; background: var(--surface-3); color: var(--fg-subtle); font-size: 10.5px; line-height: 16px; font-variant-numeric: tabular-nums; }
+  .rs-group-line { flex: 1 1 auto; min-width: 12px; height: 1px; background: var(--border); }
   .rs-row { height: 52px; }
-  :global(.popover) .rs-row .rs-option { display: flex; align-items: center; gap: 10px; height: 50px; padding: 0 10px; border-radius: var(--radius); }
-  :global(.popover) .rs-row.nested .rs-option { padding-left: 22px; }
+  :global(.popover) .rs-row .rs-option { position: relative; display: flex; align-items: center; gap: 10px; height: 50px; padding: 0 10px; border-radius: var(--radius); }
+  :global(.popover) .rs-row.nested .rs-option { padding-left: 24px; }
   .rs-badge { flex: none; width: 28px !important; height: 28px !important; border-radius: var(--radius-sm); font-size: 12px; }
   .rs-tree { position: relative; flex: none; width: 16px; height: 50px; }
-  .rs-tree::before { content: ""; position: absolute; left: 3px; top: 0; bottom: 50%; border-left: 1.5px solid var(--border-strong, var(--border)); border-bottom: 1.5px solid var(--border-strong, var(--border)); width: 10px; border-bottom-left-radius: 6px; }
-  .rs-text { display: flex; flex-direction: column; justify-content: center; gap: 2px; flex: 1; min-width: 0; }
+  .rs-tree::before { content: ""; position: absolute; left: 3px; top: -2px; bottom: 50%; width: 10px; border-left: 1.5px solid var(--border-strong); border-bottom: 1.5px solid var(--border-strong); border-bottom-left-radius: 7px; }
+  .rs-row.nested:not(.last-nested) .rs-tree::after { content: ""; position: absolute; left: 3px; top: 50%; bottom: -2px; border-left: 1.5px solid var(--border-strong); }
+  .rs-text { display: flex; flex-direction: column; justify-content: center; gap: 3px; flex: 1; min-width: 0; }
   .rs-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
   .rs-name { flex: 0 1 auto; min-width: 3em; font-weight: var(--weight-semibold); }
+  .rs-row.nested .rs-name { font-weight: var(--weight-medium); }
   .rs-line :global(.repo-head) { max-width: 55%; }
   .rs-line :global(.repo-worktree) { max-width: 30%; }
-  .rs-path { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; font: 11px/1.3 var(--mono); color: var(--fg-subtle); opacity: 0.85; }
+  .rs-path { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; font: 10.5px/1.3 var(--mono); color: var(--fg-subtle); }
   .rs-path bdi { direction: ltr; unicode-bidi: isolate; }
   .rs-path :global(.path-diverge) { color: var(--fg); font-weight: var(--weight-medium); }
   .rs-state { display: inline-flex; align-items: center; gap: 4px; flex: none; flex-wrap: nowrap; }
@@ -771,7 +770,6 @@
   .rs-chip.sync { background: var(--info-soft); color: var(--info-text); gap: 5px; }
   .rs-chip.sync .up { color: var(--accent-text); }
   .rs-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
-  .rs-clean { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; color: var(--success-text); opacity: 0.75; }
   .rs-icon-badge { flex: none; }
   .rs-current { flex: none; }
   /* 悬停时右侧的操作按钮盖在状态徽标上，不再挤占名称。 */

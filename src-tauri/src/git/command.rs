@@ -1880,6 +1880,28 @@ pub fn remote_tracking_command(git: &Path, root: &Path, remote: &str) -> (PathBu
     (git.to_path_buf(), args)
 }
 
+/// MR 草稿：来源远程跟踪分支相对目标多出的非合并提交，标题与正文用 0x1f 分隔、
+/// 每条以 0x1e 结束。两端都是完整的 refs/remotes/... 引用，不会被当成选项。
+pub fn change_request_log_command(
+    git: &Path,
+    root: &Path,
+    target_ref: &str,
+    source_ref: &str,
+    limit: usize,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, true);
+    args.extend([
+        OsString::from("log"),
+        OsString::from("--no-merges"),
+        OsString::from("--no-color"),
+        OsString::from(format!("--max-count={limit}")),
+        OsString::from("--format=%s%x1f%b%x1e"),
+        OsString::from(format!("{target_ref}..{source_ref}")),
+        OsString::from("--"),
+    ]);
+    (git.to_path_buf(), args)
+}
+
 pub fn verify_ref_command(git: &Path, root: &Path, reference: &str) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
     args.extend(["show-ref", "--verify", "--quiet", "--", reference].map(OsString::from));

@@ -77,6 +77,10 @@ let changeRequestsEnabled = previewParams.get("changeRequests") === "on";
  */
 const changeRequestScenario = previewParams.get("changeRequest") ?? "ready";
 let changeRequestToken = changeRequestScenario !== "token";
+/** 设置里记住的自建 GitLab 实例：预览给一条样例，便于看列表与删除确认。 */
+let gitlabInstances = [
+  { host: "git.dev.example.com", url: "http://git.dev.example.com", savedAtMs: Date.now() - 86_400_000 * 3, tokenConfigured: true },
+];
 let recent = [
   { name: "twiglane", path: "C:/Users/dev/project/twiglane", openedAtMs: Date.now() },
   { name: "design-system", path: "C:/Users/dev/work/design-system", openedAtMs: Date.now() - 1000 },
@@ -1863,6 +1867,39 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
       targetBranch,
       webPrefilled: false,
     });
+  },
+  changeRequestDraft: (_path: string, _remote: string, _source: string, target: string) =>
+    ok({
+      commits: target === "main"
+        ? [
+            { subject: "fix: 修复深色主题下的对比度", body: "" },
+            { subject: "feat: 设置改为分区目录 + 单页滚动", body: "" },
+            { subject: "feat: 创建 MR 时根据提交自动生成标题与描述", body: "" },
+          ]
+        : [],
+      truncated: false,
+    }),
+  openChangeRequestWeb: (_path: string, _remote: string, targetBranch: string) =>
+    ok({
+      status: "fallbackOpened",
+      url: `https://github.com/sakullla/twiglane/compare/${targetBranch}...feature/modern-ui?quick_pull=1`,
+      provider: "github",
+      providerLabel: "GitHub",
+      repository: "sakullla/twiglane",
+      sourceBranch: "feature/modern-ui",
+      targetBranch,
+      webPrefilled: true,
+    }),
+  changeRequestInstances: () => ok(gitlabInstances, 0),
+  saveChangeRequestInstance: (host: string, url: string) => {
+    const key = host.trim().toLowerCase();
+    gitlabInstances = [...gitlabInstances.filter((entry) => entry.host !== key), { host: key, url: url.trim().replace(/\/+$/, ""), savedAtMs: Date.now(), tokenConfigured: false }]
+      .sort((a, b) => a.host.localeCompare(b.host));
+    return ok(gitlabInstances, 0);
+  },
+  deleteChangeRequestInstance: (host: string) => {
+    gitlabInstances = gitlabInstances.filter((entry) => entry.host !== host);
+    return ok(gitlabInstances, 0);
   },
   changeRequestTokenStatus: () => ok({ configured: changeRequestToken }, 0),
   setChangeRequestToken: () => {

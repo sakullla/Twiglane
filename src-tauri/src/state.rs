@@ -159,6 +159,32 @@ pub struct RemoteProjectHost {
 
 pub type StoredReviewProgress = BTreeMap<String, BTreeMap<String, String>>;
 
+/// 用户确认过的自建 GitLab 实例：按 Git 远程主机名记住实例 Web 地址。
+/// 只存非秘密配置；令牌仍在系统钥匙串里。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitLabInstanceEntry {
+    /// Git 远程地址里的主机名（小写），例如 git.example.com。
+    pub host: String,
+    /// 实例 Web 根地址，可带端口与部署子路径。
+    pub url: String,
+    #[serde(default)]
+    pub saved_at_ms: u64,
+}
+
+/// 主机名只做最基本的形状校验：非空、无空白和路径分隔符。
+pub(crate) fn normalize_instance_host(host: &str) -> Option<String> {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty()
+        || host.len() > 255
+        || host.starts_with('-')
+        || host.chars().any(|c| c.is_whitespace() || c.is_control() || matches!(c, '/' | '@' | '\\' | '?' | '#'))
+    {
+        return None;
+    }
+    Some(host)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RemoteCheckoutPreferences {
@@ -199,6 +225,9 @@ pub struct Persisted {
     /// 远程 SSH 设置：只存非秘密配置，缺省关闭。
     #[serde(default)]
     pub remote_ssh: RemoteSsh,
+    /// 记住的自建 GitLab 实例（按远程主机）；旧设置文件缺省为空。
+    #[serde(default)]
+    pub gitlab_instances: Vec<GitLabInstanceEntry>,
 }
 
 impl Default for Persisted {
@@ -220,6 +249,7 @@ impl Default for Persisted {
             remote_checkouts: BTreeMap::new(),
             workspaces: Vec::new(),
             remote_ssh: RemoteSsh::default(),
+            gitlab_instances: Vec::new(),
         }
     }
 }
@@ -404,6 +434,55 @@ impl AppStore {
             data.change_requests_enabled = enabled;
             Ok(())
         })
+    }
+
+    pub fn gitlab_instances(&self) -> Vec<GitLabInstanceEntry> {
+        self.lock().data.gitlab_instances.clone()
+    }
+
+    /// 按主机名查找记住的实例地址（不区分大小写）。
+    pub fn gitlab_instance_for(&self, host: &str) -> Option<String> {
+        let host = normalize_instance_host(host)?;
+        self.lock()
+            .data
+            .gitlab_instances
+            .iter()
+            .find(|entry| entry.host == host)
+            .map(|entry| entry.url.clone())
+    }
+
+    /// 记住（或覆盖）某个远程主机对应的实例地址。地址由调用方先校验。
+    pub fn save_gitlab_instance(&self, host: &str, url: &str) -> Result<Vec<GitLabInstanceEntry>, AppError> {
+        let host = normalize_instance_host(host).ok_or_else(|| {
+            AppError::new("change_request_gitlab_instance", "远程主机名无效，未保存。")
+        })?;
+        let url = url.trim().trim_end_matches('/').to_string();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or(0);
+        self.update(|data| {
+            if let Some(entry) = data.gitlab_instances.iter_mut().find(|entry| entry.host == host) {
+                if entry.url != url {
+                    entry.url = url.clone();
+                    entry.saved_at_ms = now;
+                }
+            } else {
+                data.gitlab_instances.push(GitLabInstanceEntry { host: host.clone(), url: url.clone(), saved_at_ms: now });
+            }
+            data.gitlab_instances.sort_by(|a, b| a.host.cmp(&b.host));
+            Ok(())
+        })?;
+        Ok(self.gitlab_instances())
+    }
+
+    pub fn delete_gitlab_instance(&self, host: &str) -> Result<Vec<GitLabInstanceEntry>, AppError> {
+        let host = host.trim().to_ascii_lowercase();
+        self.update(|data| {
+            data.gitlab_instances.retain(|entry| entry.host != host);
+            Ok(())
+        })?;
+        Ok(self.gitlab_instances())
     }
 
     /// 远程 SSH 总开关。关闭只阻止新建连接，不删除主机、密码或活动会话。

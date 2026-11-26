@@ -360,6 +360,7 @@
             run: () => (branchFrom = { oid: commit.oid, summary: commit.summary, name: "", checkout: true, busy: false, error: null }),
           },
           { id: "hash", label: "复制提交哈希", icon: "copy", run: () => void copyText(commit.oid, `提交哈希 ${shortOid(commit.oid)}`) },
+          { id: "short-summary", label: "复制短哈希 + 摘要", icon: "copy", run: () => void copyText(`${shortOid(commit.oid)} ${commit.summary}`, "短哈希与摘要") },
           { id: "summary", label: "复制提交说明", icon: "copy", run: () => void copyText(commit.summary, "提交说明") },
         ];
     menu = { x: point.x, y: point.y, entries, label: ordered.length > 1 ? `已选 ${ordered.length} 个提交的操作` : `提交 ${shortOid(commit.oid)} 的操作` };
@@ -687,7 +688,28 @@
   let fileIndex = $derived(filteredFiles.findIndex((file) => file.path === currentPath));
   let fileNav = $derived(detail ? fileNavState(filteredFiles, fileIndex, (file) => goToFile(file.path)) : null);
   let unionFilter = $state("");
+  let unionCollapsedDirs = $state<Set<string>>(new Set());
   let unionFiles = $derived(filterRows(multiFiles, unionFilter));
+  let unionBuckets = $derived(directoryMode ? bucketByDirectory(unionFiles) : []);
+  let unionItems = $derived.by(() => {
+    if (!directoryMode) return unionFiles.map((file) => ({ kind: "file" as const, file }));
+    const needle = unionFilter.trim();
+    const items: FileItem[] = [];
+    for (const bucket of unionBuckets) {
+      const collapsed = unionCollapsedDirs.has(bucket.directory) && needle === "";
+      items.push({
+        kind: "dir",
+        directory: bucket.directory,
+        label: bucket.directory || "仓库根目录",
+        count: bucket.rows.length,
+        collapsed,
+      });
+      if (!collapsed) {
+        for (const file of bucket.rows) items.push({ kind: "file", file });
+      }
+    }
+    return items;
+  });
   /** 净结果的合计：两点之间的净行数，中间改了又改回的行不计入。 */
   let unionLineTotals = $derived(multiLoading ? null : commitLineTotals(multiFiles));
   let unionActive = $derived(unionFiles.find((file) => file.path === multiFocus) ?? unionFiles[0] ?? null);
@@ -843,11 +865,11 @@
   });
   let multiKey = $derived(multiRange ? `${multiRange.base ?? ""}..${multiRange.head}` : "");
   let unionRange = $derived(visibleRange(
-    unionFiles.length, unionScroll, unionViewport > 0 ? unionViewport : unionScroll > 0 ? UNION_ROW_HEIGHT : 0, UNION_ROW_HEIGHT,
+    unionItems.length, unionScroll, unionViewport > 0 ? unionViewport : unionScroll > 0 ? UNION_ROW_HEIGHT : 0, UNION_ROW_HEIGHT,
   ));
-  let visibleUnionFiles = $derived(unionFiles.slice(unionRange.start, unionRange.end));
+  let visibleUnionItems = $derived(unionItems.slice(unionRange.start, unionRange.end));
   $effect(() => {
-    void unionFiles;
+    void unionItems;
     unionScroll = 0;
     if (unionList) unionList.scrollTop = 0;
   });
@@ -1039,16 +1061,37 @@
         };
         listError = null;
         const ids = new Set(result.commits.map((commit) => commit.oid));
-        const previous = selectedOids;
-        const kept = previous.filter((oid) => ids.has(oid));
-        if (kept.length === 0) {
-          selectedOids = result.commits[0] ? [result.commits[0].oid] : [];
-          anchorOid = selectedOids[0] ?? null;
-          parentChoice = null;
-          manualPath = null;
-          multiFocus = null;
-        } else if (kept.length !== previous.length) {
-          selectedOids = kept;
+        const jumpTarget = pendingJumpOid;
+        if (jumpTarget) {
+          pendingJumpOid = null;
+          if (ids.has(jumpTarget)) {
+            parentJumpNotice = null;
+            selectedOids = [jumpTarget];
+            anchorOid = jumpTarget;
+            parentChoice = null;
+            manualPath = null;
+            multiFocus = null;
+            const jumpIdx = result.commits.findIndex((commit) => commit.oid === jumpTarget);
+            if (jumpIdx >= 0 && list) {
+              const nextTop = scrollIndexIntoView(jumpIdx, list.scrollTop, viewport || list.clientHeight, ROW_HEIGHT);
+              list.scrollTop = nextTop;
+              scrollTop = nextTop;
+            }
+          } else {
+            parentJumpNotice = { oid: jumpTarget, hasFilters: hasActiveFilters || Boolean(filePath) };
+          }
+        } else {
+          const previous = selectedOids;
+          const kept = previous.filter((oid) => ids.has(oid));
+          if (kept.length === 0) {
+            selectedOids = result.commits[0] ? [result.commits[0].oid] : [];
+            anchorOid = selectedOids[0] ?? null;
+            parentChoice = null;
+            manualPath = null;
+            multiFocus = null;
+          } else if (kept.length !== previous.length) {
+            selectedOids = kept;
+          }
         }
         if (result.generation !== generation) onGeneration(result.generation);
       } catch (error) {
@@ -1715,17 +1758,72 @@
 
   let copiedOid = $state<string | null>(null);
   let copiedMessage = $state<string | null>(null);
+  let copiedShortSummary = $state<string | null>(null);
+  let parentJumpNotice = $state<{ oid: string; hasFilters: boolean } | null>(null);
+  let pendingJumpOid = $state<string | null>(null);
+
+  $effect(() => {
+    void selectedOid;
+    parentJumpNotice = null;
+  });
+
+  function jumpToParent(oid: string) {
+    parentJumpNotice = null;
+    const idx = commits.findIndex((commit) => commit.oid === oid);
+    if (idx >= 0) {
+      singleSelect(oid);
+      if (list) {
+        const nextTop = scrollIndexIntoView(idx, list.scrollTop, viewport || list.clientHeight, ROW_HEIGHT);
+        list.scrollTop = nextTop;
+        scrollTop = nextTop;
+      }
+      return;
+    }
+    parentJumpNotice = { oid, hasFilters: hasActiveFilters || Boolean(filePath) };
+  }
+
+  function clearFiltersAndLocateParent(oid: string) {
+    pendingJumpOid = oid;
+    parentJumpNotice = null;
+    if (filePath) onClearFile();
+    clearAllFilters();
+  }
+
+  function locateParentByHash(oid: string) {
+    pendingJumpOid = oid;
+    parentJumpNotice = null;
+    query = shortOid(oid);
+    activeQuery = shortOid(oid);
+  }
 
   async function copyOid(oid: string) {
     try {
       await navigator.clipboard.writeText(oid);
       copiedOid = oid;
       copiedMessage = null;
+      copiedShortSummary = null;
       setTimeout(() => {
         if (copiedOid === oid) copiedOid = null;
       }, 1500);
     } catch {
       copiedOid = null;
+    }
+  }
+
+  async function copyShortSummary(oid: string, summary: string) {
+    const text = `${shortOid(oid)} ${summary}`.trim();
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      copiedShortSummary = oid;
+      copiedOid = null;
+      copiedMessage = null;
+      onNotice?.("已复制短哈希与摘要");
+      setTimeout(() => {
+        if (copiedShortSummary === oid) copiedShortSummary = null;
+      }, 1500);
+    } catch {
+      copiedShortSummary = null;
     }
   }
 
@@ -1736,6 +1834,7 @@
       await navigator.clipboard.writeText(text);
       copiedMessage = oid;
       copiedOid = null;
+      copiedShortSummary = null;
       setTimeout(() => {
         if (copiedMessage === oid) copiedMessage = null;
       }, 1500);
@@ -2264,12 +2363,16 @@
             <div class="commit-files-head">
               <span class="commit-files-title">最终变更</span>
               {#if !multiLoading}<span class="count">{unionFilter.trim() ? `${unionFiles.length}/${multiFiles.length}` : multiFiles.length}</span>{/if}
+              <span class="spacer"></span>
               {#if unionLineTotals}
-                <span class="spacer"></span>
                 {@render lineTotal(unionLineTotals, "所选提交合起来")}
               {/if}
+              <div class="segmented icon-segmented" role="group" aria-label="最终变更文件排列">
+                <button type="button" aria-pressed={!directoryMode} aria-label="列表" title="平铺列表" onclick={() => (directoryMode = false)}><Icon name="list" size={14} /></button>
+                <button type="button" aria-pressed={directoryMode} aria-label="目录" title="按目录分组" onclick={() => (directoryMode = true)}><Icon name="folder" size={14} /></button>
+              </div>
             </div>
-            {#if multiFiles.length > 8}
+            {#if multiFiles.length > 0}
               <div class="commit-files-filter">
                 <div class="field sm">
                   <Icon name="search" size={13} />
@@ -2322,39 +2425,58 @@
                 onscroll={(event) => (unionScroll = event.currentTarget.scrollTop)}
                 onkeydown={onUnionKey}
               >
-                <div class="virtual-space" style={`height:${unionFiles.length * UNION_ROW_HEIGHT}px`}>
-                  {#each visibleUnionFiles as file, index (file.path)}
-                    {@const mark = statusMark(commitFileLabel(file.status))}
-                    {@const parts = splitPath(file.path)}
-                    <button
-                      type="button"
-                      class="file-row"
-                      role="option"
-                      aria-selected={unionActive?.path === file.path}
-                      aria-posinset={unionRange.start + index + 1}
-                      aria-setsize={unionFiles.length}
-                      style={`position:absolute;top:${(unionRange.start + index) * UNION_ROW_HEIGHT + 1}px;height:${UNION_ROW_HEIGHT - 2}px;margin:0`}
-                      title={fileTitle(file)}
-                      onclick={() => {
-                        multiFocus = file.path;
-                        unionList?.focus({ preventScroll: true });
-                      }}
-                      oncontextmenu={(event) => {
-                        event.preventDefault();
-                        fileMenu(file.path, { x: event.clientX, y: event.clientY });
-                      }}
-                    >
-                      <span class={`st ${mark.tone}`} title={commitFileLabel(file.status)}>{mark.letter}</span>
-                      <span class="file-name">
-                        <span class="fn">{parts.name}</span>
-                        {#if file.originalPath}
-                          <span class="fd from" title={`重命名自 ${file.originalPath}`}>← {file.originalPath}</span>
-                        {:else if parts.dir}
-                          <span class="fd"><bdi>{parts.dir}</bdi></span>
-                        {/if}
-                      </span>
-                      <LineCounts stat={commitLineStat(file)} hideBinary />
-                    </button>
+                <div class="virtual-space" style={`height:${unionItems.length * UNION_ROW_HEIGHT}px`}>
+                  {#each visibleUnionItems as item, index (item.kind === "dir" ? `ud:${item.directory}` : `${item.file.status}:${item.file.path}`)}
+                    {#if item.kind === "dir"}
+                      <div class="file-dir" role="presentation" style={`top:${(unionRange.start + index) * UNION_ROW_HEIGHT}px;height:${UNION_ROW_HEIGHT}px`}>
+                        <button
+                          type="button"
+                          class="dir-name"
+                          aria-expanded={!item.collapsed}
+                          onclick={() => {
+                            const next = new Set(unionCollapsedDirs);
+                            if (next.has(item.directory)) next.delete(item.directory);
+                            else next.add(item.directory);
+                            unionCollapsedDirs = next;
+                          }}
+                        >
+                          <Icon name="chevron-down" size={13} class={item.collapsed ? "" : "flip"} />
+                          <span>{#each matchParts(item.label, unionFilter) as part, partIndex (partIndex)}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span>
+                          <span class="count">{item.count}</span>
+                        </button>
+                      </div>
+                    {:else}
+                      {@const file = item.file}
+                      {@const mark = statusMark(commitFileLabel(file.status))}
+                      {@const parts = splitPath(file.path)}
+                      <button
+                        type="button"
+                        class="file-row"
+                        role="option"
+                        aria-selected={unionActive?.path === file.path}
+                        style={`position:absolute;top:${(unionRange.start + index) * UNION_ROW_HEIGHT + 1}px;height:${UNION_ROW_HEIGHT - 2}px;margin:0`}
+                        title={fileTitle(file)}
+                        onclick={() => {
+                          multiFocus = file.path;
+                          unionList?.focus({ preventScroll: true });
+                        }}
+                        oncontextmenu={(event) => {
+                          event.preventDefault();
+                          fileMenu(file.path, { x: event.clientX, y: event.clientY });
+                        }}
+                      >
+                        <span class={`st ${mark.tone}`} title={commitFileLabel(file.status)}>{mark.letter}</span>
+                        <span class="file-name">
+                          <span class="fn">{#each matchParts(parts.name, unionFilter) as part, partIndex (partIndex)}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span>
+                          {#if file.originalPath}
+                            <span class="fd from" title={`重命名自 ${file.originalPath}`}>← {file.originalPath}</span>
+                          {:else if parts.dir}
+                            <span class="fd"><bdi>{#each matchParts(parts.dir, unionFilter) as part, partIndex (partIndex)}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</bdi></span>
+                          {/if}
+                        </span>
+                        <LineCounts stat={commitLineStat(file)} hideBinary />
+                      </button>
+                    {/if}
                   {/each}
                 </div>
               </div>
@@ -2413,7 +2535,27 @@
               <strong>{detail.commit.authorName}</strong>
               <span class="commit-email">{detail.commit.authorEmail}</span>
               <span title={formatAuthoredAt(detail.commit.authoredAt)}>{relativeTime(detail.commit.authoredAt, historyNow)} · {formatAuthoredAt(detail.commit.authoredAt)}</span>
-              <span class="commit-parents">{parentCaption(detail.commit.parents, detail.root)}</span>
+              <span class="commit-parents">
+                {#if detail.root || detail.commit.parents.length === 0}
+                  {parentCaption(detail.commit.parents, detail.root)}
+                {:else}
+                  <span>{detail.commit.parents.length > 1 ? "合并提交 · 父提交" : "父提交"}</span>
+                  {#each detail.commit.parents as parent, index (parent)}
+                    {@const parentCommit = commits.find((item) => item.oid === parent)}
+                    <button
+                      type="button"
+                      class="commit-parent-link"
+                      data-parent-oid={parent}
+                      aria-label={detail.commit.parents.length > 1 ? `跳转到第 ${index + 1} 父提交 ${shortOid(parent)}` : `跳转到父提交 ${shortOid(parent)}`}
+                      title={parentCommit ? `跳转到 ${shortOid(parent)} · ${parentCommit.summary}` : `跳转到父提交 ${parent}`}
+                      onclick={() => jumpToParent(parent)}
+                    >
+                      {#if detail.commit.parents.length > 1}<span class="parent-ord">#{index + 1}</span>{/if}
+                      <code>{shortOid(parent)}</code>
+                    </button>
+                  {/each}
+                {/if}
+              </span>
               {#if pills.length > 1}
                 <!-- 引用多时才给收起入口：收起后只留计数，窄窗口把这一行让给差异。 -->
                 <button
@@ -2443,6 +2585,36 @@
               {/if}
             </div>
             <CommitBranches {active} repo={opened.summary.path} oid={detail.commit.oid} generation={opened.generation} currentBranch={opened.snapshot.branch.name} {nextId} {onGeneration} />
+            {#if parentJumpNotice}
+              <div class="commit-parent-notice" role="status" data-parent-jump-notice>
+                <Icon name="info" size={13} />
+                <span>
+                  {#if parentJumpNotice.hasFilters}
+                    父提交 <code>{shortOid(parentJumpNotice.oid)}</code> 不在当前筛选结果中。
+                  {:else}
+                    父提交 <code>{shortOid(parentJumpNotice.oid)}</code> 尚未加载到当前列表。
+                  {/if}
+                </span>
+                {#if parentJumpNotice.hasFilters}
+                  <button
+                    type="button"
+                    class="btn btn-secondary btn-sm"
+                    data-parent-clear-filter
+                    onclick={() => parentJumpNotice && clearFiltersAndLocateParent(parentJumpNotice.oid)}
+                  >清除筛选并定位</button>
+                {:else}
+                  <button
+                    type="button"
+                    class="btn btn-secondary btn-sm"
+                    data-parent-locate-hash
+                    onclick={() => parentJumpNotice && locateParentByHash(parentJumpNotice.oid)}
+                  >按哈希定位</button>
+                {/if}
+                <button type="button" class="icon-btn sm" aria-label="关闭父提交跳转提示" onclick={() => (parentJumpNotice = null)}>
+                  <Icon name="x" size={12} />
+                </button>
+              </div>
+            {/if}
           </div>
           <div class="commit-facts">
             {#if viewMode === "multi" && fileNav}<FileNav nav={fileNav} />{/if}
@@ -2450,6 +2622,17 @@
               <button type="button" aria-pressed={viewMode === "single"} title="一次看一个文件" onclick={() => useMode("single")}><Icon name="file" size={12} />单文件</button>
               <button type="button" aria-pressed={viewMode === "multi"} title="连续查看整次提交的全部文件" onclick={() => useMode("multi")}><Icon name="layers" size={12} />全部文件</button>
             </div>
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm commit-copy-short"
+              data-copy-short-summary
+              aria-label="复制短哈希与摘要"
+              title={copiedShortSummary === detail.commit.oid ? "已复制短哈希与摘要" : `复制「${shortOid(detail.commit.oid)} ${detail.commit.summary}」`}
+              onclick={() => copyShortSummary(detail?.commit.oid ?? "", detail?.commit.summary ?? "")}
+            >
+              <Icon name={copiedShortSummary === detail.commit.oid ? "check" : "copy"} size={12} />
+              <span>短 Hash+摘要</span>
+            </button>
             <button
               type="button"
               class="icon-btn sm"
@@ -2466,7 +2649,7 @@
                 <Icon name={copiedOid === detail.commit.oid ? "check" : "copy"} size={12} />
               </button>
             </span>
-            <span class="sr-only" aria-live="polite">{copiedOid ? "已复制提交 " + shortOid(copiedOid) : copiedMessage ? "已复制提交说明" : ""}</span>
+            <span class="sr-only" aria-live="polite">{copiedOid ? "已复制提交 " + shortOid(copiedOid) : copiedShortSummary ? "已复制短哈希与摘要" : copiedMessage ? "已复制提交说明" : ""}</span>
           </div>
           {#if detail.merge}
             {@const activeParent = parentChoice ?? detail.selectedParent ?? detail.commit.parents[0]}
@@ -2524,7 +2707,7 @@
                 <Icon name="chevron-down" size={13} class={filesCollapsed ? "" : "flip"} />
               </button>
             </div>
-            {#if detail.files.length > 8 || directoryMode}
+            {#if detail.files.length > 0}
               <div class="commit-files-filter">
                 <div class="field sm">
                   <Icon name="search" size={13} />
@@ -2585,7 +2768,7 @@
                           }}
                         >
                           <Icon name="chevron-down" size={13} class={item.collapsed ? "" : "flip"} />
-                          <span>{item.label}</span>
+                          <span>{#each matchParts(item.label, fileFilter) as part, partIndex (partIndex)}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span>
                           <span class="count">{item.count}</span>
                         </button>
                       </div>
@@ -2608,11 +2791,11 @@
                       >
                         <span class={`st ${mark.tone}`} title={commitFileLabel(file.status)}>{mark.letter}</span>
                         <span class="file-name">
-                          <span class="fn">{parts.name}</span>
+                          <span class="fn">{#each matchParts(parts.name, fileFilter) as part, partIndex (partIndex)}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span>
                           {#if file.originalPath}
                             <span class="fd from" title={`重命名自 ${file.originalPath}`}>← {file.originalPath}</span>
                           {:else if parts.dir}
-                            <span class="fd"><bdi>{parts.dir}</bdi></span>
+                            <span class="fd"><bdi>{#each matchParts(parts.dir, fileFilter) as part, partIndex (partIndex)}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</bdi></span>
                           {/if}
                         </span>
                         <LineCounts stat={commitLineStat(file)} hideBinary />

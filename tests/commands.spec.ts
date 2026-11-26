@@ -305,4 +305,26 @@ describe("文件导航命令", () => {
       "先选择一个文件",
     );
   });
+
+  it("branch.previous 与 dialog.shortcuts 在注册表与快捷键层同源生效", () => {
+    const prev = commandById("branch.previous")!;
+    expect(prev.group).toBe("任务");
+    expect(commandAvailable(prev, state({ hasRepo: false }))).toBe(false);
+    expect(commandReason(prev, state({ hasRepo: false }))).toBe("先打开一个仓库");
+    expect(commandAvailable(prev, state({ previousBranch: null }))).toBe(false);
+    expect(commandReason(prev, state({ previousBranch: null }))).toBe("还没有可切回的上一分支");
+    expect(commandAvailable(prev, state({ previousBranch: "feat/a", writeLocked: true, writing: true }))).toBe(false);
+    expect(commandReason(prev, state({ previousBranch: "feat/a", writeLocked: true, writing: true }))).toBe("正在写入，稍后再试");
+    expect(commandAvailable(prev, state({ previousBranch: "feat/a" }))).toBe(true);
+
+    const help = commandById("dialog.shortcuts")!;
+    expect(help.group).toBe("界面");
+    expect(help.shortcut).toBe(`${MODIFIER_LABEL} /`);
+    expect(commandAvailable(help, state({ hasRepo: false }))).toBe(true);
+
+    expect(shortcutCommand({ key: "/", ctrlKey: true })).toBe("dialog.shortcuts");
+    expect(shortcutCommand({ key: "/", metaKey: true })).toBe("dialog.shortcuts");
+    expect(shortcutCommand({ key: "?", shiftKey: true })).toBe("dialog.shortcuts");
+    expect(shortcutCommand({ key: "?", ctrlKey: true, shiftKey: true })).toBeNull();
+  });
 });

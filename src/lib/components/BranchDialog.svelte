@@ -14,6 +14,7 @@
     worktreeFolderName,
   } from "../worktree-path";
   import { bucketBranches, filterBranches, groupIsOpen, isDefaultBranch, mainBranchNames, trackNameFor } from "../branches";
+  import { recordRecentBranch } from "../recent-branches";
   import { normalizeError } from "../errors";
   import type { BranchRecord, BranchState, OpenedRepository, RecentRepo, RepoHead, StatusSnapshot } from "../types";
   import ConfirmDialog, { type ConfirmNote, type ConfirmTarget } from "./ConfirmDialog.svelte";
@@ -1036,6 +1037,9 @@
       return;
     }
     if (!result || opened.summary.path !== currentRepo.summary.path) return;
+    if (!currentRepo.snapshot.branch.detached && currentRepo.snapshot.branch.name && currentRepo.snapshot.branch.name !== result.snapshot.branch.name) {
+      recordRecentBranch(currentRepo.summary.path, currentRepo.snapshot.branch.name);
+    }
     applyBranches(result);
     onNotice(`已切换到 ${result.snapshot.branch.name ?? name}`);
     onClose();
@@ -1048,6 +1052,9 @@
     if (!upstream || !branchName || upstream === currentRepo.snapshot.branch.upstream) return;
     const result = await write(() => api.setUpstream(currentRepo.summary.path, upstream, currentRepo.generation, nextId()));
     if (!result || opened.summary.path !== currentRepo.summary.path) return;
+    if (!currentRepo.snapshot.branch.detached && currentRepo.snapshot.branch.name && currentRepo.snapshot.branch.name !== result.snapshot.branch.name) {
+      recordRecentBranch(currentRepo.summary.path, currentRepo.snapshot.branch.name);
+    }
     applyBranches(result);
     onNotice(`已把 ${branchName} 的上游改为 ${upstream}。这一步没有推送。`);
   }

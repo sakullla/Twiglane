@@ -4,6 +4,7 @@
   import { api } from "../api";
   import { isRemoteRepositoryKey, parseRemoteRepositoryKey, remoteRepositoryKey } from "../remote-worktree";
   import { bucketBranches, filterBranches, groupIsOpen, isDefaultBranch, mainBranchNames, trackingMap, trackingSummary, trackNameFor } from "../branches";
+  import { getRecentBranches, recordRecentBranch, renameRecentBranch } from "../recent-branches";
   import { normalizeError } from "../errors";
   import type { IconName } from "../icons";
   import type { BranchRecord, BranchListing, BranchState, BranchTrack, OpenedRepository, StatusSnapshot } from "../types";
@@ -129,6 +130,11 @@
   let mounted = true;
 
   let currentName = $derived(opened.snapshot.branch.name);
+  let recentRevision = $state(0);
+  let recentNames = $derived.by(() => {
+    void recentRevision;
+    return getRecentBranches(opened.summary.path, opened.snapshot.branch.detached ? null : currentName);
+  });
   let sorted = $derived(branches
         .filter((branch) => !(branch.remote && branch.name.endsWith("/HEAD")))
         // 本地在前、当前分支最前；数量截断时留下的也是这些。
@@ -148,14 +154,15 @@
   type SwitchRow = SwitchLabel | SwitchGroup | SwitchBranch;
 
   let view = $derived.by(() => {
-    const grouping = branchGroups !== false && query.trim() === "" && syncFilter === null;
+    const cleanFilter = query.trim() === "" && syncFilter === null;
+    const grouping = branchGroups !== false && cleanFilter;
     const options: BranchRecord[] = [];
     const rows: SwitchRow[] = [];
     const rowOf: number[] = [];
-    const pushSection = (sectionBranches: BranchRecord[], label: string, scope: string) => {
+    const pushSection = (sectionBranches: BranchRecord[], label: string, scope: string, flat = false) => {
       if (sectionBranches.length === 0) return;
       rows.push({ kind: "label", key: `label:${scope}`, text: label });
-      const buckets = grouping ? bucketBranches(sectionBranches) : { top: sectionBranches, groups: [] };
+      const buckets = grouping && !flat ? bucketBranches(sectionBranches) : { top: sectionBranches, groups: [] };
       const pushBranch = (branch: BranchRecord) => {
         const index = options.length;
         rowOf.push(rows.length);
@@ -170,7 +177,15 @@
         if (open) for (const branch of group.branches) pushBranch(branch);
       }
     };
-    pushSection(filtered.filter((branch) => !branch.remote), "本地分支", "local");
+    const localBranches = filtered.filter((branch) => !branch.remote);
+    if (cleanFilter && recentNames.length > 0) {
+      const localByName = new Map(localBranches.map((branch) => [branch.name, branch]));
+      const recentBranches = recentNames
+        .map((name) => localByName.get(name))
+        .filter((branch): branch is BranchRecord => Boolean(branch && !isCurrent(branch)));
+      pushSection(recentBranches, "最近访问", "recent", true);
+    }
+    pushSection(localBranches, "本地分支", "local");
     pushSection(filtered.filter((branch) => branch.remote), "远程分支", "remote");
     return { options, rows, rowOf };
   });
@@ -422,12 +437,18 @@
       editing = null;
       return;
     }
+    const repoPath = opened.summary.path;
     void runWrite(
       `正在重命名 ${branch.name}`,
       "branch",
       (path, generation) => api.renameBranch(path, branch.name, next, generation, nextId()),
       `已把 ${branch.name} 重命名为 ${next}。`,
-    );
+    ).then((ok) => {
+      if (ok) {
+        renameRecentBranch(repoPath, branch.name, next);
+        recentRevision += 1;
+      }
+    });
   }
 
   /** 分支行的操作菜单：拉取 / 推送不切换分支；重命名与删除就地确认。 */
@@ -580,6 +601,10 @@
     try {
       const result = await api.switchBranch(repo.summary.path, branch.name, repo.generation, nextId());
       if (opened.summary.path !== repo.summary.path) return;
+      if (!repo.snapshot.branch.detached && repo.snapshot.branch.name && repo.snapshot.branch.name !== result.snapshot.branch.name) {
+        recordRecentBranch(repo.summary.path, repo.snapshot.branch.name);
+        recentRevision += 1;
+      }
       onSnapshot(result.snapshot);
       onNotice(`已切换到 ${result.snapshot.branch.name ?? branch.name}`);
       if (mounted) onClose();
@@ -606,6 +631,10 @@
       const result = await api.trackRemoteAs(repo.summary.path, remote, local, opened.generation, nextId());
       if (opened.summary.path !== repo.summary.path) return;
       mismatch = null;
+      if (!repo.snapshot.branch.detached && repo.snapshot.branch.name && repo.snapshot.branch.name !== result.snapshot.branch.name) {
+        recordRecentBranch(repo.summary.path, repo.snapshot.branch.name);
+        recentRevision += 1;
+      }
       onSnapshot(result.snapshot);
       onNotice(`已检出 ${remote} 为本地分支 ${local} 并切换过去。`);
       if (mounted) onClose();

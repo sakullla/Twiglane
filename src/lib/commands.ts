@@ -51,6 +51,8 @@ export interface CommandState {
   upstreamEditable?: boolean;
   /** 仓库里有可以中止的合并、变基或拣选。 */
   mergeAbortable?: boolean;
+  /** 当前仓库最近访问过的上一个本地分支（排除当前分支）；为空表示尚无记录。 */
+  previousBranch?: string | null;
   /** 提交范围口径的已暂存文件数，与提交区 paths.length 同源。 */
   stagedCount: number;
   /** 「全部暂存」的精确目标：列表当前可见、未暂存且非冲突的文件路径。 */
@@ -581,6 +583,18 @@ const TASK_COMMANDS: CommandSpec[] = [
     reason: hasRepoReason,
   },
   {
+    id: "branch.previous",
+    group: "任务",
+    title: "切回上一分支",
+    hint: "切回当前仓库最近访问过的上一个本地分支",
+    available: (state) => hasRepo(state) && idle(state) && Boolean(state.previousBranch),
+    reason: (state) => {
+      if (!state.hasRepo) return "先打开一个仓库";
+      if (state.writeLocked) return busyReason(state);
+      return "还没有可切回的上一分支";
+    },
+  },
+  {
     id: "branch.create",
     group: "任务",
     title: "新建分支",
@@ -723,6 +737,14 @@ const SHELL_COMMANDS: CommandSpec[] = [
     title: "命令面板",
     hint: "搜索并执行任一动作",
     shortcut: `${MODIFIER_LABEL} K`,
+    available: () => true,
+  },
+  {
+    id: "dialog.shortcuts",
+    group: "界面",
+    title: "快捷键一览",
+    hint: "查看并搜索全部键盘快捷键",
+    shortcut: `${MODIFIER_LABEL} /`,
     available: () => true,
   },
   {
@@ -881,6 +903,7 @@ const PALETTE_ALIASES: Record<string, string> = {
   "task.merge": "merge rebase 合并分支 变基",
   "task.abortMerge": "abort 取消合并 中止合并 中止变基 中止拣选 中止还原 中止当前操作",
   "branch.switch": "checkout switch branch 检出分支",
+  "branch.previous": "previous branch last back 上一个分支 切回分支",
   "branch.create": "create new branch 创建分支",
   "branch.worktree": "worktree add 新工作区 创建工作区 并行开发 新目录",
   "task.branch": "branch tag 管理分支 删除分支 重命名分支 管理标签 新建标签",
@@ -897,6 +920,7 @@ const PALETTE_ALIASES: Record<string, string> = {
   "view.refresh": "refresh reload 重新读取",
   "rail.toggle": "sidebar 侧边栏 左栏",
   "palette.open": "command palette",
+  "dialog.shortcuts": "shortcuts keybindings hotkeys keys 键盘 快捷方式 帮助 ?",
   "dialog.dependencies": "dependencies environment git 环境 诊断",
 };
 

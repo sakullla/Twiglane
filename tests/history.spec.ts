@@ -1509,6 +1509,7 @@ describe("历史面板", () => {
       "撤销最近提交并保留改动",
       "从此提交新建分支",
       "复制提交哈希",
+      "复制短哈希 + 摘要",
       "复制提交说明",
     ]);
     // 复制类菜单项：菜单随点击收起，成功要说明复制了什么。
@@ -3193,8 +3194,9 @@ describe("历史里的 cliora 任务范围（审查工作台「范围内提交�
     await fireEvent.input(filterInput, { target: { value: "module-7" } });
     expect(document.querySelector(".commit-files-head .count")?.textContent).toBe("1/10");
     const union = screen.getByRole("listbox", { name: "提交中的文件列表" });
-    expect(within(union).getAllByRole("option")).toHaveLength(1);
-    expect(within(union).getByText("module-7.ts")).toBeTruthy();
+    const unionOptions = within(union).getAllByRole("option");
+    expect(unionOptions).toHaveLength(1);
+    expect(unionOptions[0].textContent).toContain("module-7.ts");
 
     await fireEvent.input(filterInput, { target: { value: "not-found" } });
     expect(screen.getByText("没有匹配的文件。")).toBeTruthy();
@@ -3227,5 +3229,96 @@ describe("checkout 历史阅读连续性", () => {
     await waitFor(() => expect(document.querySelector('.history-list [aria-selected="true"]')?.textContent).toContain("commit-25"));
     expect((screen.getByLabelText("搜索说明或提交哈希") as HTMLInputElement).value).toBe("scope-a");
     expect(list.scrollTop).toBe(1300);
+  });
+});
+
+describe("历史多提交目录分组、高亮筛选、父提交跳转与短 Hash 复制", () => {
+  it("多提交结果支持列表/目录分组与任意文件数下的高亮筛选", async () => {
+    const rows = [commit(0), commit(1)];
+    historyPage.mockResolvedValue({ generation: 3, query: "", offset: 0, pageSize: 100, hasMore: false, state: "ok", commits: rows });
+    compareFiles.mockResolvedValue({
+      generation: 3,
+      files: [
+        { path: "src/lib/alpha.ts", originalPath: null, status: "modified", additions: 4, deletions: 1, binary: false },
+        { path: "src/lib/beta.ts", originalPath: null, status: "added", additions: 8, deletions: 0, binary: false },
+        { path: "docs/guide.md", originalPath: null, status: "modified", additions: 2, deletions: 0, binary: false },
+      ],
+    });
+    compareFileDiff.mockResolvedValue({
+      generation: 3,
+      path: "src/lib/alpha.ts",
+      staged: false,
+      binary: false,
+      truncated: false,
+      summary: "1 处改动",
+      snapshot: "snap",
+      offset: 0,
+      totalLines: 1,
+      hunks: [],
+      lines: [{ kind: "add", oldNo: null, newNo: 1, text: "export const a = 1;", hunkIndex: 0 }],
+    });
+
+    render(HistoryPanel, { props: panelProps() });
+    await screen.findByRole("option", { name: /commit-0\b/ });
+    await fireEvent.click(screen.getByRole("option", { name: /commit-1\b/ }), { shiftKey: true });
+
+    // 即使只有 3 个文件，也显示筛选框与列表/目录切换
+    const filterInput = await screen.findByRole("textbox", { name: "筛选最终变更文件" });
+    const dirBtn = within(screen.getByRole("group", { name: "最终变更文件排列" })).getByRole("button", { name: "目录" });
+    await fireEvent.click(dirBtn);
+    await waitFor(() => expect(screen.getByRole("button", { name: /src\/lib/ })).toBeTruthy());
+    expect(screen.getByRole("button", { name: /docs/ })).toBeTruthy();
+
+    // 输入筛选词并高亮匹配片段
+    await fireEvent.input(filterInput, { target: { value: "alpha" } });
+    await waitFor(() => {
+      const marks = document.querySelectorAll(".history-union-files mark");
+      expect(marks.length).toBeGreaterThan(0);
+      expect(marks[0].textContent?.toLowerCase()).toBe("alpha");
+    });
+  });
+
+  it("单提交详情支持点击父提交跳转、被筛选隐藏时清除筛选并定位，以及复制短 Hash + 摘要", async () => {
+    const parentCommit = commit(1, { summary: "base change", parents: [] });
+    const childCommit = commit(0, { summary: "feature work", parents: [parentCommit.oid] });
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+
+    historyPage.mockImplementation(async (_repo: string, query: string) => ({
+      generation: 3,
+      query,
+      offset: 0,
+      pageSize: 100,
+      hasMore: false,
+      state: "ok",
+      commits: query ? [childCommit] : [childCommit, parentCommit],
+    }));
+    commitDetail.mockImplementation(async (_repo: string, oid: string) => ({
+      generation: 3,
+      commit: oid === childCommit.oid ? childCommit : parentCommit,
+      body: "",
+      root: oid === parentCommit.oid,
+      merge: false,
+      selectedParent: oid === childCommit.oid ? parentCommit.oid : null,
+      files: [{ path: "src/a.ts", originalPath: null, status: "modified", additions: 1, deletions: 0, binary: false }],
+    }));
+
+    render(HistoryPanel, { props: { ...panelProps(), searchQuery: "feature" } });
+    await screen.findByRole("heading", { name: "feature work" });
+
+    // 复制短 Hash + 摘要
+    const copyShort = screen.getByRole("button", { name: "复制短哈希与摘要" });
+    await fireEvent.click(copyShort);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(`${childCommit.oid.slice(0, 7)} feature work`));
+
+    // 当前处于搜索筛选，父提交不在列表中：点击父提交给出内联提示与「清除筛选并定位」
+    const parentBtn = screen.getByRole("button", { name: new RegExp(`跳转到父提交 ${parentCommit.oid.slice(0, 7)}`) });
+    await fireEvent.click(parentBtn);
+    const clearBtn = await screen.findByRole("button", { name: "清除筛选并定位" });
+    await fireEvent.click(clearBtn);
+
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "base change" })).toBeTruthy();
+    });
   });
 });

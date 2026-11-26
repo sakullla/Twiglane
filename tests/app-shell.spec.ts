@@ -576,9 +576,11 @@ const ADDED_COMMAND_IDS = [
   "sync.upstream",
   "task.abortMerge",
   "branch.switch",
+  "branch.previous",
   "branch.create",
   "branch.worktree",
   "project.manage",
+  "dialog.shortcuts",
   "terminal.toggle",
   "terminal.new",
 ];
@@ -609,9 +611,11 @@ const ADDED_COMMAND_TITLES = [
   "修改上游分支",
   "中止当前操作",
   "切换分支",
+  "切回上一分支",
   "新建分支",
   "新建工作区",
   "业务项目",
+  "快捷键一览",
   "终端",
   "新建终端",
 ];
@@ -5114,5 +5118,30 @@ describe("创建 MR / PR 接线（R1、R2）", () => {
     await waitFor(() => expect(within(popover).getAllByRole("option").length).toBeGreaterThan(0));
     expect(popover.querySelector("[data-create-change-request]")).toBeNull();
     expect(mocks.prepareChangeRequest).not.toHaveBeenCalled();
+  });
+});
+
+describe("全局快捷键一览与最近分支切回", () => {
+  it("非输入态按 ? 与 Ctrl+/ 唤起快捷键一览，输入态按 ? 不拦截，Esc 关闭并归还焦点", async () => {
+    render(App);
+    await openRepo();
+
+    const searchInput = document.getElementById("file-search") as HTMLInputElement;
+    searchInput.focus();
+    await fireEvent.keyDown(searchInput, { key: "?", shiftKey: true });
+    expect(screen.queryByRole("dialog", { name: "快捷键一览" })).toBeNull();
+
+    const settingsBtn = screen.getByRole("button", { name: "设置" });
+    settingsBtn.focus();
+    await fireEvent.keyDown(settingsBtn, { key: "?", shiftKey: true });
+    const dialog = await screen.findByRole("dialog", { name: "快捷键一览" });
+    expect(dialog).toBeTruthy();
+
+    await fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "快捷键一览" })).toBeNull());
+    expect(document.activeElement).toBe(settingsBtn);
+
+    await fireEvent.keyDown(window, { key: "/", ctrlKey: true });
+    expect(await screen.findByRole("dialog", { name: "快捷键一览" })).toBeTruthy();
   });
 });

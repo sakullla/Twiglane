@@ -76,9 +76,12 @@
   import { startDesktopMeasure } from "./lib/measure";
   import { updateState, watchUpdateAvailable } from "./lib/update.svelte";
   import { isTextEntry, shortcutCommand } from "./lib/shortcuts";
+  import { getRecentBranches, previousRecentBranch, recordRecentBranch, removeRecentBranch } from "./lib/recent-branches";
+  import { REMOTE_DISCARD_PATCH_UNSUPPORTED_REASON } from "./lib/types";
   import type {
     AppFailure,
     BatchDeleteResult,
+    DiffContextSlice,
     DiffHunk,
     DiffSide,
     DiffLineSelection,
@@ -135,7 +138,7 @@
   import ConfirmDialog from "./lib/components/ConfirmDialog.svelte";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest } from "./lib/components/ContextMenu.svelte";
   import Modal, { openModalCount } from "./lib/components/Modal.svelte";
-  import CommitDraft from "./lib/components/CommitDraft.svelte";
+  import CommitDraft, { type RecentCommitMessage } from "./lib/components/CommitDraft.svelte";
   import DetailDialog from "./lib/components/DetailDialog.svelte";
   import DiffView from "./lib/components/DiffView.svelte";
   import DocumentDialog from "./lib/components/DocumentDialog.svelte";
@@ -149,6 +152,7 @@
   import RepositoryFiles from "./lib/components/RepositoryFiles.svelte";
   import RecoveryActions from "./lib/components/RecoveryActions.svelte";
   import RepoDialogs from "./lib/components/RepoDialogs.svelte";
+  import ShortcutHelpModal from "./lib/components/ShortcutHelpModal.svelte";
   import { scopedSelectAll } from "./lib/select-scope";
   import ProjectManager from "./lib/components/ProjectManager.svelte";
   import SelectMenu, { type SelectMenuOption } from "./lib/components/SelectMenu.svelte";
@@ -449,6 +453,9 @@
   let adoptingRemoteRead = $state(false);
   onDestroy(() => remoteRead?.controller.abort());
   let dependencyOpen = $state(false);
+  let shortcutsOpen = $state(false);
+  let shortcutsReturnFocus = $state<HTMLElement | null>(null);
+  let recentBranchVersion = $state(0);
   let historyPanel = $state<Promise<typeof import("./lib/components/HistoryPanel.svelte")> | null>(null);
   /**
    * 轻量编辑：从差异或任务净差异进入文件视图编辑的请求，以及编辑器里「返回差异」要回到哪里。
@@ -593,7 +600,7 @@
    * 键盘、命令分发与写入入口都用这一份判定，不逐个列举 documentRequest（漏一处就会让
    * Ctrl+Enter 真的提交、Alt+箭头改掉底下的差异选择）。
    */
-  let taskLayerOpen = $derived(taskModal !== null || documentRequest !== null || remotePickerOpen);
+  let taskLayerOpen = $derived(taskModal !== null || documentRequest !== null || remotePickerOpen || shortcutsOpen);
   /** 阅读位置按「仓库 + 版本 + 路径」保存在这里，关闭再打开仍能接着读。 */
   const documentSession = createDocumentSession({ repository: () => opened?.summary.path ?? null });
   /** 从哪个任务 modal 跳过来的：例如从「分支与标签」打开合并，关闭合并时回到那里。 */
@@ -639,7 +646,7 @@
     anchor?: string; checking?: boolean; preview?: LinkedWorktreeRemoval;
   } | null>(null);
   let worktreeRemovalRequest = 0;
-  let recovery = $state<{ discard: (paths?: string[]) => Promise<void> } | null>(null);
+  let recovery = $state<{ discard: (paths?: string[]) => Promise<void>; amendLatest: (expectedHead?: string) => Promise<void> } | null>(null);
   /**
    * 差异是否展开为完整文件（记在本机）：开启时按整份文件加上下文读取，暂存代码块暂不可用。
    * 改动与历史提交共用这一个偏好。
@@ -1177,6 +1184,25 @@
     return { path: path ?? null, side, otherSide };
   });
 
+  let previousBranch = $derived.by(() => {
+    void recentBranchVersion;
+    if (!opened) return null;
+    return previousRecentBranch(
+      opened.summary.path,
+      opened.snapshot.branch.detached ? null : opened.snapshot.branch.name,
+    );
+  });
+  /** 当前分支满足修订最近一次提交（本地未推送普通 HEAD）的快捷入口条件。 */
+  let canAmendLatest = $derived(
+    Boolean(
+      opened &&
+        !opened.snapshot.branch.detached &&
+        !opened.snapshot.branch.unborn &&
+        opened.snapshot.branch.headOid &&
+        (!opened.snapshot.branch.upstream || (opened.snapshot.branch.ahead ?? 0) > 0),
+    ),
+  );
+
   /* 命令注册表的唯一状态输入：标题栏、左栏、溢出菜单与命令面板都读这一份。 */
   let commandState = $derived<CommandState>({
     hasRepo: opened !== null,
@@ -1201,6 +1227,7 @@
     upstreamMissing,
     upstreamEditable: opened ? Boolean(opened.snapshot.branch.name) && !opened.snapshot.branch.detached && !opened.snapshot.branch.unborn : false,
     mergeAbortable,
+    previousBranch,
     stagedCount: scope.paths.length,
     stageTargets,
     unstageTargets,
@@ -1406,6 +1433,7 @@
     "sync.fetch",
     "sync.pull",
     "sync.push",
+    "branch.previous",
   ]);
 
   /** 命令执行的唯一入口：四个入口都调它，结果因此一致（R11）。 */
@@ -1515,6 +1543,9 @@
       case "branch.switch":
         openBranchSwitcher();
         return;
+      case "branch.previous":
+        void switchToPreviousBranch();
+        return;
       case "branch.create":
         openTask("branch");
         if (taskModal === "branch") branchCreateIntent = true;
@@ -1586,6 +1617,9 @@
       case "theme.dark":
       case "theme.system":
         void changeTheme(id.slice(6) as Theme);
+        return;
+      case "dialog.shortcuts":
+        openShortcuts();
         return;
       case "dialog.dependencies":
         dependencyOpen = true;
@@ -2350,8 +2384,101 @@
     historyPath = null;
   }
 
+  /** 打开全局快捷键一览：从命令面板进入时归还到面板打开前的焦点。 */
+  function openShortcuts() {
+    const origin = paletteOpen
+      ? paletteFocusOrigin
+      : document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    closeSwitcher();
+    paletteOpen = false;
+    shortcutsReturnFocus = origin;
+    shortcutsOpen = true;
+  }
+
+  /** 切回当前仓库最近访问过的上一个本地分支，自动跳过已删除或被其他工作区占用的分支。 */
+  async function switchToPreviousBranch() {
+    const repo = opened;
+    if (!repo) {
+      notice("先打开一个仓库");
+      return;
+    }
+    if (writeLocked) {
+      notice(switchBlockedReason(commandState));
+      return;
+    }
+    const currentBranch = repo.snapshot.branch.detached ? null : repo.snapshot.branch.name;
+    const candidates = getRecentBranches(repo.summary.path, currentBranch);
+    if (candidates.length === 0) {
+      notice("还没有可切回的上一分支");
+      return;
+    }
+    pending = "branch";
+    live = "正在切回上一分支";
+    try {
+      const listing = await api.branchList(repo.summary.path, repo.generation, nextId());
+      if (opened?.summary.path !== repo.summary.path) return;
+      if (listing.generation !== repo.generation) adoptGeneration(listing.generation);
+      const localMap = new Map(
+        (listing.branches ?? [])
+          .filter((item) => !item.remote)
+          .map((item) => [item.name, item]),
+      );
+      let target: string | null = null;
+      for (const name of candidates) {
+        const record = localMap.get(name);
+        if (!record) {
+          removeRecentBranch(repo.summary.path, name);
+          recentBranchVersion += 1;
+          continue;
+        }
+        if (record.worktree && name !== currentBranch) continue;
+        target = name;
+        break;
+      }
+      if (!target) {
+        notice("没有可切回的上一分支（记录中的分支已删除或被其他工作区占用）");
+        return;
+      }
+      const result = await api.switchBranch(repo.summary.path, target, opened?.generation ?? repo.generation, nextId());
+      if (opened?.summary.path !== repo.summary.path) return;
+      if (currentBranch && currentBranch !== result.snapshot.branch.name) {
+        recordRecentBranch(repo.summary.path, currentBranch);
+        recentBranchVersion += 1;
+      }
+      applySnapshot(result.snapshot);
+      notice(`已切回上一分支 ${result.snapshot.branch.name ?? target}`);
+    } catch (error) {
+      if (opened?.summary.path === repo.summary.path) handleMutationError(error);
+    } finally {
+      pending = null;
+    }
+  }
+
+  /** 按需加载当前仓库最近 10 条提交说明，供提交区参考与填入。 */
+  async function loadRecentCommitMessages(): Promise<RecentCommitMessage[]> {
+    const repo = opened;
+    if (!repo || typeof api.historyPage !== "function") return [];
+    const result = await api.historyPage(repo.summary.path, "", 0, repo.generation, nextId());
+    if (opened?.summary.path === repo.summary.path && result.generation !== repo.generation) {
+      adoptGeneration(result.generation);
+    }
+    return (result.commits ?? []).slice(0, 10).map((commit) => ({
+      oid: commit.oid,
+      summary: commit.summary,
+    }));
+  }
+
   /** 从改动进入文件树：展开必要的祖先、选中并滚到这一行（不读文件内容）。 */
   async function revealInFiles(path: string, line: number | null = null) {
+    if (workspaceView === "changes") {
+      editOrigin = {
+        path,
+        view: "changes",
+        side: selected?.path === path ? selected.side : "unstaged",
+      };
+    }
     showFiles();
     // 等文件视图真的成为可见视图再定位：隐藏的视图不发起读取。
     await tick();
@@ -2359,7 +2486,7 @@
   }
 
   /** 逐行追溯：切到文件视图打开这个文件，并在代码左侧标出每一行最后由哪个提交写入。 */
-  async function blameInFiles(path: string) {
+  async function blameInFiles(path: string, view: "changes" | "task" = "changes", side: DiffSide = "unstaged") {
     if (!filesViewEnabled) {
       notice("文件视图已在设置里关闭，打开后才能逐行追溯。", "warn");
       return;
@@ -2368,11 +2495,15 @@
       notice("SSH 远端仓库暂不支持逐行追溯。", "warn");
       return;
     }
+    editOrigin = { path, view, side };
     closeTask();
     showFiles();
     await tick();
     const placed = await filesView?.openBlame(path);
-    if (placed === false) notice(`没能在文件树里定位 ${path}，文件可能已被删除或移动。`, "warn");
+    if (placed === false) {
+      if (editOrigin?.path === path) editOrigin = null;
+      notice(`没能在文件树里定位 ${path}，文件可能已被删除或移动。`, "warn");
+    }
   }
 
   /** 文件到改动：切回改动视图并定位到这个文件的对应一侧。 */
@@ -2393,7 +2524,7 @@
     editOrigin = { path, view, side };
     showFiles();
     await tick();
-    const revealed = await filesView?.reveal(path, null);
+    const revealed = await filesView?.reveal(path, line);
     if (revealed === false) {
       // 文件树里定位不到（例如刚被删除或移动）：不把人放在什么都没选中的文件视图里，回到原来的差异并说明。
       if (editOrigin?.path === path) editOrigin = null;
@@ -2736,6 +2867,11 @@
     if (!opened) return;
     // 迟到的旧快照不能把 generation 退回去，也不能覆盖较新的文件与选中状态。
     if (snapshot.generation < opened.generation) return;
+    const prevBranch = opened.snapshot.branch;
+    if (!prevBranch.detached && prevBranch.name && prevBranch.name !== snapshot.branch.name) {
+      recordRecentBranch(opened.summary.path, prevBranch.name);
+      recentBranchVersion += 1;
+    }
     opened = { ...opened, snapshot, generation: snapshot.generation };
     settleSelection(createSelectionResolver(snapshot.files, true));
     void loadSelectedDiff();
@@ -3204,6 +3340,93 @@
     } finally {
       pending = null;
     }
+  }
+
+  /**
+   * 按块放弃修改（仅本地未暂存已跟踪文本文件）：走同一写锁与 snapshot 校验。
+   * 过期时拒绝写入并刷新差异，不丢弃提交说明草稿。
+   */
+  async function discardHunkOf(choice: FileSelection, currentDiff: DiffResponse, hunk: DiffHunk) {
+    const current = opened;
+    if (!current || pending || reading || choice.side !== "unstaged") return;
+    pending = "discard-hunk";
+    live = "正在放弃所选代码块修改";
+    try {
+      const file = current.snapshot.files.find((item) => item.path === choice.path);
+      const snapshot = await api.discardHunks(
+        current.summary.path,
+        choice.path,
+        false,
+        [hunk.index],
+        currentDiff.snapshot,
+        current.generation,
+        nextId(),
+        file?.originalPath ?? null,
+      );
+      if (opened?.summary.path !== current.summary.path) return;
+      banner = null;
+      applySnapshot(snapshot);
+      notice("已放弃所选代码块的未暂存修改");
+    } catch (error) {
+      if (opened?.summary.path === current.summary.path) handleMutationError(error);
+      throw error;
+    } finally {
+      pending = null;
+    }
+  }
+
+  /** 按行放弃修改（仅本地未暂存已跟踪文本文件）：走同一写锁与 snapshot 校验。 */
+  async function discardLinesOf(choice: FileSelection, currentDiff: DiffResponse, lines: DiffLineSelection[]) {
+    const current = opened;
+    if (!current || pending || reading || choice.side !== "unstaged" || lines.length === 0) return;
+    pending = "discard-line";
+    live = "正在放弃选中行修改";
+    try {
+      const file = current.snapshot.files.find((item) => item.path === choice.path);
+      const snapshot = await api.discardLines(
+        current.summary.path,
+        choice.path,
+        false,
+        lines,
+        currentDiff.snapshot,
+        current.generation,
+        nextId(),
+        file?.originalPath ?? null,
+      );
+      if (opened?.summary.path !== current.summary.path) return;
+      banner = null;
+      applySnapshot(snapshot);
+      notice(`已放弃选中的 ${lines.length} 行未暂存修改`);
+    } catch (error) {
+      if (opened?.summary.path === current.summary.path) handleMutationError(error);
+      throw error;
+    } finally {
+      pending = null;
+    }
+  }
+
+  /** 按段展开单文件差异折叠上下文（只读切片，不改动 diff.hunks 或 snapshot）。 */
+  async function expandDiffContext(startLine: number, count: number): Promise<DiffContextSlice> {
+    const current = opened;
+    const choice = selected;
+    if (!current || !choice) {
+      throw new Error("当前没有选中的差异文件");
+    }
+    const file = current.snapshot.files.find((item) => item.path === choice.path);
+    const slice = await api.diffContextLines(
+      current.summary.path,
+      choice.path,
+      choice.side === "staged",
+      startLine,
+      count,
+      current.generation,
+      nextId(),
+      file?.originalPath ?? null,
+    );
+    if (opened?.summary.path === current.summary.path && slice.generation !== current.generation) {
+      adoptGeneration(slice.generation);
+    }
+    return slice;
   }
 
   async function loadMoreDiff() {
@@ -5056,7 +5279,13 @@
     if (!id) return;
     // 只看这次按键的目标。文本框里的组合键留给光标；文件切换、改动块和聚焦搜索在弹层打开时也让路。
     const editing = isTextEntry(event.target);
-    const yieldsToLayer = id.startsWith("file.") || id.startsWith("files.") || id.startsWith("diff.hunk.") || id.startsWith("review.") || id === "view.find";
+    const yieldsToLayer =
+      id.startsWith("file.") ||
+      id.startsWith("files.") ||
+      id.startsWith("diff.hunk.") ||
+      id.startsWith("review.") ||
+      id === "view.find" ||
+      (id === "dialog.shortcuts" && !event.metaKey && !event.ctrlKey);
     if (yieldsToLayer && (layerAtKey || editing)) return;
     if (editing) return;
     event.preventDefault();
@@ -5888,6 +6117,11 @@
                   onSelect={selectFile}
                   onMultiSelect={selectMany}
                   onBatch={(side) => void runBatch(side === "staged" ? "unstage" : "stage", side === "staged" ? batch.unstage : batch.stage)}
+                  onBatchStage={(paths) => void runBatch("stage", paths)}
+                  onBatchUnstage={(paths) => void runBatch("unstage", paths)}
+                  onBatchDiscard={(paths) => void recovery?.discard(paths)}
+                  onBatchCopyPaths={(paths) => void copyText(paths.join("\n"), `${paths.length} 个文件路径`)}
+                  onClearMultiSelect={() => selected && selectFile(selected)}
                   onStage={stagePath}
                   onUnstage={unstagePath}
                   onStageAll={stagePaths}
@@ -5922,6 +6156,9 @@
                   onCommit={commitLocal}
                   onCommitPush={commitAndPush}
                   onScope={() => runCommand("task.scope")}
+                  onLoadRecentMessages={loadRecentCommitMessages}
+                  canAmend={canAmendLatest}
+                  onAmend={() => void recovery?.amendLatest(opened?.snapshot.branch.headOid ?? undefined)}
                 >
                   {#snippet overflow(closeMore: () => void)}
                     <div class="menu-label" role="presentation">撤销与恢复</div>
@@ -5997,10 +6234,15 @@
                   onStageLines={(lines) => {
                     if (selected && diff) void stageLinesOf(selected, diff, lines);
                   }}
+                  onDiscardHunk={selected && diff ? (hunk) => discardHunkOf(selected!, diff!, hunk) : undefined}
+                  onDiscardLines={selected && diff ? (lines) => discardLinesOf(selected!, diff!, lines) : undefined}
+                  untracked={selected ? (filesByPath.get(selected.path)?.untracked ?? false) : false}
+                  discardBlockedReason={remoteKey ? REMOTE_DISCARD_PATCH_UNSUPPORTED_REASON : null}
+                  onExpandContext={selected && !filesByPath.get(selected.path)?.untracked ? expandDiffContext : undefined}
                   hunksStageableReason={diff?.hunksStageableReason ?? null}
                   onLoadMore={loadMoreDiff}
                   onFileHistory={openFileHistory}
-                  onBlame={remoteKey === null && filesViewEnabled && selected && filesByPath.get(selected.path)?.unstaged !== "deleted" && !(selected.side === "staged" && filesByPath.get(selected.path)?.staged === "deleted") ? (path) => void blameInFiles(path) : undefined}
+                  onBlame={remoteKey === null && filesViewEnabled && selected && filesByPath.get(selected.path)?.unstaged !== "deleted" && !(selected.side === "staged" && filesByPath.get(selected.path)?.staged === "deleted") ? (path) => void blameInFiles(path, "changes", selected!.side) : undefined}
                   onReadDocument={openDocument}
                   fullFile={diffFullFile}
                   onFullFile={setFullFile}
@@ -6134,7 +6376,7 @@
                 onNotice={notice}
                 onFailure={announceTaskFailure}
                 onFileHistory={openFileHistory}
-                onBlameFile={remoteKey === null && filesViewEnabled ? (path) => void blameInFiles(path) : undefined}
+                onBlameFile={remoteKey === null && filesViewEnabled ? (path) => void blameInFiles(path, "task") : undefined}
                 onReadDocument={openDocument}
                 onFileNav={(nav) => (taskNav = nav)}
                 onHunkNav={reportTaskHunk}
@@ -6608,6 +6850,16 @@
     onFailure={handleMutationError}
     onNotice={notice}
     onMerge={() => runCommand("task.merge")}
+  />
+{/if}
+
+{#if shortcutsOpen}
+  <ShortcutHelpModal
+    returnFocus={shortcutsReturnFocus}
+    onClose={() => {
+      shortcutsOpen = false;
+      shortcutsReturnFocus = null;
+    }}
   />
 {/if}
 

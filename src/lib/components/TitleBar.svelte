@@ -354,7 +354,7 @@
     class="titlebar-palette"
     data-titlebar-control
     aria-label="命令面板"
-    title={`搜索命令、切换仓库或分支（${MODIFIER_LABEL}+K）`}
+    title={`搜索命令、切换仓库或分支（${MODIFIER_LABEL}+K）；按 ${MODIFIER_LABEL}+/ 或 ? 查看快捷键`}
     onclick={() => (onPalette ?? onBrand)()}
   >
     <Icon name="search" size={13} />

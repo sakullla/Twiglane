@@ -30,6 +30,8 @@ const KEY_COMMANDS: Record<string, string> = {
   f: "view.find",
   p: "files.quickOpen",
   enter: "commit.local",
+  /** ⌘/Ctrl+/：打开全局快捷键一览。 */
+  "/": "dialog.shortcuts",
   /** ⌘/Ctrl+`：与 VS Code 等编辑器一致的终端开关。 */
   "`": "terminal.toggle",
 };
@@ -120,6 +122,7 @@ function altCommand(map: Record<string, string>, event: KeyLike): string | null 
  */
 export function shortcutCommand(event: KeyLike): string | null {
   const mod = event.metaKey || event.ctrlKey;
+  if (!mod && !event.altKey && event.key === "?") return "dialog.shortcuts";
   if (event.altKey && !mod && event.shiftKey) return altCommand(ALT_SHIFT_COMMANDS, event);
   if (event.altKey && !mod && !event.shiftKey) return altCommand(ALT_COMMANDS, event);
   if (!mod || event.altKey) return null;

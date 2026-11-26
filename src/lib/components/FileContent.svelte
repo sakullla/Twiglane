@@ -1489,7 +1489,15 @@
             >预览</button>
           </div>
         {/if}
-        {#if onOpenDiff && primarySide}
+        {#if !editing && showReturn && editReturn}
+          <button
+            type="button"
+            class="btn btn-secondary btn-sm file-return-btn"
+            data-file-return
+            title={`回到来源差异视图（${editReturn.label}）`}
+            onclick={() => editReturn?.run()}
+          ><Icon name="arrow-left" size={13} /><span>{editReturn.label}</span></button>
+        {:else if onOpenDiff && primarySide}
           <button
             type="button"
             class="btn btn-ghost btn-sm file-diff-btn"

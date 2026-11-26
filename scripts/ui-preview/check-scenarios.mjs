@@ -541,11 +541,16 @@ const REVIEW_SCENARIOS = [
       await openReview(d);
       await d.click('.review-completion [data-completion-action="return"]');
       await d.until("Boolean(document.querySelector('.review-completion-item[data-status=\"return\"][data-tone=\"success\"]'))", "已返回 Cliora");
+      await d.click('.review-completion .review-completion-more');
+      await d.until("Boolean(document.querySelector('#review-completion-details'))", "完成详情已展开");
     },
+    // 返回后完成栏显示实时工作区（mock 中为有改动）；返回时读不到的状态只在详情里如实说明为「上次返回时没有读到」，不当成干净。
     check: `(() => {
       const item = document.querySelector('.review-completion-item[data-status="worktree"]');
       const bar = document.querySelector('.review-completion').innerText;
-      return item.textContent.includes('没有读到工作区状态（按未知处理）') && item.dataset.tone === 'warn'
+      const details = document.querySelector('#review-completion-details')?.textContent || '';
+      return details.includes('上次返回时没有读到工作区状态') && !details.includes('上次返回时工作区没有未提交的改动')
+        && /工作区还有 \\d+ 个未提交的改动/.test(item.textContent) && item.dataset.tone === 'warn'
         && !bar.includes('没有未提交的改动') && bar.includes('本次没有提交或合入')
         && (window.__clioraPreviewEvidence.returns.at(-1)?.url || '').includes('worktreeState=unknown') && ${NO_PAGE_OVERFLOW};
     })()`,

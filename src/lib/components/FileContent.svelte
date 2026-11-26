@@ -90,8 +90,12 @@
     blameRequest?: { path: string; serial: number } | null;
     /** 在历史里定位某个提交（逐行追溯的提交入口）。 */
     onOpenCommit?: (oid: string) => void;
-    /** 复制文字（提交号、说明）：成功与失败的反馈由外壳统一处理。 */
+    /** 复制文字（提交号、说明、代码行）：成功与失败的反馈由外壳统一处理。 */
     onCopyText?: (text: string, what: string) => void;
+    /** 在整个仓库里搜索这段文字（右键「在仓库中搜索」）。 */
+    onSearchRepository?: (text: string) => void;
+    /** 仓库相对路径 → 本机完整路径（右键「复制完整路径」）；远端仓库不传。 */
+    toAbsolute?: (relative: string) => string;
   }
 
   let {
@@ -120,6 +124,8 @@
     blameRequest = null,
     onOpenCommit,
     onCopyText,
+    onSearchRepository,
+    toAbsolute,
   }: Props = $props();
 
   /** 与 components.css 的 .file-line 行高一致：虚拟窗口按它算，行号与代码同高。 */
@@ -169,6 +175,8 @@
   /** 当前停在第几处匹配：上一处/下一处按它循环，结果换了就回到 -1。 */
   let matchCursor = $state(-1);
   let menu = $state<ContextMenuRequest | null>(null);
+  /** 代码区与追溯列的右键菜单：和「更多」分开，避免把「更多」按钮标成展开。 */
+  let codeMenu = $state<ContextMenuRequest | null>(null);
   let moreButton = $state<HTMLButtonElement | null>(null);
   let moreClosedAt = 0;
 
@@ -286,7 +294,7 @@
       entries.push({ id: "copy-summary", label: "复制提交说明", icon: "copy", run: () => onCopyText?.(commit.summary, "提交说明") });
     }
     if (entries.length === 0) return;
-    menu = { x: event.clientX, y: event.clientY, entries, label: `${commit.oid.slice(0, 7)} 的操作` };
+    codeMenu = { x: event.clientX, y: event.clientY, entries, label: `${commit.oid.slice(0, 7)} 的操作` };
   }
 
   let parts = $derived(path ? splitPath(path) : null);
@@ -1116,6 +1124,130 @@
     return lines.join("\n");
   }
 
+  /* ---------- 代码区右键菜单 ----------
+     与常见编辑器一致：复制（选中 / 这一行 / 引用）→ 查找 → Git（逐行追溯、这一行的提交、文件历史、改动）
+     → 编辑与显示。右键行号或代码都按鼠标所在的那一行；菜单键 / Shift+F10 按阅读位置。 */
+  async function writeClipboard(text: string, what: string): Promise<void> {
+    if (onCopyText) {
+      onCopyText(text, what);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // 剪贴板不可用：不打断阅读。
+    }
+  }
+
+  function codeMenuEntries(no: number | null, selection: string): ContextMenuEntry[] {
+    if (!path || content?.kind !== "text") return [];
+    const target = path;
+    const lineText = no !== null ? (lines[no - 1 - pageOffset] ?? null) : null;
+    const seed = findSeed(selection);
+    const short = (text: string) => (text.length > 24 ? `${text.slice(0, 24)}…` : text);
+    const entries: ContextMenuEntry[] = [];
+
+    entries.push({
+      id: "copy",
+      label: "复制",
+      icon: "copy",
+      shortcut: `${MODIFIER_LABEL} C`,
+      disabledReason: allSelected || selection ? undefined : "先选中要复制的文字",
+      run: () => void (allSelected ? copyAll() : writeClipboard(selection, "选中内容")),
+    });
+    if (lineText !== null && no !== null) {
+      entries.push({ id: "copy-line", label: `复制第 ${no} 行`, icon: "copy", run: () => void writeClipboard(lineText, `第 ${no} 行`) });
+      entries.push({ id: "copy-ref", label: "复制引用（路径:行号）", icon: "link", run: () => void writeClipboard(`${target}:${no}`, "引用") });
+    }
+    entries.push({
+      id: "copy-paths",
+      label: "复制路径",
+      icon: "copy",
+      submenu: [
+        { id: "copy-rel", label: "复制相对路径", icon: "copy", run: () => void writeClipboard(target, "相对路径") },
+        ...(toAbsolute ? [{ id: "copy-abs", label: "复制完整路径", icon: "link" as const, run: () => void writeClipboard(toAbsolute!(target), "完整路径") }] : []),
+        { id: "copy-name", label: "复制文件名", icon: "copy", run: () => void writeClipboard(splitPath(target).name, "文件名") },
+      ],
+    });
+
+    entries.push({ separator: true });
+    entries.push({
+      id: "find",
+      label: seed ? `在文件中查找“${short(seed)}”` : "在文件中查找",
+      icon: "search",
+      shortcut: `${MODIFIER_LABEL} F`,
+      run: openSearch,
+    });
+    if (onSearchRepository) {
+      entries.push({
+        id: "search-repo",
+        label: seed ? `在仓库中搜索“${short(seed)}”` : "在仓库中搜索",
+        icon: "search",
+        run: () => onSearchRepository?.(seed ?? ""),
+      });
+    }
+    entries.push({ id: "goto", label: "跳到行…", icon: "arrow-right", shortcut: `${MODIFIER_LABEL} G`, run: () => void openGoto() });
+
+    entries.push({ separator: true });
+    entries.push({ heading: "Git" });
+    entries.push({ id: "blame", label: blameOn ? "关闭逐行追溯" : "逐行追溯（Blame）", icon: "user", run: toggleBlame });
+    const owner = blameOn && no !== null ? blameCommitAt(no) : null;
+    if (owner && !owner.commit.uncommitted && onOpenCommit) {
+      const commit = owner.commit;
+      entries.push({
+        id: "line-commit",
+        label: `查看这一行的提交 ${commit.oid.slice(0, 7)}`,
+        icon: "commit",
+        run: () => onOpenCommit?.(commit.oid),
+      });
+    }
+    if (onFileHistory) entries.push({ id: "history", label: "查看文件历史", icon: "history", run: () => onFileHistory?.(target) });
+    if (onOpenDiff && primarySide) {
+      const side = primarySide;
+      entries.push({ id: "diff", label: side === "unstaged" ? "查看改动" : "查看已暂存的改动", icon: "file-diff", run: () => onOpenDiff?.(target, side) });
+    }
+
+    entries.push({ separator: true });
+    if (canEdit && !editing) {
+      entries.push({ id: "edit", label: no !== null ? `从第 ${no} 行开始编辑` : "编辑这个文件", icon: "pencil", run: () => startEdit(no) });
+    }
+    entries.push({ id: "select-all", label: "全选", icon: "select-all", shortcut: `${MODIFIER_LABEL} A`, run: () => contentRoot && selectAllContent(contentRoot) });
+    entries.push({
+      id: "wrap",
+      label: wrap ? "关闭自动换行" : "自动换行",
+      icon: "rows",
+      disabledReason: !canWrap && !wrap ? `超过 ${WRAP_LIMIT} 行时不自动换行` : undefined,
+      run: () => {
+        wrap = !wrap;
+        if (wrap) blameOn = false;
+      },
+    });
+    return entries;
+  }
+
+  function openCodeMenu(event: MouseEvent): void {
+    if (editing) return;
+    const target = event.target as HTMLElement | null;
+    // 逐行追溯列自己有提交菜单。
+    if (target?.closest(".blame-cell:not(.empty)")) return;
+    event.preventDefault();
+    const row = target?.closest<HTMLElement>("[data-file-line]");
+    const no = row ? Number(row.dataset.fileLine) : null;
+    const selection = (typeof window === "undefined" ? "" : window.getSelection()?.toString()) ?? "";
+    const entries = codeMenuEntries(Number.isFinite(no) ? no : null, selection);
+    if (entries.length === 0) return;
+    codeMenu = { x: event.clientX, y: event.clientY, entries, label: no ? `第 ${no} 行的操作` : "文件内容的操作" };
+  }
+
+  function codeMenuKey(event: KeyboardEvent): void {
+    if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+    event.preventDefault();
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    const no = readingLine();
+    const entries = codeMenuEntries(no, window.getSelection()?.toString() ?? "");
+    if (entries.length > 0) codeMenu = { x: rect.left + 48, y: rect.top + 40, entries, label: "文件内容的操作" };
+  }
+
   function moreEntries(): ContextMenuEntry[] {
     if (!path) return [];
     const target = path;
@@ -1376,16 +1508,6 @@
             onclick={() => (outlineOpen = !outlineOpen)}
           ><Icon name="list" size={14} /></button>
         {/if}
-        {#if content?.kind === "text" && !showImage && !editing && !(isMarkdown && documentMode === "preview")}
-          <button
-            type="button"
-            class="btn btn-ghost btn-sm file-blame-btn"
-            aria-pressed={blameOn}
-            aria-label="逐行追溯"
-            title={blameOn ? "关闭逐行追溯" : "逐行追溯（git blame）：标出每一行最后由哪个提交、谁、何时写入"}
-            onclick={toggleBlame}
-          >{#if blameLoading}<span class="spinner" aria-hidden="true"></span>{:else}<Icon name="user" size={13} />{/if}<span>追溯</span></button>
-        {/if}
         {#if content?.kind === "text" && !showImage && !editing}
           <button
             type="button"
@@ -1620,7 +1742,7 @@
         </div>
       {/if}
       {#if wrap}
-        <div class="file-code-wrap" class:select-all={allSelected} role="textbox" aria-readonly="true" aria-multiline="true" aria-label={`${parts.name} 内容`} tabindex="0">
+        <div class="file-code-wrap" class:select-all={allSelected} oncontextmenu={openCodeMenu} onkeydown={codeMenuKey} role="textbox" aria-readonly="true" aria-multiline="true" aria-label={`${parts.name} 内容`} tabindex="0">
           {#each lines as line, index (index)}
             {@const no = pageOffset + index + 1}
             <div class="file-wrap-line" class:hit={hitLine === no} data-file-line={no}>
@@ -1634,6 +1756,8 @@
           class="diff-scroll file-code"
           class:with-blame={blameShown}
           class:select-all={allSelected}
+          oncontextmenu={openCodeMenu}
+          onkeydown={codeMenuKey}
           role="textbox"
           aria-readonly="true"
           aria-multiline="true"
@@ -1800,4 +1924,8 @@
 
 {#if menu}
   <ContextMenu request={menu} onClose={closeMenu} />
+{/if}
+
+{#if codeMenu}
+  <ContextMenu request={codeMenu} onClose={() => (codeMenu = null)} />
 {/if}

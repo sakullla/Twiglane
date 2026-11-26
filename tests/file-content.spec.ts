@@ -1204,6 +1204,18 @@ describe("面包屑切换", () => {
   });
 });
 
+/** 在某一行上右键，点菜单项。 */
+async function codeMenu(container: HTMLElement, line: number, item: RegExp | string) {
+  const row = container.querySelector<HTMLElement>(`[data-file-line="${line}"] .code-in`)!;
+  await fireEvent.contextMenu(row, { clientX: 200, clientY: 100 });
+  const menu = await screen.findByRole("menu");
+  const entry = [...menu.querySelectorAll<HTMLElement>("[role=menuitem]")].find((node) =>
+    typeof item === "string" ? node.textContent?.trim().startsWith(item) : item.test(node.textContent ?? ""),
+  );
+  if (!entry) throw new Error(`菜单里没有 ${item}：${menu.textContent}`);
+  await fireEvent.click(entry);
+}
+
 describe("逐行追溯（git blame）", () => {
   const older = { oid: "1".repeat(40), author: "Alice", authorTime: 1_700_000_000, summary: "init", uncommitted: false, boundary: false, previousPath: null };
   const pending = { oid: "0".repeat(40), author: "尚未提交", authorTime: 0, summary: "工作区里还没有提交的修改", uncommitted: true, boundary: false, previousPath: null };
@@ -1224,8 +1236,10 @@ describe("逐行追溯（git blame）", () => {
     const { container } = render(FileContent, { props: props({ onOpenCommit }) as never });
     await waitFor(() => expect(container.querySelector('[data-file-line="1"]')).toBeTruthy());
     expect(container.querySelector(".blame-cell")).toBeNull();
+    // 不再有单独的按钮：入口在代码区右键。
+    expect(screen.queryByRole("button", { name: "逐行追溯" })).toBeNull();
 
-    await fireEvent.click(screen.getByRole("button", { name: "逐行追溯" }));
+    await codeMenu(container, 2, "逐行追溯");
     await waitFor(() => expect(container.querySelectorAll(".blame-cell").length).toBe(3));
     expect(fileBlame).toHaveBeenCalledWith(repoPath, "src/App.ts", 4, 1);
     const cells = [...container.querySelectorAll<HTMLElement>(".blame-cell")];
@@ -1238,7 +1252,11 @@ describe("逐行追溯（git blame）", () => {
     await fireEvent.click(cells[2]);
     expect(onOpenCommit).toHaveBeenCalledTimes(1);
 
-    await fireEvent.click(screen.getByRole("button", { name: "逐行追溯" }));
+    // 追溯打开后，右键某一行可以直接去它的提交。
+    await codeMenu(container, 1, /查看这一行的提交 1111111/);
+    expect(onOpenCommit).toHaveBeenLastCalledWith(older.oid);
+
+    await codeMenu(container, 1, "关闭逐行追溯");
     expect(container.querySelector(".blame-cell")).toBeNull();
   });
 
@@ -1247,7 +1265,7 @@ describe("逐行追溯（git blame）", () => {
     fileBlame.mockRejectedValue({ code: "blame_untracked", message: "这个文件还没有提交过，没有可以追溯的历史。" });
     const { container } = render(FileContent, { props: props() as never });
     await waitFor(() => expect(container.querySelector('[data-file-line="1"]')).toBeTruthy());
-    await fireEvent.click(screen.getByRole("button", { name: "逐行追溯" }));
+    await codeMenu(container, 1, "逐行追溯");
     expect(await screen.findByText("这个文件还没有提交过，没有可以追溯的历史。")).toBeTruthy();
     await fireEvent.click(screen.getByRole("button", { name: "关闭追溯" }));
     expect(screen.queryByText("这个文件还没有提交过，没有可以追溯的历史。")).toBeNull();
@@ -1258,6 +1276,39 @@ describe("逐行追溯（git blame）", () => {
     fileBlame.mockResolvedValue({ generation: 4, path: "src/App.ts", lines: 3, commits: [older], ranges: [{ start: 1, count: 3, commit: 0, origStart: 1 }] });
     const { container } = render(FileContent, { props: props({ blameRequest: { path: "src/App.ts", serial: 1 } }) as never });
     await waitFor(() => expect(container.querySelectorAll(".blame-cell").length).toBe(3));
-    expect(screen.getByRole("button", { name: "逐行追溯" }).getAttribute("aria-pressed")).toBe("true");
+  });
+});
+
+describe("代码区右键菜单", () => {
+  it("按右键所在的行复制这一行与引用，查找带入选区，仓库搜索交给外壳，可从这一行开始编辑", async () => {
+    repositoryFileContent.mockResolvedValue(text());
+    const onCopyText = vi.fn();
+    const onSearchRepository = vi.fn();
+    const onOpenDiff = vi.fn();
+    const { container } = render(FileContent, {
+      props: props({ onCopyText, onSearchRepository, onOpenDiff, toAbsolute: (relative: string) => `${repoPath}/${relative}` }) as never,
+    });
+    await waitFor(() => expect(container.querySelector('[data-file-line="3"]')).toBeTruthy());
+
+    await codeMenu(container, 3, "复制第 3 行");
+    expect(onCopyText).toHaveBeenLastCalledWith("const value = 1;", "第 3 行");
+    await codeMenu(container, 3, "复制引用");
+    expect(onCopyText).toHaveBeenLastCalledWith("src/App.ts:3", "引用");
+
+    const row = container.querySelector<HTMLElement>('[data-file-line="1"] .code-in')!;
+    await fireEvent.contextMenu(row, { clientX: 200, clientY: 100 });
+    const menu = await screen.findByRole("menu");
+    const labels = [...menu.querySelectorAll("[role=menuitem]")].map((node) => node.textContent?.trim() ?? "");
+    // 没选中文字时「复制」不可用，并说明原因。
+    expect(menu.querySelector<HTMLElement>("[role=menuitem]")?.getAttribute("aria-disabled")).toBe("true");
+    for (const label of ["复制第 1 行", "在文件中查找", "在仓库中搜索", "跳到行…", "逐行追溯（Blame）", "查看文件历史", "查看改动", "从第 1 行开始编辑", "全选"]) {
+      expect(labels.some((text) => text.startsWith(label)), label).toBe(true);
+    }
+    await fireEvent.keyDown(menu, { key: "Escape" });
+
+    await codeMenu(container, 1, "在仓库中搜索");
+    expect(onSearchRepository).toHaveBeenCalledWith("");
+    await codeMenu(container, 1, "查看改动");
+    expect(onOpenDiff).toHaveBeenCalledWith("src/App.ts", "unstaged");
   });
 });

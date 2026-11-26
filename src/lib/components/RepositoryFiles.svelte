@@ -424,6 +424,8 @@
     {blameRequest}
     {onOpenCommit}
     onCopyText={onCopyPath}
+    onSearchRepository={(text) => void focusSearch("content", text || undefined)}
+    toAbsolute={remote ? undefined : toAbsolute}
   />
   {#if entryRequest && onEntry}
     {#key entryRequest.serial}

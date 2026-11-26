@@ -37,13 +37,27 @@ describe("主题与无障碍契约", () => {
   });
 
   it("主题外的布局不写死颜色，保持切换主题的能力", () => {
-    for (const name of ["base.css", "components.css", "layout.css", "review.css"]) {
+    for (const name of ["base.css", "components.css", "layout.css", "review.css", "terminal.css"]) {
       const css = clean(read(name));
       const withoutUrls = css.replace(/url\((['"]?)[^)]*\1\)/g, "url()");
       expect(withoutUrls, name).not.toMatch(/#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?\b/);
       expect(withoutUrls, name).not.toMatch(/\b(?:rgba?|hsla?)\((?!\s*var\()/);
       expect(css, name).not.toMatch(/%23[0-9a-fA-F]{6}/);
     }
+  });
+
+  it("共享控件度量、微交互过渡与吸顶/聚焦光晕令牌在双主题与样式层保持同源", () => {
+    const shared = theme(/(?:^|\n)\s*:root\s*\{([^}]*)\}/);
+    const light = theme(/:root,\s*\[data-theme="light"\]\s*\{([^}]*)\}/);
+    const dark = theme(/\[data-theme="dark"\]\s*\{([^}]*)\}/);
+    for (const key of ["--transition-colors", "--transition-interactive", "--control-height", "--control-height-sm", "--control-height-xs", "--modal-pad"]) {
+      expect(shared.get(key), key).toBeTruthy();
+    }
+    for (const key of ["--shadow-sticky", "--focus-ring"]) {
+      expect(light.get(key), `light ${key}`).toBeTruthy();
+      expect(dark.get(key), `dark ${key}`).toBeTruthy();
+    }
+    expect(rule(components, ".diff-toolbar.scrolled")).toMatch(/box-shadow:\s*var\(--shadow-sticky\)/);
   });
 
   it("真实主题叠层通过对比度检查", () => {
@@ -66,6 +80,13 @@ describe("主题与无障碍契约", () => {
     const contrast = readFileSync(path.join(root, "scripts/check-contrast.mjs"), "utf8");
     expect(contrast).toMatch(/const STYLE_LAYERS = \[[^\]]*"review\.css"/);
     expect(contrast).toMatch(/const REVIEW_STACKS = \[/);
+  });
+
+  it("底部终端的标签页、关闭按钮与查找选项保留焦点环", () => {
+    const terminal = read("terminal.css");
+    for (const selector of [".terminal-tab:focus-visible", ".terminal-tab-close:focus-visible", ".terminal-find-option:focus-visible"]) {
+      expect(rule(terminal, selector), selector).toMatch(/outline:\s*[^;]*var\(--focus\)/);
+    }
   });
 
   it("禁用按钮采用柔和无框槽位，不再绘制抢眼的硬线框", () => {

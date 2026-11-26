@@ -63,6 +63,11 @@
   --duration-slow: 260ms;
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  /* 微交互统一过渡与轻按反馈：所有按钮、表单、标签页与卡片共用同一套节奏。 */
+  --transition-colors: background-color var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
+  --transition-interactive: background-color var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease), box-shadow var(--duration-fast) var(--ease), transform var(--duration-fast) var(--ease);
+  --press-offset: 0.5px;
+  --press-scale: 0.96;
   /* 不可用控件统一淡化比例；文字按钮不走它，用中性填充（见 .btn:disabled）。 */
   --opacity-disabled: 0.45;
   /* 合并底部操作条的高度：通知抬到它上面时同用这个值。 */
@@ -72,6 +77,11 @@
   --titlebar-control: 30px;
   --statusbar-height: 26px;
   --statusbar-hit: 24px;
+  /* 常规表单/按钮/弹窗度量：按钮、输入框与下拉同高，弹窗头/体/脚共享内边距基线。 */
+  --control-height: 32px;
+  --control-height-sm: 26px;
+  --control-height-xs: 22px;
+  --modal-pad: 18px;
 
   /* 同类控件高度的单一事实源（R1 控件语言收敛）。
      分段按钮与小 pill 原先在各视图各写各的像素值（分段默认 24px、视图切换 26px；
@@ -113,19 +123,19 @@
 :root,
 [data-theme="light"] {
   color-scheme: light;
-  /* 现代净瓷中性灰（饱和度 ≤12%）：干净通透的明度阶梯 + 柔和环境阴影 + 毛玻璃浮层 */
-  --bg: #f4f4f6;
+  /* 现代净瓷中性灰（饱和度 ≤13%）：干净通透的明度阶梯 + 柔和环境阴影 + 毛玻璃浮层 */
+  --bg: #f3f3f5;
   --surface: #ffffff;
-  --surface-2: #f8f8f9;
-  --surface-3: #eeeef1;
-  --surface-glass: rgba(255, 255, 255, 0.88);
+  --surface-2: #f7f7f9;
+  --surface-3: #ededf0;
+  --surface-glass: rgba(255, 255, 255, 0.9);
   --hover: rgba(20, 22, 36, 0.045);
   --active: rgba(20, 22, 36, 0.085);
-  --border: #e6e7ec;
-  --border-strong: #d5d7df;
+  --border: #e5e6eb;
+  --border-strong: #d3d5dd;
   /* 柔和控件边界：取代突兀灰框，配合表面明度差与微阴影勾勒输入与次级按钮。 */
-  --control-border: #d7d9e1;
-  --control-border-hover: #b6b9c6;
+  --control-border: #d5d7df;
+  --control-border-hover: #b3b6c3;
   --fg: #15161c;
   --fg-muted: #484b58;
   --fg-subtle: #555866;
@@ -169,11 +179,13 @@
   --hunk-bg: #eff2f8;
   --hunk-fg: #4e546b;
   --focus: #4f46e5;
+  --focus-ring: 0 0 0 3px rgba(79, 70, 229, 0.14);
   --overlay: rgba(12, 15, 28, 0.36);
   --shadow-xs: 0 1px 2px rgba(15, 20, 40, 0.045);
   --shadow-sm: 0 1px 3px rgba(15, 20, 40, 0.065), 0 1px 2px rgba(15, 20, 40, 0.035);
   --shadow-md: 0 0 0 1px rgba(15, 20, 40, 0.05), 0 10px 28px -8px rgba(15, 20, 40, 0.12), 0 2px 6px rgba(15, 20, 40, 0.04);
   --shadow-lg: 0 0 0 1px rgba(15, 20, 40, 0.07), 0 24px 60px -12px rgba(15, 20, 40, 0.22), 0 8px 20px -4px rgba(15, 20, 40, 0.08);
+  --shadow-sticky: 0 1px 0 var(--border), 0 6px 14px -6px rgba(15, 20, 40, 0.12);
   --brand-grad: linear-gradient(145deg, #8b84ff 0%, #4f46e5 78%);
   --accent-grad: linear-gradient(135deg, #5d55f2 0%, #4338ca 100%);
   --ambient-glow: radial-gradient(960px 460px at 16% -10%, rgba(79, 70, 229, 0.12), transparent 70%), radial-gradient(740px 400px at 90% -4%, rgba(14, 165, 233, 0.08), transparent 70%);
@@ -251,15 +263,15 @@
   --bg: #0b0b0e;
   --surface: #14151a;
   --surface-2: #0f1014;
-  --surface-3: #1e1f26;
-  --surface-glass: rgba(20, 21, 26, 0.88);
-  --hover: rgba(232, 234, 248, 0.058);
-  --active: rgba(232, 234, 248, 0.095);
-  --border: #22232b;
-  --border-strong: #30323c;
+  --surface-3: #1d1e25;
+  --surface-glass: rgba(20, 21, 26, 0.9);
+  --hover: rgba(232, 234, 248, 0.06);
+  --active: rgba(232, 234, 248, 0.1);
+  --border: #22242c;
+  --border-strong: #31333e;
   /* 柔和控件边界：与深色表面自然融合，悬停时微亮响应。 */
-  --control-border: #2c2e38;
-  --control-border-hover: #424552;
+  --control-border: #2d2f39;
+  --control-border-hover: #454856;
   --fg: #ededf0;
   --fg-muted: #a6aab7;
   --fg-subtle: #9498a7;
@@ -303,11 +315,13 @@
   --hunk-bg: rgba(140, 150, 198, 0.085);
   --hunk-fg: #aeb3c7;
   --focus: #a19cff;
+  --focus-ring: 0 0 0 3px rgba(139, 133, 255, 0.22);
   --overlay: rgba(4, 5, 10, 0.66);
-  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.28);
-  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.42), 0 1px 2px rgba(0, 0, 0, 0.24);
   --shadow-md: 0 0 0 1px rgba(255, 255, 255, 0.055), 0 12px 32px -8px rgba(0, 0, 0, 0.54);
   --shadow-lg: 0 0 0 1px rgba(255, 255, 255, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 28px 72px -10px rgba(0, 0, 0, 0.72), 0 8px 20px rgba(0, 0, 0, 0.4);
+  --shadow-sticky: 0 1px 0 var(--border), 0 8px 18px -6px rgba(0, 0, 0, 0.55);
   --brand-grad: linear-gradient(145deg, #aeaaff 0%, #6a63f0 78%);
   --accent-grad: linear-gradient(135deg, #a49fff 0%, #7d76fa 100%);
   --ambient-glow: radial-gradient(960px 460px at 16% -10%, rgba(139, 133, 255, 0.15), transparent 70%), radial-gradient(740px 400px at 90% -4%, rgba(56, 189, 248, 0.08), transparent 70%);

@@ -969,6 +969,43 @@ describe("切换来源、返回 Cliora、送回意见前的草稿关卡", () => 
     expect(commentDraft(A)?.body).toBe("A 的草稿");
   });
 
+  it("交接提示按来源与范围隔离：A 准备后切到 B 不显示 A 的提示；A 的范围前进后提示与交接都不再代表当前批次", async () => {
+    const live = scopeFor(A);
+    adoptCommentScope(live);
+    addComment(live, anchorAt(5), "A 的意见");
+    let current: CommentScope = live;
+    const h = host({ commentScope: () => current });
+    const actions = createReviewActions(h);
+    await actions.prepareFeedback();
+    expect(actions.feedbackNoticeFor(live)).toContain("已准备 1 条意见（批次 ffffffff）");
+    expect(actions.handoffIn(A, live)).toMatchObject({ state: "prepared" });
+    expect(actions.earlierHandoff(A, live)).toBeNull();
+
+    // 来源 B：同一工作树、同一范围形状，但不是 A 的来源。
+    const other = scopeFor(B);
+    expect(actions.feedbackNoticeFor(other)).toBeNull();
+    expect(actions.handoffIn(B, other)).toEqual({ state: "idle" });
+
+    // A 的范围前进（提交、合入或内容改写）：提示收起，交接不再算当前批次，只在详情里留批次号。
+    const advanced = scopeFor(A, "range-2", 5);
+    expect(actions.feedbackNoticeFor(advanced)).toBeNull();
+    expect(actions.handoffIn(A, advanced)).toEqual({ state: "idle" });
+    expect(actions.earlierHandoff(A, advanced)).toBe("f".repeat(32));
+
+    // 新范围里加意见后再准备：结论只属于新范围。
+    current = advanced;
+    adoptCommentScope(advanced);
+    addComment(advanced, anchorAt(5), "新范围的意见");
+    await actions.prepareFeedback();
+    expect(actions.feedbackNoticeFor(advanced)).toContain("已准备");
+    expect(actions.feedbackNoticeFor(live)).toBeNull();
+    expect(actions.handoffIn(A, advanced)).toMatchObject({ state: "prepared" });
+
+    // 新增意见收起这条结论。
+    actions.addComment(anchorAt(3), "再补一条");
+    expect(actions.feedbackNoticeFor(advanced)).toBeNull();
+  });
+
   it("送回意见：有草稿先确认，取消则不准备；确认后只送出已保存的意见", async () => {
     const live = scopeFor(A);
     adoptCommentScope(live);

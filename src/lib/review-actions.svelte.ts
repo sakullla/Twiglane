@@ -128,8 +128,14 @@ function samePath(a: string, b: string): boolean {
 export class ReviewActions {
   /** 正在准备送回意见：防重入，界面据此禁用按钮。 */
   feedbackPreparing = $state(false);
-  /** 最近一次准备送回的结论（成功或失败）；新增/编辑/删除意见或范围清空时收起。 */
-  feedbackNotice = $state<string | null>(null);
+  /**
+   * 每个来源最近一次准备送回的结论（成功或失败），连同当时的意见范围键：只在同一来源、
+   * 同一范围里展示；切到别的来源或范围前进（提交、合入、内容改写）后不再显示。
+   * 新增/编辑/删除意见时收起。
+   */
+  private feedbackNotices = $state<Record<string, { key: string; text: string }>>({});
+  /** 交接状态是在哪个意见范围里产生的：范围前进后这次交接不再代表当前批次。 */
+  private handoffKeys = $state<Record<string, string>>({});
   /** 正在返回 Cliora：防重入，准备与返回互斥。 */
   returning = $state(false);
   /** 按 reviewId 保存的交接、返回与来源问题：迟到的响应只写回自己的来源，不覆盖新来源。 */
@@ -151,6 +157,43 @@ export class ReviewActions {
 
   returnOf(reviewId: string | null | undefined): ReviewReturnState {
     return (reviewId && this.returns[reviewId]) || { state: "idle" };
+  }
+
+  /** 当前来源当前范围的交接结论；别的来源或已经前进的范围返回 null。 */
+  feedbackNoticeFor(scope: CommentScope | null | undefined): string | null {
+    if (!scope) return null;
+    const notice = this.feedbackNotices[scope.reviewId];
+    return notice && notice.key === commentScopeKey(scope) ? notice.text : null;
+  }
+
+  /**
+   * 当前范围里的交接状态：交接产生之后范围前进了（提交、合入、内容改写），那一批意见已整体
+   * 失效，这次交接不再代表当前批次，按 idle 处理；准备中的状态照常显示。
+   */
+  handoffIn(reviewId: string | null | undefined, scope: CommentScope | null | undefined): ReviewHandoffState {
+    const handoff = this.handoffOf(reviewId);
+    if (!reviewId || handoff.state === "idle" || handoff.state === "preparing") return handoff;
+    const key = this.handoffKeys[reviewId];
+    if (key === undefined) return handoff;
+    return scope && scope.reviewId === reviewId && commentScopeKey(scope) === key ? handoff : { state: "idle" };
+  }
+
+  /** 范围前进前已经准备好的批次号（只用于详情说明是否发送以 Cliora 为准）；没有则为 null。 */
+  earlierHandoff(reviewId: string | null | undefined, scope: CommentScope | null | undefined): string | null {
+    const handoff = this.handoffOf(reviewId);
+    if (!reviewId || handoff.state !== "prepared") return null;
+    return this.handoffIn(reviewId, scope).state === "idle" ? handoff.feedbackId : null;
+  }
+
+  private setFeedbackNotice(scope: CommentScope, text: string): void {
+    this.feedbackNotices = { ...this.feedbackNotices, [scope.reviewId]: { key: commentScopeKey(scope), text } };
+  }
+
+  private clearFeedbackNotice(reviewId: string | null | undefined): void {
+    if (!reviewId || !Object.hasOwn(this.feedbackNotices, reviewId)) return;
+    const next = { ...this.feedbackNotices };
+    delete next[reviewId];
+    this.feedbackNotices = next;
   }
 
   issueOf(reviewId: string | null | undefined): ReviewSourceIssue | null {
@@ -198,6 +241,8 @@ export class ReviewActions {
       return next;
     };
     this.handoffs = drop(this.handoffs);
+    this.handoffKeys = drop(this.handoffKeys);
+    this.feedbackNotices = drop(this.feedbackNotices);
     this.returns = drop(this.returns);
     this.returnedWorktree = drop(this.returnedWorktree);
     this.sourceIssues = drop(this.sourceIssues);
@@ -324,7 +369,6 @@ export class ReviewActions {
   afterTaskScope(scope: TaskScopeSnapshot | null): void {
     const comment = this.host.commentScope();
     if (scope && comment) adoptCommentScope(comment);
-    if (!scope) this.feedbackNotice = null;
     if (scope) void this.reverifyTaskReviewed();
   }
 
@@ -335,20 +379,20 @@ export class ReviewActions {
     // 读取代次落后时先别往过期批次里写：那批意见马上会整体失效，写了也会丢。
     if (this.host.commentScopeOutdated()) throw new Error("工作区在这次读取之后又变化了，先重新读取任务再写意见。");
     addCommentRecord(scope, anchor, body);
-    this.feedbackNotice = null;
+    this.clearFeedbackNotice(scope.reviewId);
   }
 
   editComment(id: string, body: string): void {
     const scope = this.host.commentScope();
     if (!scope) throw new Error("当前没有任务范围，这条意见没有保存。");
     if (!editCommentRecord(scope, id, body)) throw new Error("这条意见已经不在当前批次里，请重新读取任务。");
-    this.feedbackNotice = null;
+    this.clearFeedbackNotice(scope.reviewId);
   }
 
   deleteComment(id: string): void {
     const scope = this.host.commentScope();
     if (scope) deleteCommentRecord(scope, id);
-    this.feedbackNotice = null;
+    this.clearFeedbackNotice(scope?.reviewId);
   }
 
   /**
@@ -391,9 +435,11 @@ export class ReviewActions {
     }
     if (this.feedbackPreparing || this.returning) return;
     this.feedbackPreparing = true;
-    this.feedbackNotice = null;
     const reviewId = source.reviewId;
+    const sentScope = scope;
+    this.clearFeedbackNotice(reviewId);
     this.handoffs = { ...this.handoffs, [reviewId]: { state: "preparing" } };
+    this.handoffKeys = { ...this.handoffKeys, [reviewId]: commentScopeKey(sentScope) };
     try {
       const prepared = await api.prepareReviewFeedback({
         reviewId: source.reviewId,
@@ -409,11 +455,12 @@ export class ReviewActions {
       // 记下这次成功准备的意见签名：之后新增或改过的意见才算「未送回」。
       recordPreparedComments(scope, sentSignature);
       this.handoffs = { ...this.handoffs, [reviewId]: { state: "prepared", feedbackId: prepared.feedbackId, commentCount: prepared.commentCount } };
-      this.feedbackNotice = "已准备 " + prepared.commentCount + " 条意见（批次 " + prepared.feedbackId.slice(0, 8) + "）。到 Cliora 里确认预览后再发送，这里没有发送任何内容。";
-      host.notice(this.feedbackNotice);
+      const text = "已准备 " + prepared.commentCount + " 条意见（批次 " + prepared.feedbackId.slice(0, 8) + "）。到 Cliora 里确认预览后再发送，这里没有发送任何内容。";
+      this.setFeedbackNotice(sentScope, text);
+      host.notice(text);
     } catch (error) {
       // 失败不打开 cliora：意见、原任务与所有草稿都保留，用户可以重新准备。
-      this.feedbackNotice = "这批意见没有准备好，Cliora 没有被唤起。意见仍保留，可以再试一次。";
+      this.setFeedbackNotice(sentScope, "这批意见没有准备好，Cliora 没有被唤起。意见仍保留，可以再试一次。");
       this.handoffs = { ...this.handoffs, [reviewId]: { state: "failed", message: normalizeError(error).message } };
       this.noteSourceIssue(reviewId, error);
       host.showError(error);

@@ -2,6 +2,7 @@
 
 本记录只收实机结果：已安装的 Twiglane 候选构建、已安装的 Cliora、本机真实 Git 仓库，并用系统截图留证。mock、单元测试和“构建成功”都不能替代这里的任何结论。T6 的设计 mock 截图在 `ui/`，与本文件无关。
 
+- 第四轮（T7-A4，2026-11-26 08:38–08:52 本地 / UTC 00:38Z–00:52Z）：修复第三轮评审确认的 3 个 Twiglane 缺陷后，用新构建的候选在真实 Cliora ↔ 真实 Twiglane 之间复测这 3 项，并补上两处证据缺口（意见编辑器展开态、来源菜单意见进度）。结果见下文“第四轮：修复后复测”，截图为 `real/a4-*.png`。
 - 第三轮（T7-A3，2026-11-26 07:56–08:18 本地 / UTC 2026-11-25T23:56Z–2026-11-26T00:18Z）：屏幕已解锁，有截图和辅助功能权限，由无人值守 agent 用系统级鼠标/键盘事件实际操作 Twiglane 与 Cliora 界面。截图在 `real/`。
 - 第一、二轮（T7-A1/A2，屏幕锁定）只验证了深链接收和 Git 安全，没有截图；结论见文末“历史记录”，已被本轮复测覆盖。
 
@@ -23,11 +24,68 @@
 
 R8“深链失败时不展示伪成功”的界面部分，本轮实机确认：所有无效链接都只出现本地错误提示，当前来源和工作台不变；用户取消时 Twiglane 回送 rejected，Cliora 显示红色“没有打开这个工作区”，没有出现“已打开/可以开始审查”。
 
-本轮发现 2 个 Twiglane 侧疑似缺陷（不影响交接/返回声明的正确性）和 3 条 Cliora 侧观察，见“发现的问题”。本轮没有改动任何源码。
+第三轮发现了 2 个 Twiglane 侧疑似缺陷（不影响交接/返回声明的正确性）和 3 条 Cliora 侧观察，见“发现的问题”。评审另把“路径不存在时直接显示 OS 诊断”定为缺陷。**这 3 项已在第四轮（T7-A4）修复，并在实机复测通过**，见“第四轮：修复后复测”。
 
 **限制**：只在 macOS 27.0 arm64 实测；Windows/Linux 未运行；校验器要求的 14 个场景没有全部实机完成，`docs/verification/cliora-integration.json` 仍是 2026-11-07 的 Windows 历史记录，不代表本候选。
 
-## 环境
+## 第四轮：修复后复测（T7-A4）
+
+### 修复内容（源码）
+
+| 缺陷 | 修复 |
+|---|---|
+| 交接提示跨来源、跨范围残留（R6/R7） | `src/lib/review-actions.svelte.ts`：“已准备…/没有准备好…”提示改为按 reviewId 保存，并记录产生时的意见范围键（`commentScopeKey`）；交接状态也记录范围键。`App.svelte` 只显示当前来源、当前范围的提示（`feedbackNoticeFor`）；完成栏只在同一范围里显示“已准备…等待确认”（`handoffIn`）。范围前进后，旧批次号只在详情中说明“不属于当前批次，是否发送以 Cliora 预览为准”。`ReviewWorkbench.svelte` 中“已添加意见…”这类就地反馈在范围键变化时收起。 |
+| 返回后完成栏工作区状态冻结（R6） | `App.svelte` 的完成栏始终使用实时 `reviewWorktree`；返回时的快照通过 `review-completion.ts` 新增的可选字段 `returnedWorktree` 只放进详情，标为“上次返回时…（以 Cliora 复核为准；上面显示的是当前工作区）”。 |
+| 无效路径提示直接带出 OS 诊断、没有恢复动作（R1/R7） | 新增 `src/lib/cliora-link-errors.ts`：`path_unreadable`/`path_missing`/`not_directory`/`invalid_path` 映射为用户语言原因，并给出“请回到 Cliora 原会话，确认工作区还在后重新发起审查”；原始诊断只放在提示条的可折叠“详情”里（`App.svelte` 的 `showClioraLinkError`、`components.css` 的 `.toast-detail`）。原生校验、错误码和 rejected 原因（`invalid_path`）都没有改动，Rust 未修改。 |
+
+回归测试：`tests/cliora-integration.spec.ts`（范围前进后提示收起；返回后再提交，完成栏显示实时计数；路径不存在的提示与详情）、`tests/review-inline-comments.spec.ts`（A 准备后切到 B 不显示 A 的提示；范围前进；新增意见收起提示）、`tests/review-completion.spec.ts`、`tests/cliora-link-errors.spec.ts`。改动前这 3 个集成用例都失败，改动后全部通过。`npm run check`（0 错误）、`npm test`（83 个文件、1967 个用例通过）、`npm run build` 都已通过。
+
+### 复测环境
+
+- 平台：macOS 27.0 arm64，已解锁的图形会话。08:34 本地检查时屏幕仍锁定（`CGSSessionScreenIsLocked=1`），08:37 检查时已解锁，随即开始复测。
+- Twiglane 候选：在工作树上（HEAD `0f1c140` 加上本轮未提交的修复）执行 `npm run tauri build -- --bundles app`，生成 `~/.cache/cargo-target/release/bundle/macos/Twiglane.app`（0.3.49，可执行文件 SHA-256 `24f51d332e43ba0a759ff064b0f88e88eb5a695cc6122108b27815925b156e25`）。命令退出码为 1，原因与前几轮相同：.app 生成之后的 updater 签名步骤缺少 `TAURI_SIGNING_PRIVATE_KEY`，不影响 .app。
+- Cliora：`/Applications/Cliora.app` 0.4.183，全程运行，没有退出或重启。为复测新建了两个 Codex“普通”模式会话（`repo2`、`repo`），没有给初始提示词，Codex 一直停在 “Trust this folder?” 提示，没有调用模型。用户的“π Twiglane”和“OC | Native Rust k…”两个会话没有被输入任何内容。
+- 仓库：沿用 `/private/tmp/t7-dualend.O4tW/`。`repo2` 起点 `8f72d4e`；`repo` 起点 `685ea2a`，会话开始后给 `feature.txt` 追加了一行。
+- **一次作废的尝试**：00:40:56Z，第一次从 Cliora `repo2` 发起时，尽管刚执行过 `lsregister -u /Applications/Twiglane.app`，系统仍启动了 `/Applications` 中的 0.3.49 正式版（pid 25236），因为大约 20 秒内它又被重新注册。正式版打开了 repo2，并且很可能回送了 accepted；该进程随即被退出，写入的 state.json 最后按备份还原。这次结果**不计入结论**。之后的做法是：先用 `open -n` 手动启动候选（pid 25354），再从 Cliora 发起，链接都交给正在运行的候选处理。因此本轮的“冷启动”只是“候选已运行、尚未打开任何来源”，**不是**由链接拉起进程的冷启动；冷启动结论仍以第三轮 S1 为准。
+
+### R1 交接提示按来源与范围隔离 —— 通过
+
+1. 00:41:38Z：在 Cliora `repo2` 会话中点击“在 Twiglane 中审查”，候选进入 repo2 审查工作台（1 个文件 `f.txt` +3）。
+2. 在新增第 4 行点击意见按钮，编辑器在该行下方展开：显示“f.txt 新增第 4 行”、引用 `t7a4 cold-start line`，以及提示“⌘Enter 保存 · Esc 取消 · 只存在本窗口，不会自动发送”。截图：`real/a4-01-inline-editor-expanded.png`（补上第三轮 P3 缺口：展开态的实机截图）。
+3. 输入“T7-A4 实机意见：这一行请改成小写。”后按 ⌘↩，界面提示“已添加意见：f.txt（新增第 4 行）。只存在本窗口，没有发送。”。00:42:37Z 点击“送回 1 条意见”，顶部显示“已准备 1 条意见（批次 049cb3ac）。到 Cliora 里确认预览后再发送…”，完成栏显示“已准备 1 条意见，已打开 Cliora 等待确认”。Cliora 原会话出现“Twiglane 审阅意见”预览（`f.txt:4 add` 及正文），只提供“复制意见 / 关闭预览”。截图：`real/a4-02-repo2-feedback-prepared.png`、`real/a4-02-cliora-feedback-preview.png`。
+4. 00:43:16Z：在 Cliora `repo` 会话中发起（新的 reviewId）。候选 8 秒内切到 repo，顶部**没有**出现 repo2 的“已准备…”提示，完成栏也没有交接状态项，只有“没有待送回的意见 · 本次没有提交或合入 · 工作区还有 2 个未提交的改动”。截图：`real/a4-03-hot-start-repo-no-foreign-notice.png`（第三轮 `02-hot-start-twiglane-repo2-8s.png` 中的跨来源残留已经消失）。
+5. 来源菜单中，repo2 一行显示“较早发起 · 2 分钟前 · 尚未审阅 · 1 条意见”，说明意见进度会按来源显示。截图：`real/a4-04-source-menu-comment-progress.png`（补上第三轮 P3 缺口。第三轮菜单只显示“尚未审阅”，是因为当时 repo 那条意见已经因提交而失效，不再计入当前批次）。
+6. 从来源菜单切回 repo2：顶部重新显示 repo2 自己的“已准备 1 条意见（批次 049cb3ac）…”，完成栏仍是“已准备…等待确认”，因为范围没有变化。截图：`real/a4-05-switch-back-repo2-own-notice.png`。
+7. 00:44:27Z：在终端用 `git commit` 提交 `f.txt`（HEAD `d989c54`），并新建两个未跟踪文件，让范围前进。候选重新读取后：顶部的“已准备…”被“任务范围（起点、HEAD 或工作区）已经变化，这批意见不会自动对应到新行号。”取代；“已添加意见…”没有残留；完成栏显示“1 条意见已失效，不会送回”，不再显示“等待确认”；“详情”中出现“范围变化前准备的批次 049cb3ac 不属于当前批次；是否发送以 Cliora 预览为准。”。截图：`real/a4-06-scope-advanced-notice-cleared.png`、`real/a4-06-scope-advanced-details.png`（第三轮 `05-commit-twiglane-before-return.png` 中的矛盾文案已经消失）。
+   - 说明：这次提交在终端完成，不是 Twiglane 发起的，所以完成栏的 Git 结果仍是“本次没有提交或合入”，这是既有设计（只有 Twiglane 自己完成的提交/合入才作为结果声明）。
+
+### R2 返回后完成栏显示实时工作区 —— 通过
+
+1. 00:45:23Z：点击“返回 Cliora”。Twiglane 显示“已返回 cliora：本次没有提交或合入，工作区还有 2 个未提交的改动。”，完成栏显示“已返回 Cliora（第 1 次）”。详情中新增“上次返回时工作区有 2 个未提交的改动（以 Cliora 复核为准；上面显示的是当前工作区）。”。截图：`real/a4-07-returned-first.png`。
+2. 00:47:09Z：在 Twiglane 的“改动”视图中暂存 `u1.txt`，输入说明 `test: T7-A4 commit after return` 后点击“提交到本地”。`git rev-parse HEAD` 为 `7a389e3f59d9ce579b1f521b0801b049b7a9c40e`，`git status --porcelain` 只剩 `?? u2.txt`。
+3. 回到审查视图后，完成栏立即显示“已提交 7a389e3（待复核） · **工作区还有 1 个未提交的改动**”。详情仍保留“上次返回时工作区有 2 个未提交的改动…”，两者分开说明，不再把返回时的快照当成当前状态。截图：`real/a4-08-commit-after-return-live-worktree.png`（第三轮这里冻结显示为 3）。
+4. 00:47:42Z：再次返回。Twiglane 显示“已返回 cliora：提交或合入结果以待复核声明发送，工作区还有 1 个未提交的改动。”，完成栏显示“第 2 次”；Cliora 横幅和菜单显示“Twiglane 已提交 7a389e3；工作区仍有 1 个未提交文件。”，菜单头为 `repo2 · 7a389e3`，与真实 HEAD 和未提交文件数一致。截图：`real/a4-09-second-return-twiglane.png`、`real/a4-09-second-return-cliora-banner.png`、`real/a4-09-second-return-cliora-menu.png`。
+
+### R3 无效路径的用户语言提示 —— 通过
+
+- 00:49:07Z：候选停在 repo2 审查工作台时，用 `open` 送入 `twiglane://review?v=2&reviewId=<新 UUID>&sessionId=<新 UUID>&worktreePath=/private/tmp/t7-dualend.O4tW/missing`（目录不存在）。
+- 错误提示为“审查链接里的工作区在这台电脑上找不到或无法读取，没有打开任何仓库，也没有改动文件。请回到 Cliora 原会话，确认工作区还在后重新发起审查。”，提示中**没有**出现 OS 诊断，并提供默认折叠的“▸ 详情”。展开后才显示原始诊断“无法解析路径，未修改文件。No such file or directory (os error 2)”。截图：`real/a4-10-invalid-missing-collapsed.png`、`real/a4-10-invalid-missing-details.png`。
+- 工作台和当前来源没有变化，进程仍只有候选 pid 25354；repo 仍为 `685ea2a`，repo2 仍为 `7a389e3`，没有切换仓库，也没有回退主检出。
+- 与第三轮一样，Cliora 当前会话出现横幅“原 cliora 审查会话已失效，无法返回。”。这是 Twiglane 按协议对这条手工链接回送 rejected（原因仍是 `invalid_path`）后，Cliora 把未知会话事件展示出来的结果，属于 Cliora 侧文案，已手动关闭。
+
+### 清理与恢复（第四轮）
+
+- 在 Cliora 中关闭本轮新建的 `repo2`、`repo` 会话（结束 → 结束进程），并关闭两条横幅。Cliora 最后选中的是测试前选中的“OC | Native Rust k…”会话；用户的两个会话没有被输入任何内容。
+- 00:52:36Z：退出候选。将 `state.json` 按测试前备份还原，SHA-256 为 `ad6a8c47b365bbd1add15521724d47e28e11871b7e8c115824de405cc60550ce`，与测试前一致。执行 `lsregister -f /Applications/Twiglane.app`，并执行 `lsregister -u` 注销候选；确认 `twiglane://` 处理程序只剩 `/Applications/Twiglane.app`。随后重新启动 `/Applications/Twiglane.app`（pid 29339），恢复测试前正在运行的正式版。剪贴板测试前为空，本轮没有使用。
+- 本轮在 `repo2` 中产生的提交 `d989c54`、`7a389e3`、未跟踪文件 `u2.txt`，以及 `repo/feature.txt` 的追加行，都只存在于临时目录中。
+
+### 第四轮仍未覆盖
+
+- 由链接拉起进程的冷启动没有在修复后的候选上复测（原因见上文“作废的尝试”）；冷启动结论仍以第三轮 S1 为准。本轮修复没有改动深链接收与打开路径，只改动了失败提示的展示。
+- 合入后返回没有在修复后的候选上复测；第三轮 S6 已覆盖。本轮修复只改变完成栏的工作区取值和提示范围，不涉及合入。
+- `cliora-integration.json` 与校验器的结论不变（见下文）；Windows、Linux 未运行。
+
+## 环境（第三轮）
 
 | 项 | 值 |
 |---|---|
@@ -121,16 +179,16 @@ R8“深链失败时不展示伪成功”的界面部分，本轮实机确认：
 - 这些链接是手工构造的，Cliora 不认识其中的 reviewId，因此无法在 Cliora 侧把它们对应到“rejected 回执”。在 Cliora 中，由会话发起的路径/版本类无效来源无法自然产生：Cliora 会先在本地校验目录。本轮 Cliora 侧唯一真实观察到的 rejected 来自 S2b 的“用户取消”。
 - 截图：`real/07-invalid-v1.png`、`real/07-invalid-relative.png`、`real/07-invalid-missing.png`、`real/07-invalid-notrepo.png`、`real/07-invalid-badbaseline.png`
 
-## 发现的问题（未改源码）
+## 发现的问题（第三轮记录；3 项缺陷已在第四轮修复并复测）
 
 ### Twiglane 侧疑似缺陷
 
-1. **上一来源的“已准备意见”提示泄漏到新来源。**
+1. **上一来源的“已准备意见”提示泄漏到新来源。**（第四轮已修复并复测：R1）
    - 复现：在来源 A（repo）中送回 1 条意见，得到“已准备 1 条意见（批次 05d1396d）…”；再从 Cliora 对另一个仓库发起来源 B（repo2）并热启动切换。
    - 现象：B 的审查工作台顶部仍然显示 A 的“已准备 1 条意见（批次 05d1396d）。到 Cliora 里确认预览后再发送…”，而 B 的“有意见”为 0。见 `real/02-hot-start-twiglane-repo2-8s.png`、`real/07-*.png`。
    - 预期：这类按来源生成的交接提示只在对应来源中显示（R7 来源隔离）。
    - 影响：只是展示，不会把 A 的意见发给 B。但用户可能误以为 B 也有待确认的意见。
-2. **提交后到返回之前，完成栏的工作区状态不是最新的。**
+2. **提交后到返回之前，完成栏的工作区状态不是最新的。**（第四轮已修复并复测：R2）
    - 复现：S4 普通返回后（当时工作区有 3 个未提交改动），在 Twiglane 中提交 2 个文件，再回到审查视图。
    - 现象：真实未提交项只剩 1 个，顶部“改动 1”也正确，但完成栏仍显示“工作区还有 3 个未提交的改动”，直到再次“返回 Cliora”后才变成 1。见 `real/05-commit-twiglane-before-return.png`。
    - 预期：这一项要么反映当前工作区，要么明确标注为“上次返回时”的状态。
@@ -138,7 +196,7 @@ R8“深链失败时不展示伪成功”的界面部分，本轮实机确认：
 
 ### 其他观察（非缺陷或不在本仓库范围内）
 
-- 路径不存在时，提示里直接带出英文 OS 错误“No such file or directory (os error 2)”，和其他用例的中文提示不一致（UX 细节）。
+- 路径不存在时，提示里直接带出英文 OS 错误“No such file or directory (os error 2)”，和其他用例的中文提示不一致。评审将其定为缺陷（R1/R7），已在第四轮修复，见“R3 无效路径的用户语言提示”。
 - Cliora：用户在 Twiglane 中取消（Twiglane 回送 `open_failed`）时，Cliora 显示的是“系统没有接受打开请求”，并不准确，因为实际原因是用户在 Twiglane 中取消。这是 Cliora 的文案，不在本仓库范围内。
 - Cliora：S7 手工链接之后，Cliora 当前会话出现横幅“原 cliora 审查会话已失效，无法返回”。推测这是 Twiglane 对不存在路径、非仓库目录（格式合法的 UUID）回送的 rejected，被 Cliora 当成未知会话事件展示出来。这一点未进一步验证，也不在本仓库范围内。
 - 作废的路由尝试（见“链接路由”）说明：本机同时装有正式版和候选时，Cliora 交给系统的链接会优先打开 `/Applications` 中的正式版。这是测试环境问题，不是候选的结论。

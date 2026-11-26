@@ -250,3 +250,28 @@ describe("reviewCompletion 禁止文案（全组合）", () => {
     expect(checked).toBe(3 * 2 * 4 * 4 * 3 * 3 * 2);
   });
 });
+
+describe("实时工作区与上次返回的快照", () => {
+  it("返回后显示实时工作区；返回时的快照只在详情里标为「上次返回时」", () => {
+    const model = reviewCompletion(input({
+      worktree: { state: "dirty", count: 1 },
+      returnState: { state: "returned", revision: 1 },
+      returnedWorktree: { state: "dirty", count: 3 },
+    }));
+    expect(labels(model)).toContain("工作区还有 1 个未提交的改动");
+    expect(labels(model)).not.toContain("工作区还有 3 个未提交的改动");
+    expect(model.detailItems.some((item) => item.startsWith("上次返回时工作区有 3 个未提交的改动"))).toBe(true);
+  });
+
+  it("没有返回过时不出现「上次返回时」", () => {
+    const model = reviewCompletion(input({ returnedWorktree: { state: "clean" } }));
+    expect(model.detailItems.some((item) => item.includes("上次返回时"))).toBe(false);
+  });
+
+  it("范围前进前准备的批次只进详情，不出现等待确认", () => {
+    const model = reviewCompletion(input({ staleCount: 1, earlierFeedbackId: "05d1396d-aaaa" }));
+    expect(labels(model).some((label) => label.includes("等待确认"))).toBe(false);
+    expect(model.detailItems).toContain("范围变化前准备的批次 05d1396d 不属于当前批次；是否发送以 Cliora 预览为准。");
+    for (const text of completionTexts(model)) for (const word of FORBIDDEN) expect(text).not.toContain(word);
+  });
+});

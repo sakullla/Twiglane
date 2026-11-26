@@ -1054,6 +1054,9 @@
 .toast.warn { box-shadow: inset 3px 0 0 var(--warning), var(--shadow-lg); }
 .toast.warn .toast-icon { color: var(--warning); }
 .toast-text { flex: 1; min-width: 0; word-break: break-word; white-space: pre-line; padding-top: 1px; }
+.toast-detail { margin-top: var(--space-4); color: var(--fg-muted); font-size: var(--text-xs); white-space: normal; }
+.toast-detail summary { cursor: pointer; width: fit-content; }
+.toast-detail-text { display: block; margin-top: 2px; font-family: var(--mono); overflow-wrap: anywhere; }
 
 /* ---------- modal ---------- */
 .modal-backdrop { position: fixed; inset: 0; z-index: var(--z-modal); display: grid; place-items: center; padding: var(--space-24); background: var(--overlay); backdrop-filter: blur(8px) saturate(1.2); animation: fade var(--duration-fast) var(--ease-out); }

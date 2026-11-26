@@ -43,8 +43,13 @@ export interface ReviewCompletionInput {
   staleCount: number;
   handoff: ReviewHandoffState;
   gitResult: ReviewGitResult;
+  /** 当前工作区的实时状态：返回之后仍按真实工作区显示，不冻结成返回时的快照。 */
   worktree: ReviewWorktreeState;
   returnState: ReviewReturnState;
+  /** 最近一次返回时带给 Cliora 的工作区状态：只在详情里作为「上次返回时」的说明。 */
+  returnedWorktree?: ReviewWorktreeState | null;
+  /** 范围前进（提交、合入、内容改写）之前已经准备好的交接批次号：只在详情里说明，不算当前交接。 */
+  earlierFeedbackId?: string | null;
   writeLocked: boolean;
   writeLockedReason?: string | null;
   /** 当前能否准备送回（例如范围已读取、代次未落后）。 */
@@ -91,6 +96,16 @@ function gitItem(result: ReviewGitResult): ReviewCompletionStatusItem {
   if (result.kind === "committed") return { id: "git", label: `已提交 ${shortOid(result.oid)}（待复核）`, tone: "neutral" };
   if (result.kind === "merged") return { id: "git", label: `已合入 ${shortOid(result.oid)}（待复核）`, tone: "neutral" };
   return { id: "git", label: "本次没有提交或合入", tone: "neutral" };
+}
+
+function returnedWorktreeText(worktree: ReviewWorktreeState): string {
+  if (worktree.state === "clean") return "上次返回时工作区没有未提交的改动";
+  if (worktree.state === "dirty") {
+    return worktree.count !== null && worktree.count > 0
+      ? `上次返回时工作区有 ${worktree.count} 个未提交的改动`
+      : "上次返回时工作区有未提交的改动";
+  }
+  return "上次返回时没有读到工作区状态";
 }
 
 function worktreeItem(worktree: ReviewWorktreeState): ReviewCompletionStatusItem {
@@ -198,7 +213,13 @@ export function reviewCompletion(input: ReviewCompletionInput): ReviewCompletion
   const detailItems: string[] = [COMPLETION_CONFIRM_NOTE, COMPLETION_VERIFY_NOTE];
   if (input.handoff.state === "prepared") detailItems.push(`交接批次 ${input.handoff.feedbackId.slice(0, 8)}，只在 Cliora 预览里确认后才会发送。`);
   if (input.handoff.state === "failed" && input.handoff.message) detailItems.push(`准备失败：${input.handoff.message}`);
+  if (input.earlierFeedbackId) {
+    detailItems.push(`范围变化前准备的批次 ${input.earlierFeedbackId.slice(0, 8)} 不属于当前批次；是否发送以 Cliora 预览为准。`);
+  }
   if (input.returnState.state === "failed" && input.returnState.message) detailItems.push(`返回失败：${input.returnState.message}`);
+  if (input.returnState.state === "returned" && input.returnedWorktree) {
+    detailItems.push(`${returnedWorktreeText(input.returnedWorktree)}（以 Cliora 复核为准；上面显示的是当前工作区）。`);
+  }
   if (remote) detailItems.push(REMOTE_FEEDBACK_REASON);
   if (input.gitResult.kind !== "none") detailItems.push(`完整提交 ${input.gitResult.oid}`);
   if (lockReason) detailItems.push(lockReason);

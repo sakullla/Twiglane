@@ -666,6 +666,67 @@ describe("cliora v2 审查链接", () => {
     expect(mocks.api.commitChanges).not.toHaveBeenCalled();
   });
 
+  it("返回后再提交：完成栏显示实时工作区计数，返回时的快照只在详情里标为「上次返回时」", async () => {
+    const dirty3: StatusSnapshot = {
+      generation: 4,
+      branch,
+      files: [changes[0], { ...changes[0], path: "src/b.ts" }, { ...changes[0], path: "src/c.ts" }],
+    };
+    deepLink.getCurrent.mockResolvedValue([URL_A]);
+    mocks.api.openRepository.mockResolvedValue({ ...openedAt(WORKTREE), snapshot: dirty3 });
+    mocks.api.refreshStatus.mockResolvedValue(dirty3);
+    mocks.api.clioraReviewReturn.mockResolvedValue({ worktreeState: "dirty", uncommitted: 3 });
+    await mountShell();
+    await waitFor(() => expect(completionAction("return")).toBeTruthy());
+    const worktreeItem = () => document.querySelector('.review-completion [data-status="worktree"]')?.textContent ?? "";
+    await waitFor(() => expect(worktreeItem()).toBe("工作区还有 3 个未提交的改动"));
+
+    await clickReturn();
+    await waitFor(() => expect(document.querySelector('.review-completion [data-status="return"]')?.textContent).toContain("已返回 Cliora（第 1 次）"));
+
+    // 返回之后在 Twiglane 里提交了两个文件：工作区只剩 1 个未提交改动。
+    const dirty1: StatusSnapshot = { generation: 5, branch, files: [changes[0]] };
+    mocks.api.refreshStatus.mockResolvedValue(dirty1);
+    const changed = mocks.listenEvent.mock.calls.find(([name]) => name === "repo-changed")![1] as (event: {
+      path: string;
+      generation: number;
+      degraded: boolean;
+    }) => void;
+    changed({ path: WORKTREE, generation: 5, degraded: false });
+
+    await waitFor(() => expect(worktreeItem()).toBe("工作区还有 1 个未提交的改动"), { timeout: 8000 });
+    expect(document.querySelector(".review-completion")?.textContent).not.toContain("工作区还有 3 个未提交的改动");
+    await fireEvent.click(document.querySelector<HTMLButtonElement>(".review-completion-more")!);
+    await waitFor(() => expect(document.querySelector("#review-completion-details")?.textContent).toContain("上次返回时工作区有 3 个未提交的改动"));
+    // 返回本身不写 Git。
+    expect(mocks.api.commitChanges).not.toHaveBeenCalled();
+  });
+
+  it("路径不存在：提示先说原因与「回到 Cliora 重新发起」，原始 OS 诊断只在详情里", async () => {
+    deepLink.getCurrent.mockResolvedValue([URL_A]);
+    const raw = "无法解析路径，未修改文件。No such file or directory (os error 2)";
+    mocks.api.openRepository.mockRejectedValue({ code: "path_unreadable", message: raw });
+    await mountShell();
+    await waitFor(() => expect(mocks.api.clioraReviewReceipt).toHaveBeenCalledWith(REVIEW_A, SESSION_A, false, "invalid_path"));
+
+    const toast = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>(".toast.error");
+      if (!found) throw new Error("没有错误提示");
+      return found;
+    });
+    const text = toast.querySelector(".toast-text")!;
+    const main = [...text.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE).map((node) => node.textContent).join("");
+    expect(main).toContain("找不到或无法读取");
+    expect(main).toContain("回到 Cliora 原会话");
+    expect(main).not.toContain("os error");
+    const details = toast.querySelector("details.toast-detail")!;
+    expect(details).toBeTruthy();
+    expect(details.hasAttribute("open")).toBe(false);
+    expect(details.textContent).toContain("No such file or directory (os error 2)");
+    expect(document.querySelector('[data-view="review"]')).toBeNull();
+    expect(mocks.api.commitChanges).not.toHaveBeenCalled();
+  });
+
   it("前端快照不能替后端声明：本地看着干净，后端读到 dirty 时按 dirty 提示", async () => {
     const clean: StatusSnapshot = { generation: 4, branch, files: [] };
     deepLink.getCurrent.mockResolvedValue([URL_A]);
@@ -1432,6 +1493,38 @@ describe("feedback-v1 准备送回", () => {
     expect(document.querySelector('.review-completion [data-status="stale"]')?.textContent).toContain("1 条意见已失效，不会送回");
     expect(mocks.api.prepareReviewFeedback).not.toHaveBeenCalled();
     expect(mocks.api.terminalWrite).not.toHaveBeenCalled();
+  });
+
+  it("范围前进后：已准备与已添加意见的提示收起，完成栏不再说等待确认，旧批次只在详情里说明", async () => {
+    mocks.api.prepareReviewFeedback.mockResolvedValueOnce({
+      feedbackId: "05d1396d-4f30-4121-8394-a5b6c7d8e9f1",
+      digest: "a".repeat(64),
+      commentCount: 1,
+      url: "cliora://review-feedback?v=1",
+    });
+    await openTaskWithDiff();
+    await composeComment("准备之后范围会前进。");
+    await waitFor(() => expect(document.querySelector(".review-comment-feedback")?.textContent).toContain("已添加意见"));
+    await fireEvent.click(completionAction("feedback")!);
+    await waitFor(() => expect(document.querySelector(".review-comment-notice")?.textContent).toContain("已准备 1 条意见（批次 05d1396d）"));
+    await waitFor(() => expect(document.querySelector('.review-completion [data-status="handoff"]')?.textContent).toContain("等待确认"));
+
+    // 提交之后范围前进：HEAD 变了，这批意见整体失效。
+    mocks.api.refreshStatus.mockResolvedValue({ ...snapshot, generation: 5 });
+    mocks.api.taskReview.mockResolvedValue({ ...taskFor(BASELINE), generation: 5 });
+    const changed = mocks.listenEvent.mock.calls.find(([name]) => name === "repo-changed")![1] as (event: {
+      path: string;
+      generation: number;
+      degraded: boolean;
+    }) => void;
+    changed({ path: WORKTREE, generation: 5, degraded: false });
+
+    await waitFor(() => expect(document.querySelector('.review-completion [data-status="stale"]')?.textContent).toContain("1 条意见已失效，不会送回"), { timeout: 8000 });
+    expect(document.querySelector(".review-comment-notice")?.textContent ?? "").not.toContain("已准备");
+    expect(document.querySelector(".review-comment-feedback")?.textContent ?? "").not.toContain("已添加意见");
+    expect(document.querySelector('.review-completion [data-status="handoff"]')).toBeNull();
+    await fireEvent.click(document.querySelector<HTMLButtonElement>(".review-completion-more")!);
+    await waitFor(() => expect(document.querySelector("#review-completion-details")?.textContent).toContain("范围变化前准备的批次 05d1396d"));
   });
 
   it("准备失败时不唤起 cliora，意见与提示都保留并可以再试", async () => {

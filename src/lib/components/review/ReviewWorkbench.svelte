@@ -177,6 +177,8 @@
     commentKeys?: ReadonlySet<string>;
     /** 上一条说明（意见已失效或这批已经准备好）：由外壳决定，这里只如实展示。 */
     commentNotice?: string | null;
+    /** 当前意见范围的身份键：范围前进（提交、合入、内容改写）后，上一次意见动作的就地反馈随之收起。 */
+    commentScopeKey?: string | null;
     onAddComment?: (anchor: ReviewCommentAnchor, body: string) => void;
     onEditComment?: (id: string, body: string) => void;
     onDeleteComment?: (id: string) => void;
@@ -246,6 +248,7 @@
     comments = [],
     commentKeys = new Set<string>(),
     commentNotice = null,
+    commentScopeKey = null,
     onAddComment,
     onEditComment,
     onDeleteComment,
@@ -715,6 +718,16 @@
   let threadAnchor = $state<ReviewCommentAnchor | null>(null);
   /** 上一次意见动作的结果（添加、保存、删除、取消）：就地给读屏与视觉一个反馈。 */
   let commentFeedback = $state<string | null>(null);
+  // 意见动作反馈只属于它发生时的那批意见：范围前进后那批已失效，「已添加意见」不能继续常驻。
+  let feedbackScopeKey: string | null = null;
+  $effect(() => {
+    const key = commentScopeKey;
+    untrack(() => {
+      if (key === feedbackScopeKey) return;
+      feedbackScopeKey = key;
+      commentFeedback = null;
+    });
+  });
   /** 「在抽屉中定位」的目标卡片。 */
   let drawerFocus = $state<string | null>(null);
   /** 等待确认的「换掉草稿」动作。 */

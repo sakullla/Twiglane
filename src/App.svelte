@@ -34,6 +34,7 @@
   import {
     commentDraftCount,
     commentLines,
+    commentScopeKey,
     commentsIn,
     staleBatches as staleCommentBatches,
     unsentCommentCount,
@@ -53,6 +54,7 @@
   import { recordRevocations } from "./lib/review-workbench.svelte";
   import { fileEditor, type EditContext } from "./lib/file-editor.svelte";
   import { normalizeError } from "./lib/errors";
+  import { clioraLinkFailureNotice } from "./lib/cliora-link-errors";
   import { showMergeAbort } from "./lib/resolve";
   import { clampWidth, FALLBACK_POLL_MS, fitPaneWidth, shouldPoll } from "./lib/layout";
   import {
@@ -377,6 +379,8 @@
   /** 同一条提示条既显示失败也显示"部分完成"：只有前者是错误色。 */
   let bannerTone = $state<"error" | "warn">("error");
   let banner = $state<string | null>(null);
+  /** 错误提示的原始诊断：只挂在产生它的那条提示上，提示被换掉后不再显示。 */
+  let bannerDetail = $state<{ banner: string; text: string } | null>(null);
   let live = $state("正在准备 Twiglane");
   let badgeNames = $derived.by(() => {
     const names = recent.map((item) => item.name);
@@ -891,11 +895,12 @@
       unsentCount: unsentCommentCount(commentScope),
       draftCount: reviewId ? commentDraftCount(reviewId) : 0,
       staleCount: staleCommentCount,
-      handoff: reviewActions.feedbackPreparing && reviewId ? { state: "preparing" } : reviewActions.handoffOf(reviewId),
+      handoff: reviewActions.feedbackPreparing && reviewId ? { state: "preparing" } : reviewActions.handoffIn(reviewId, commentScope),
+      earlierFeedbackId: reviewActions.earlierHandoff(reviewId, commentScope),
       gitResult: result ? { kind: result.outcome, oid: result.headOid } : { kind: "none" },
-      worktree: reviewActions.returnOf(reviewId).state === "returned" && reviewId && reviewActions.returnedWorktree[reviewId]
-        ? reviewActions.returnedWorktree[reviewId]
-        : reviewWorktree,
+      // 始终显示实时工作区：返回后再提交或改动，计数随之更新；返回时的快照只进详情。
+      worktree: reviewWorktree,
+      returnedWorktree: reviewId ? (reviewActions.returnedWorktree[reviewId] ?? null) : null,
       returnState: reviewActions.returning && reviewId ? { state: "returning" } : reviewActions.returnOf(reviewId),
       writeLocked,
       writeLockedReason: BUSY_COMPLETION_REASON,
@@ -1354,6 +1359,21 @@
     banner = normalized.message;
     bannerTone = "error";
     live = normalized.message;
+  }
+
+  /** 审查链接失败：路径类错误先说原因与恢复动作，原始诊断收进详情；其他错误走通用提示。 */
+  function showClioraLinkError(error: unknown) {
+    const failure = normalizeError(error);
+    const friendly = clioraLinkFailureNotice(failure);
+    if (!friendly) {
+      showError(error);
+      return;
+    }
+    phaseNote = null;
+    banner = friendly.message;
+    bannerTone = "error";
+    bannerDetail = friendly.detail ? { banner: friendly.message, text: friendly.detail } : null;
+    live = friendly.message;
   }
 
   /**
@@ -4116,7 +4136,7 @@
       live = failure.code === "source_capacity" ? "审查来源已满，已保留的来源未被移除。请明确关闭一项后重新发起。"
         : failure.code === "source_expired" ? "此审查来源已失效，请从原 Cliora 会话重新发起。"
         : "cliora 审查链接无效，未打开任何仓库，仓库没有改动。";
-      showError(error);
+      showClioraLinkError(error);
       return;
     }
     if (serial !== clioraLinkSerial) return;
@@ -4181,7 +4201,7 @@
         live = "已取消读取，没有写入仓库。";
         return;
       }
-      showError(error);
+      showClioraLinkError(error);
     }
   }
 
@@ -6081,7 +6101,8 @@
                 onEditFile={filesViewEnabled ? (path, line) => void editInFiles(path, line, "task") : undefined}
                 comments={taskComments}
                 commentKeys={taskCommentKeys}
-                commentNotice={commentScope ? reviewActions.feedbackNotice ?? staleCommentNotice ?? commentScopeOutdatedNotice : null}
+                commentNotice={commentScope ? reviewActions.feedbackNoticeFor(commentScope) ?? staleCommentNotice ?? commentScopeOutdatedNotice : null}
+                commentScopeKey={commentScope ? commentScopeKey(commentScope) : null}
                 onAddComment={addReviewComment}
                 onEditComment={editReviewComment}
                 onDeleteComment={deleteReviewComment}
@@ -6734,7 +6755,7 @@
   {#if banner}
     <div class="toast {bannerTone}" role={bannerTone === "error" ? "alert" : "status"}>
       <span class="toast-icon"><Icon name={bannerTone === "error" ? "alert-circle" : "alert"} size={16} /></span>
-      <span class="toast-text">{banner}</span>
+      <span class="toast-text">{banner}{#if bannerDetail && bannerDetail.banner === banner}<details class="toast-detail"><summary>详情</summary><span class="toast-detail-text">{bannerDetail.text}</span></details>{/if}</span>
       <button type="button" class="icon-btn sm" aria-label="关闭提示" onclick={() => (banner = null)}><Icon name="x" size={14} /></button>
     </div>
   {/if}

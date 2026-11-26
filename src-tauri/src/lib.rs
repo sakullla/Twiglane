@@ -48,12 +48,13 @@ use crate::git::ops::{self, Backend};
 use crate::git::runner::RealRunner;
 use crate::model::{
     AbortImpact, AmendOutcome, BatchDeleteResult, BranchState, CherryPickOutcome, CloneResult, CommitDetail,
-    CommitPushReport, CommitResult, ConflictView, DiffResponse, DiscardResult, FileHistoryPage,
-    GitInfo, HistoryPage, IgnoreOutcome, MergeComplete, MergePreview, MergeSession,
+    CommitPushReport, CommitResult, ConflictView, DiffContextSlice, DiffResponse, DiscardResult,
+    FileHistoryPage, GitInfo, HistoryPage, IgnoreOutcome, MergeComplete, MergePreview, MergeSession,
     OpenedRepository, PanelWidths, RecentRepo, RemoteState, RemoteTag, RepoChanged,
     RepositoryContentSearch, RepositoryDirectory, RepositoryEditSnapshot, RepositoryFileContent,
     RepositoryPathSearch, RepositorySearchScope, RevertOutcome,
-    StashApplyResult, StashSaveResult, StashState, StatusSnapshot, TagState, Theme, UndoResult,
+    StashApplyResult, StashDetail, StashSaveResult, StashState, StatusSnapshot, TagState, Theme,
+    UndoResult,
 };
 use crate::shutdown::Shutdown;
 use crate::state::{AppStore, PullIntegration, TerminalPrefs};
@@ -175,6 +176,7 @@ pub fn run() {
             forget_recent,
             refresh_status,
             load_diff,
+            diff_context_lines,
             file_preview,
             repository_document,
             document_resource,
@@ -200,6 +202,8 @@ pub fn run() {
             unstage_files,
             stage_hunks,
             stage_lines,
+            discard_hunks,
+            discard_lines,
             commit_changes,
             clone_repository,
             remote_state,
@@ -251,8 +255,11 @@ pub fn run() {
             revert_commits,
             checkout_commit,
             stash_state,
+            stash_detail,
+            stash_file_diff,
             save_stash,
             apply_stash,
+            pop_stash,
             delete_stash,
             merge_preview,
             start_merge,
@@ -882,6 +889,33 @@ async fn load_diff(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
+#[tauri::command(rename_all = "camelCase")]
+async fn diff_context_lines(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    relative: String,
+    original: Option<String>,
+    staged: bool,
+    start_line: u32,
+    count: u32,
+    generation: u64,
+    request_id: u64,
+) -> Result<DiffContextSlice, AppError> {
+    crate::git::changes::diff_context_lines(
+        state.inner(),
+        &path,
+        &relative,
+        original.as_deref(),
+        staged,
+        start_line,
+        count,
+        generation,
+        request_id,
+    )
+    .await
+}
+
 #[tauri::command(rename_all = "camelCase")]
 async fn stage_files(
     state: State<'_, Arc<Backend>>,
@@ -945,6 +979,60 @@ async fn stage_lines(
     request_id: u64,
 ) -> Result<StatusSnapshot, AppError> {
     crate::git::changes::stage_lines(
+        state.inner(),
+        &path,
+        &relative,
+        original.as_deref(),
+        staged,
+        &lines,
+        &snapshot,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command(rename_all = "camelCase")]
+async fn discard_hunks(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    relative: String,
+    original: Option<String>,
+    staged: bool,
+    hunks: Vec<u32>,
+    snapshot: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<StatusSnapshot, AppError> {
+    crate::git::changes::discard_hunks(
+        state.inner(),
+        &path,
+        &relative,
+        original.as_deref(),
+        staged,
+        &hunks,
+        &snapshot,
+        generation,
+        request_id,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command(rename_all = "camelCase")]
+async fn discard_lines(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    relative: String,
+    original: Option<String>,
+    staged: bool,
+    lines: Vec<crate::model::DiffLineSelection>,
+    snapshot: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<StatusSnapshot, AppError> {
+    crate::git::changes::discard_lines(
         state.inner(),
         &path,
         &relative,
@@ -2148,6 +2236,57 @@ async fn apply_stash(
     request_id: u64,
 ) -> Result<StashApplyResult, AppError> {
     crate::git::history::apply_stash(state.inner(), &path, &oid, generation, request_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn stash_detail(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    oid: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<StashDetail, AppError> {
+    crate::git::history::stash_detail(state.inner(), &path, &oid, generation, request_id).await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command(rename_all = "camelCase")]
+async fn stash_file_diff(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    oid: String,
+    relative: String,
+    original: Option<String>,
+    untracked: bool,
+    generation: u64,
+    request_id: u64,
+    offset: Option<u32>,
+    limit: Option<u32>,
+) -> Result<DiffResponse, AppError> {
+    crate::git::history::stash_file_diff(
+        state.inner(),
+        &path,
+        &oid,
+        &relative,
+        original.as_deref(),
+        untracked,
+        generation,
+        request_id,
+        offset.unwrap_or(0),
+        limit.unwrap_or(0),
+    )
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn pop_stash(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    oid: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<StashApplyResult, AppError> {
+    crate::git::history::pop_stash(state.inner(), &path, &oid, generation, request_id).await
 }
 
 #[tauri::command(rename_all = "camelCase")]

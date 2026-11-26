@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 
 use crate::error::AppError;
 use crate::git::command::{
-    add_command, apply_cached_command, commit_command, file_diff_command, head_command,
-    identity_command, ls_files_command, restore_staged_command, status_command,
-    unstage_unborn_command,
+    add_command, apply_cached_command, apply_worktree_command, cat_blob_command, commit_command,
+    file_diff_command, head_command, identity_command, ls_files_command, restore_staged_command,
+    status_command, unstage_unborn_command,
 };
 use crate::git::ops::{
     canonical_existing, git_failure, repo_key, require_git, run_git, safe_relative,
@@ -18,7 +18,8 @@ use crate::git::patch::{
 use crate::git::runner::ProcessOutput;
 use crate::git::schedule::{internal_request_id, CommandSpec, JobKind, WriteGuard};
 use crate::model::{
-    CommitResult, DiffLineSelection, DiffResponse, FileChange, StatusSnapshot, MAX_DRAFT_CHARS,
+    CommitResult, DiffContextSlice, DiffLineSelection, DiffResponse, FileChange, StatusSnapshot,
+    MAX_DRAFT_CHARS,
 };
 use crate::redact::{redact_error_text, reject_secret_draft};
 
@@ -502,6 +503,409 @@ where
         return Err(finish_error(
             guard,
             classify_write("apply_failed", &applied, "代码块没有写入暂存区。"),
+        ));
+    }
+    let generation = guard.finish();
+    settle_read!(backend, &root, generation, |current| read_status(
+        backend,
+        &root,
+        current,
+        internal_request_id()
+    )
+    .await)
+}
+
+/// 按段展开单文件差异的只读上下文行（1 起算）。
+/// 未暂存读取工作区（文件已删时退回索引），已暂存读取索引（索引已删时退回 HEAD），
+/// 严守仓库路径边界、大小预算与 generation 校验，不改动原始差异快照与块索引。
+#[allow(clippy::too_many_arguments)]
+pub async fn diff_context_lines(
+    backend: &crate::git::ops::Backend,
+    path: &str,
+    relative: &str,
+    original: Option<&str>,
+    staged: bool,
+    start_line: u32,
+    count: u32,
+    generation: u64,
+    request_id: u64,
+) -> Result<DiffContextSlice, AppError> {
+    let root = canonical_existing(&validate_input_path(path)?)?;
+    let relative_path = repo_file(relative)?;
+    let original_path = match original {
+        Some(value) if !value.is_empty() => Some(repo_file(value)?),
+        _ => None,
+    };
+    let git = require_git(backend).await?;
+    let key = repo_key(&root);
+    let start = start_line.max(1);
+    let limit = count.min(500) as usize;
+    let old_relative = original_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|| relative.to_string());
+
+    let bytes = backend
+        .scheduler
+        .read_session(&key, request_id, generation, |_| async {
+            if staged {
+                match read_blob_bounded(
+                    backend,
+                    &git.path,
+                    &root,
+                    &key,
+                    generation,
+                    &format!(":{relative}"),
+                )
+                .await
+                {
+                    Ok(bytes) => Ok(bytes),
+                    Err(primary) => {
+                        if primary.code == "context_too_large" || primary.code == "stale" {
+                            return Err(primary);
+                        }
+                        read_blob_bounded(
+                            backend,
+                            &git.path,
+                            &root,
+                            &key,
+                            generation,
+                            &format!("HEAD:{old_relative}"),
+                        )
+                        .await
+                    }
+                }
+            } else {
+                let full = root.join(&relative_path);
+                if full.exists() {
+                    let canonical = canonical_existing(&full).map_err(|_| {
+                        AppError::new("context_unavailable", "无法读取该文件的上下文行。")
+                    })?;
+                    if !canonical.starts_with(&root) || !canonical.is_file() {
+                        return Err(AppError::new(
+                            "context_unavailable",
+                            "路径超出仓库边界或不是普通文件，无法展开上下文行。",
+                        ));
+                    }
+                    let meta = fs::metadata(&canonical).map_err(|_| {
+                        AppError::new("context_unavailable", "无法读取文件信息，未展开上下文。")
+                    })?;
+                    if meta.len() > DIFF_PREVIEW_BYTES as u64 {
+                        return Err(AppError::new(
+                            "context_too_large",
+                            "文件过大，无法展开更多上下文行。",
+                        ));
+                    }
+                    fs::read(&canonical).map_err(|_| {
+                        AppError::new("context_unavailable", "无法读取文件内容，未展开上下文。")
+                    })
+                } else {
+                    read_blob_bounded(
+                        backend,
+                        &git.path,
+                        &root,
+                        &key,
+                        generation,
+                        &format!(":{relative}"),
+                    )
+                    .await
+                }
+            }
+        })
+        .await?;
+
+    if bytes.contains(&0) {
+        return Err(AppError::new("not_text", "二进制文件不支持展开上下文行。"));
+    }
+    let text = String::from_utf8(bytes)
+        .map_err(|_| AppError::new("not_text", "文件不是 UTF-8 文本，无法展开上下文行。"))?;
+    let all_lines: Vec<&str> = text.lines().collect();
+    let total_lines = u32::try_from(all_lines.len()).unwrap_or(u32::MAX);
+    let start_idx = (start.saturating_sub(1) as usize).min(all_lines.len());
+    let end_idx = start_idx.saturating_add(limit).min(all_lines.len());
+    let lines = all_lines[start_idx..end_idx]
+        .iter()
+        .map(|line| (*line).to_string())
+        .collect();
+    Ok(DiffContextSlice {
+        generation,
+        path: relative.to_string(),
+        staged,
+        start_line: start,
+        total_lines,
+        lines,
+    })
+}
+
+async fn read_blob_bounded(
+    backend: &crate::git::ops::Backend,
+    git: &Path,
+    root: &Path,
+    key: &str,
+    generation: u64,
+    object_spec: &str,
+) -> Result<Vec<u8>, AppError> {
+    let (program, args) = cat_blob_command(git, root, object_spec);
+    let scheduled = backend
+        .scheduler
+        .execute(crate::git::schedule::GitJob {
+            repo_key: key.to_string(),
+            kind: JobKind::Read,
+            request_id: internal_request_id(),
+            generation,
+            program,
+            args,
+            stdin: None,
+            truncate_stdout: true,
+            output_limit: Some(DIFF_PREVIEW_BYTES),
+            env: Vec::new(),
+        })
+        .await?;
+    if scheduled.output.exit_code != 0 {
+        return Err(git_failure(
+            "context_unavailable",
+            &scheduled.output,
+            "无法读取该文件的上下文行。",
+        ));
+    }
+    if scheduled.output.stdout_truncated {
+        return Err(AppError::new(
+            "context_too_large",
+            "文件过大，无法展开更多上下文行。",
+        ));
+    }
+    Ok(scheduled.output.stdout)
+}
+
+/// 按块放弃未暂存的已跟踪文本改动（直接逆向应用补丁到工作区）。
+/// 拒绝 staged、untracked、binary、truncated 或过期的 snapshot。
+#[allow(clippy::too_many_arguments)]
+pub async fn discard_hunks(
+    backend: &crate::git::ops::Backend,
+    path: &str,
+    relative: &str,
+    original: Option<&str>,
+    staged: bool,
+    hunks: &[u32],
+    snapshot: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<StatusSnapshot, AppError> {
+    if hunks.is_empty() {
+        return Err(AppError::new(
+            "empty_hunks",
+            "没有选中的代码块，未修改工作区。",
+        ));
+    }
+    discard_patch(
+        backend,
+        path,
+        relative,
+        original,
+        staged,
+        snapshot,
+        generation,
+        request_id,
+        |parsed| build_patch(parsed, hunks),
+    )
+    .await
+}
+
+/// 按行放弃未暂存的已跟踪文本改动（直接逆向应用逐行补丁到工作区）。
+/// 拒绝 staged、untracked、binary、truncated 或过期的 snapshot。
+#[allow(clippy::too_many_arguments)]
+pub async fn discard_lines(
+    backend: &crate::git::ops::Backend,
+    path: &str,
+    relative: &str,
+    original: Option<&str>,
+    staged: bool,
+    lines: &[DiffLineSelection],
+    snapshot: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<StatusSnapshot, AppError> {
+    if lines.is_empty() {
+        return Err(AppError::new(
+            "empty_lines",
+            "没有选中的行，未修改工作区。",
+        ));
+    }
+    discard_patch(
+        backend,
+        path,
+        relative,
+        original,
+        staged,
+        snapshot,
+        generation,
+        request_id,
+        |parsed| build_line_patch(parsed, lines, true),
+    )
+    .await
+}
+
+/// 按块与按行放弃共用的写锁序列：拒绝 staged → 写锁 → index.lock → 拒绝 untracked →
+/// 重读未过滤差异 → 校验 snapshot → 拒绝 binary/truncated → 构造补丁 →
+/// `git apply --reverse --check` → `git apply --reverse` → 刷新 generation。
+#[allow(clippy::too_many_arguments)]
+async fn discard_patch<F>(
+    backend: &crate::git::ops::Backend,
+    path: &str,
+    relative: &str,
+    original: Option<&str>,
+    staged: bool,
+    snapshot: &str,
+    generation: u64,
+    request_id: u64,
+    build: F,
+) -> Result<StatusSnapshot, AppError>
+where
+    F: FnOnce(&crate::git::patch::ParsedDiff) -> Result<Vec<u8>, AppError>,
+{
+    if staged {
+        return Err(AppError::new(
+            "discard_staged_unsupported",
+            "已暂存的改动不能直接按块或按行放弃。请先取消暂存，或直接放弃整个文件。",
+        ));
+    }
+    if snapshot.is_empty() {
+        return Err(AppError::new(
+            "invalid_snapshot",
+            "缺少差异快照，未修改工作区。",
+        ));
+    }
+    let root = canonical_existing(&validate_input_path(path)?)?;
+    let relative_path = repo_file(relative)?;
+    let original_path = match original {
+        Some(value) if !value.is_empty() => Some(repo_file(value)?),
+        _ => None,
+    };
+    let git = require_git(backend).await?;
+    let mut guard = backend
+        .scheduler
+        .lock_write(&repo_key(&root), request_id, generation)
+        .await?;
+    if let Err(error) = ensure_no_index_lock(&root) {
+        return Err(finish_error(guard, error));
+    }
+    let untracked = match untracked_in_guard(&mut guard, &git.path, &root, &relative_path).await {
+        Ok(value) => value,
+        Err(error) => return Err(finish_error(guard, error)),
+    };
+    if untracked {
+        return Err(finish_error(
+            guard,
+            AppError::new(
+                "discard_untracked_unsupported",
+                "未跟踪的文件不能按块或按行放弃。请使用整文件放弃删除该文件。",
+            ),
+        ));
+    }
+    let paths = diff_paths(&relative_path, original_path.as_ref());
+    let (program, args) = file_diff_command(&git.path, &root, &paths, false, false, false);
+    let diff = match guard
+        .run(CommandSpec {
+            program,
+            args,
+            stdin: None,
+            truncate_stdout: true,
+            output_limit: Some(capture_limit(backend)),
+            writes: false,
+        })
+        .await
+    {
+        Ok(diff) => diff,
+        Err(error) => return Err(finish_error(guard, error)),
+    };
+    if fatal_git(&diff) {
+        return Err(finish_error(
+            guard,
+            git_failure("diff_failed", &diff, "无法核对差异，未修改工作区。"),
+        ));
+    }
+    let raw = first_file_diff(&diff.stdout);
+    let truncated = diff.stdout_truncated || raw.len() != diff.stdout.len();
+    let parsed = match parse_diff(raw, truncated) {
+        Ok(parsed) => parsed,
+        Err(error) => return Err(finish_error(guard, error)),
+    };
+    let token = snapshot_token(raw, parsed.truncated, relative, false);
+    if token != snapshot {
+        return Err(finish_error(
+            guard,
+            AppError::new(
+                "stale_patch",
+                "差异已变化，未放弃过期的改动。请查看刷新后的内容。",
+            ),
+        ));
+    }
+    if parsed.binary || parsed.undecodable {
+        return Err(finish_error(
+            guard,
+            AppError::new(
+                "not_text",
+                "二进制或无法解码的文件不能按块或按行放弃。",
+            ),
+        ));
+    }
+    if parsed.truncated {
+        return Err(finish_error(
+            guard,
+            AppError::new(
+                "truncated_diff",
+                "差异超过预览上限，不能按块或按行放弃。请放弃整个文件。",
+            ),
+        ));
+    }
+    let patch = match build(&parsed) {
+        Ok(patch) => patch,
+        Err(error) => return Err(finish_error(guard, error)),
+    };
+    let (check_program, check_args) = apply_worktree_command(&git.path, &root, true, true);
+    let check = match guard
+        .run(CommandSpec {
+            program: check_program,
+            args: check_args,
+            stdin: Some(patch.clone()),
+            truncate_stdout: false,
+            output_limit: None,
+            writes: false,
+        })
+        .await
+    {
+        Ok(check) => check,
+        Err(error) => return Err(finish_error(guard, error)),
+    };
+    if check.exit_code != 0 {
+        return Err(finish_error(
+            guard,
+            classify_write(
+                "apply_failed",
+                &check,
+                "所选改动与当前工作区不一致，未修改工作区。",
+            ),
+        ));
+    }
+    let (apply_program, apply_args) = apply_worktree_command(&git.path, &root, true, false);
+    let applied = match guard
+        .run(CommandSpec {
+            program: apply_program,
+            args: apply_args,
+            stdin: Some(patch),
+            truncate_stdout: false,
+            output_limit: None,
+            writes: true,
+        })
+        .await
+    {
+        Ok(applied) => applied,
+        Err(error) => return Err(finish_error(guard, error)),
+    };
+    if applied.exit_code != 0 {
+        return Err(finish_error(
+            guard,
+            classify_write("apply_failed", &applied, "未能放弃所选改动，请刷新后确认工作区。"),
         ));
     }
     let generation = guard.finish();
@@ -2534,5 +2938,299 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::write(&self.0, b"go");
         }
+    }
+
+    #[tokio::test]
+    async fn discard_hunks_removes_only_target_hunk_and_advances_generation() {
+        let fixture = crate::test_support::git_fixture("discard-hunks-basic");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        let mut lines: Vec<String> = (1..=25).map(|i| format!("line-{i}")).collect();
+        fs::write(repo.join("demo.txt"), lines.join("\n") + "\n").unwrap();
+        git(&repo, &["add", "demo.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+
+        lines[1] = "line-2-changed".into();
+        lines[21] = "line-22-changed".into();
+        fs::write(repo.join("demo.txt"), lines.join("\n") + "\n").unwrap();
+
+        let (path, generation) = open_repo(&backend, &repo).await;
+        let diff = load_diff(&backend, &path, "demo.txt", None, false, generation, 2, 0, 0)
+            .await
+            .unwrap();
+        assert_eq!(diff.hunks.len(), 2);
+
+        let after = discard_hunks(
+            &backend,
+            &path,
+            "demo.txt",
+            None,
+            false,
+            &[0],
+            &diff.snapshot,
+            diff.generation,
+            3,
+        )
+        .await
+        .unwrap();
+        assert!(after.generation > diff.generation);
+        let content = fs::read_to_string(repo.join("demo.txt")).unwrap();
+        let updated: Vec<&str> = content.lines().collect();
+        assert_eq!(updated[1], "line-2");
+        assert_eq!(updated[21], "line-22-changed");
+    }
+
+    #[tokio::test]
+    async fn discard_lines_removes_only_selected_lines_inside_hunk() {
+        let fixture = crate::test_support::git_fixture("discard-lines-basic");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("demo.txt"), "a\nb\nc\nd\n").unwrap();
+        git(&repo, &["add", "demo.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+
+        fs::write(repo.join("demo.txt"), "a\nb-mod\nc-extra\nc\nd\n").unwrap();
+        let (path, generation) = open_repo(&backend, &repo).await;
+        let diff = load_diff(&backend, &path, "demo.txt", None, false, generation, 2, 0, 0)
+            .await
+            .unwrap();
+        let pick_added = diff
+            .lines
+            .iter()
+            .find(|line| line.kind == "add" && line.text == "+c-extra")
+            .expect("c-extra add line");
+        let selection = vec![DiffLineSelection {
+            hunk_index: pick_added.hunk_index.unwrap(),
+            kind: pick_added.kind.clone(),
+            old_no: pick_added.old_no,
+            new_no: pick_added.new_no,
+        }];
+
+        let after = discard_lines(
+            &backend,
+            &path,
+            "demo.txt",
+            None,
+            false,
+            &selection,
+            &diff.snapshot,
+            diff.generation,
+            3,
+        )
+        .await
+        .unwrap();
+        assert!(after.generation > diff.generation);
+        assert_eq!(
+            fs::read_to_string(repo.join("demo.txt")).unwrap(),
+            "a\nb-mod\nc\nd\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn discard_patch_rejects_staged_untracked_binary_truncated_and_stale() {
+        let fixture = crate::test_support::git_fixture("discard-patch-guards");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        let mut lines: Vec<String> = (1..=25).map(|i| format!("line-{i}")).collect();
+        fs::write(repo.join("demo.txt"), lines.join("\n") + "\n").unwrap();
+        fs::write(repo.join("bin.dat"), [0u8, 1, 2, 3]).unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "base"]);
+
+        lines[1] = "line-2-changed".into();
+        fs::write(repo.join("demo.txt"), lines.join("\n") + "\n").unwrap();
+        fs::write(repo.join("untracked.txt"), "new\n").unwrap();
+        fs::write(repo.join("bin.dat"), [0u8, 9, 8, 7]).unwrap();
+
+        let (path, generation) = open_repo(&backend, &repo).await;
+        let diff = load_diff(&backend, &path, "demo.txt", None, false, generation, 2, 0, 0)
+            .await
+            .unwrap();
+
+        // Reject staged=true
+        let err = discard_hunks(
+            &backend,
+            &path,
+            "demo.txt",
+            None,
+            true,
+            &[0],
+            &diff.snapshot,
+            diff.generation,
+            3,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "discard_staged_unsupported");
+
+        // Reject untracked file
+        let untracked_diff = load_diff(
+            &backend,
+            &path,
+            "untracked.txt",
+            None,
+            false,
+            diff.generation,
+            4,
+            0,
+            0,
+        )
+        .await
+        .unwrap();
+        let err = discard_hunks(
+            &backend,
+            &path,
+            "untracked.txt",
+            None,
+            false,
+            &[0],
+            &untracked_diff.snapshot,
+            untracked_diff.generation,
+            5,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "discard_untracked_unsupported");
+
+        // Reject binary file
+        let bin_diff = load_diff(
+            &backend,
+            &path,
+            "bin.dat",
+            None,
+            false,
+            err.generation.unwrap(),
+            6,
+            0,
+            0,
+        )
+        .await
+        .unwrap();
+        let err = discard_hunks(
+            &backend,
+            &path,
+            "bin.dat",
+            None,
+            false,
+            &[0],
+            &bin_diff.snapshot,
+            bin_diff.generation,
+            7,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "not_text");
+
+        // Reject stale snapshot after external edit
+        lines[1] = "line-2-changed-again".into();
+        fs::write(repo.join("demo.txt"), lines.join("\n") + "\n").unwrap();
+        let err = discard_hunks(
+            &backend,
+            &path,
+            "demo.txt",
+            None,
+            false,
+            &[0],
+            &diff.snapshot,
+            err.generation.unwrap(),
+            8,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "stale_patch");
+
+        // Reject truncated diff
+        lines[18] = "界".repeat(50_000);
+        fs::write(repo.join("demo.txt"), lines.join("\n") + "\n").unwrap();
+        let truncated_diff = load_diff(
+            &backend,
+            &path,
+            "demo.txt",
+            None,
+            false,
+            err.generation.unwrap(),
+            9,
+            0,
+            0,
+        )
+        .await
+        .unwrap();
+        assert!(truncated_diff.truncated);
+        let err = discard_hunks(
+            &backend,
+            &path,
+            "demo.txt",
+            None,
+            false,
+            &[0],
+            &truncated_diff.snapshot,
+            truncated_diff.generation,
+            10,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "truncated_diff");
+    }
+
+    #[tokio::test]
+    async fn diff_context_lines_reads_worktree_and_index_slices_and_rejects_stale_or_binary() {
+        let fixture = crate::test_support::git_fixture("diff-context-lines");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("demo.txt"), "l1\nl2\nl3\nl4\nl5\n").unwrap();
+        fs::write(repo.join("bin.dat"), [0u8, 1, 2, 3]).unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "base"]);
+
+        // Stage a different version in index, then modify worktree differently
+        fs::write(repo.join("demo.txt"), "l1\nidx-2\nl3\nl4\nl5\n").unwrap();
+        git(&repo, &["add", "demo.txt"]);
+        fs::write(repo.join("demo.txt"), "l1\nwt-2\nl3\nl4\nl5\nl6\n").unwrap();
+
+        let (path, generation) = open_repo(&backend, &repo).await;
+
+        let wt_slice = diff_context_lines(
+            &backend, &path, "demo.txt", None, false, 2, 3, generation, 2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(wt_slice.start_line, 2);
+        assert_eq!(wt_slice.total_lines, 6);
+        assert_eq!(wt_slice.lines, vec!["wt-2", "l3", "l4"]);
+
+        let idx_slice = diff_context_lines(
+            &backend, &path, "demo.txt", None, true, 1, 3, generation, 3,
+        )
+        .await
+        .unwrap();
+        assert_eq!(idx_slice.start_line, 1);
+        assert_eq!(idx_slice.total_lines, 5);
+        assert_eq!(idx_slice.lines, vec!["l1", "idx-2", "l3"]);
+
+        let bin_err = diff_context_lines(
+            &backend, &path, "bin.dat", None, false, 1, 5, generation, 4,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(bin_err.code, "not_text");
+
+        let stale_err = diff_context_lines(
+            &backend,
+            &path,
+            "demo.txt",
+            None,
+            false,
+            1,
+            3,
+            generation + 99,
+            5,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(stale_err.code, "stale");
     }
 }

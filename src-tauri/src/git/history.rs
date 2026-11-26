@@ -27,8 +27,8 @@ use crate::git::runner::{ProcessOutput, RealRunner};
 use crate::git::schedule::{internal_request_id, CommandSpec, JobKind, WriteGuard};
 use crate::model::{
     ChangeKind, CommitDetail, CommitFileChange, FileHistoryPage, HistoryCommit, HistoryLabel,
-    HistoryPage, StashApplyResult, StashPreview, StashRecord, StashSaveResult, StashState,
-    StatusSnapshot,
+    HistoryPage, StashApplyResult, StashDetail, StashFileChange, StashPreview, StashRecord,
+    StashSaveResult, StashState, StatusSnapshot,
 };
 use crate::redact::contains_secret;
 
@@ -777,6 +777,271 @@ pub async fn delete_stash(
         internal_request_id(),
     )
     .await)
+}
+
+/// 读取指定临时保存的文件清单：合并 `<oid>^1..<oid>` 的已跟踪改动与可选 `<oid>^3` 的未跟踪文件。
+/// 仅在 `oid` 真实存在于 `refs/stash` 时返回，只读，不修改仓库。
+pub async fn stash_detail(
+    backend: &Backend,
+    path: &str,
+    oid: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<StashDetail, AppError> {
+    let root = repo_root(path)?;
+    let oid = validate_oid(oid)?;
+    let git = require_git(backend).await?;
+    let records = list_stashes(backend, &root, &git.path, generation, request_id).await?;
+    let Some(record) = records.into_iter().find(|entry| entry.oid == oid) else {
+        return Err(AppError::new(
+            "stash_missing",
+            "没有找到这条临时保存，未修改仓库。",
+        ));
+    };
+    let (header, generation) = read_log(
+        backend,
+        &root,
+        &git.path,
+        generation,
+        internal_request_id(),
+        commit_header_command(&git.path, &root, &oid),
+    )
+    .await?;
+    let mut commits = parse_history_records(&header)?;
+    let Some(commit) = commits.pop() else {
+        return Err(AppError::new(
+            "stash_missing",
+            "没有找到这条临时保存，未修改仓库。",
+        ));
+    };
+    let parent1 = commit
+        .parents
+        .first()
+        .map(String::as_str)
+        .unwrap_or(EMPTY_TREE_OID);
+    let (tracked_files, mut generation) = load_commit_files(
+        backend,
+        &root,
+        &git.path,
+        &oid,
+        Some(parent1),
+        generation,
+    )
+    .await?;
+    let mut files: Vec<StashFileChange> = tracked_files
+        .iter()
+        .map(|file| stash_file_from_commit(file, false))
+        .collect();
+    if let Some(untracked_oid) = commit.parents.get(2) {
+        let (untracked_files, next_generation) = load_commit_files(
+            backend,
+            &root,
+            &git.path,
+            untracked_oid,
+            Some(EMPTY_TREE_OID),
+            generation,
+        )
+        .await?;
+        generation = next_generation;
+        let seen: HashSet<String> = files.iter().map(|file| file.path.clone()).collect();
+        for file in untracked_files.iter() {
+            if !seen.contains(&file.path) {
+                files.push(stash_file_from_commit(file, true));
+            }
+        }
+    }
+    Ok(StashDetail {
+        generation,
+        oid: record.oid,
+        message: record.message,
+        committed_at: record.committed_at,
+        files,
+    })
+}
+
+/// 读取临时保存中单个文件的只读差异（已跟踪看 `<oid>^1..<oid>`，未跟踪看空树到 `<oid>^3`）。
+/// 沿用二进制与截断预览预算，不修改工作区或暂存区。
+#[allow(clippy::too_many_arguments)]
+pub async fn stash_file_diff(
+    backend: &Backend,
+    path: &str,
+    oid: &str,
+    relative: &str,
+    original: Option<&str>,
+    untracked: bool,
+    generation: u64,
+    request_id: u64,
+    offset: u32,
+    limit: u32,
+) -> Result<crate::model::DiffResponse, AppError> {
+    let root = repo_root(path)?;
+    let oid = validate_oid(oid)?;
+    let requested = safe_relative(relative)?;
+    if let Some(value) = original.filter(|value| !value.is_empty()) {
+        safe_relative(value)?;
+    }
+    let git = require_git(backend).await?;
+    let records = list_stashes(backend, &root, &git.path, generation, request_id).await?;
+    if !records.iter().any(|entry| entry.oid == oid) {
+        return Err(AppError::new(
+            "stash_missing",
+            "没有找到这条临时保存，未修改仓库。",
+        ));
+    }
+    let (header, generation) = read_log(
+        backend,
+        &root,
+        &git.path,
+        generation,
+        internal_request_id(),
+        commit_header_command(&git.path, &root, &oid),
+    )
+    .await?;
+    let mut commits = parse_history_records(&header)?;
+    let Some(commit) = commits.pop() else {
+        return Err(AppError::new(
+            "stash_missing",
+            "没有找到这条临时保存，未修改仓库。",
+        ));
+    };
+    if untracked {
+        let Some(untracked_oid) = commit.parents.get(2).cloned() else {
+            return Err(AppError::new(
+                "file_missing",
+                "这条临时保存没有包含未跟踪文件，未修改仓库。",
+            ));
+        };
+        diff_file_between(
+            backend,
+            &root,
+            &git.path,
+            untracked_oid,
+            Some(EMPTY_TREE_OID.to_string()),
+            relative,
+            &requested,
+            generation,
+            offset,
+            limit,
+            3,
+            false,
+        )
+        .await
+    } else {
+        let parent1 = commit
+            .parents
+            .first()
+            .cloned()
+            .unwrap_or_else(|| EMPTY_TREE_OID.to_string());
+        diff_file_between(
+            backend,
+            &root,
+            &git.path,
+            oid,
+            Some(parent1),
+            relative,
+            &requested,
+            generation,
+            offset,
+            limit,
+            3,
+            false,
+        )
+        .await
+    }
+}
+
+/// 原子 Pop：在同一写锁内先恢复临时保存，仅在 exit_code == 0 且无新增冲突时删除该记录；
+/// 若产生冲突则保留原记录并返回 conflict_paths。
+pub async fn pop_stash(
+    backend: &Backend,
+    path: &str,
+    oid: &str,
+    generation: u64,
+    request_id: u64,
+) -> Result<StashApplyResult, AppError> {
+    let root = repo_root(path)?;
+    ensure_no_index_lock(&root)?;
+    let oid = validate_oid(oid)?;
+    let git = require_git(backend).await?;
+    let _gate = backend
+        .actions
+        .enter(action_key("stash", &repo_key(&root)))?;
+    let mut guard = stash_lock(backend, &root, generation, request_id).await?;
+    let outcome = pop_in_guard(&mut guard, backend, &git.path, &root, &oid).await;
+    let generation = guard.finish();
+    let popped = outcome.map_err(|error| attach_generation(error, generation))?;
+    if popped.applied.output.exit_code != 0 && popped.conflict_paths.is_empty() {
+        let snapshot = settle_read!(backend, &root, generation, |current| read_status(
+            backend,
+            &root,
+            current,
+            internal_request_id(),
+        )
+        .await)?;
+        let fallback = if popped.applied.merge_in_progress {
+            "没有恢复成功。仓库正在进行分支合并，临时保存没有写入工作区，记录仍保留，已有内容没有被丢弃。"
+        } else {
+            "没有恢复成功。临时保存记录仍保留，已有内容没有被丢弃。"
+        };
+        return Err(git_failure("stash_apply_failed", &popped.applied.output, fallback)
+            .with_generation(snapshot.generation));
+    }
+    let (snapshot, records) = settle_read!(backend, &root, generation, |current| {
+        match read_status(backend, &root, current, internal_request_id()).await {
+            Ok(snapshot) => list_stashes(
+                backend,
+                &root,
+                &git.path,
+                snapshot.generation,
+                internal_request_id(),
+            )
+            .await
+            .map(|records| (snapshot, records)),
+            Err(error) => Err(error),
+        }
+    })?;
+    if popped.kept && !records.iter().any(|record| record.oid == oid) {
+        return Err(AppError::new(
+            "stash_lost",
+            "恢复过程后没有再找到原来的保存记录。请刷新后确认工作区，不要假设记录已删除。",
+        )
+        .with_generation(snapshot.generation));
+    }
+    let conflicted = !popped.conflict_paths.is_empty();
+    let note = if !popped.kept {
+        "已把改动恢复到工作区，并删除该条临时保存记录。".to_string()
+    } else if popped.applied.merge_in_progress {
+        "恢复发生冲突，原保存记录仍保留（未删除）。仓库仍有正在进行的分支合并。请在改动里处理冲突文件。"
+            .to_string()
+    } else {
+        "恢复发生冲突，原保存记录仍保留（未删除）。这不是分支合并，没有可中止的合并。请在改动里处理冲突文件。"
+            .to_string()
+    };
+    Ok(StashApplyResult {
+        generation: snapshot.generation,
+        oid,
+        kept: popped.kept,
+        operation: "stash".to_string(),
+        conflicted,
+        conflict_paths: popped.conflict_paths,
+        can_abort_merge: false,
+        note,
+        snapshot,
+    })
+}
+
+fn stash_file_from_commit(file: &CommitFileChange, untracked: bool) -> StashFileChange {
+    StashFileChange {
+        path: file.path.clone(),
+        original_path: file.original_path.clone(),
+        status: file.status.clone(),
+        untracked,
+        additions: file.additions,
+        deletions: file.deletions,
+        binary: file.binary,
+        old_size: file.old_size,
+        new_size: file.new_size,
+    }
 }
 
 struct ResolvedHistory {
@@ -1599,6 +1864,38 @@ async fn apply_in_guard(
         before_unmerged,
         merge_in_progress,
     })
+}
+
+struct StashPopOutcome {
+    applied: StashApplyAttempt,
+    conflict_paths: Vec<String>,
+    kept: bool,
+}
+
+async fn pop_in_guard(
+    guard: &mut WriteGuard<'_, RealRunner>,
+    backend: &Backend,
+    git: &Path,
+    root: &Path,
+    oid: &str,
+) -> Result<StashPopOutcome, AppError> {
+    let applied = apply_in_guard(guard, backend, git, root, oid).await?;
+    let after = status_in_guard(guard, backend, git, root).await?;
+    let conflict_paths = new_unmerged_paths(&after, &applied.before_unmerged);
+    if applied.output.exit_code == 0 && conflict_paths.is_empty() {
+        delete_in_guard(guard, git, root, oid).await?;
+        Ok(StashPopOutcome {
+            applied,
+            conflict_paths,
+            kept: false,
+        })
+    } else {
+        Ok(StashPopOutcome {
+            applied,
+            conflict_paths,
+            kept: true,
+        })
+    }
 }
 
 fn unmerged_path_set(snapshot: &StatusSnapshot) -> HashSet<String> {
@@ -4276,5 +4573,213 @@ mod tests {
         let stashes = git_text(&repo, &["stash", "list", "--format=%H"]);
         assert!(stashes.contains(&saved_file.oid));
         assert!(stashes.contains(&saved_other.oid));
+    }
+
+    #[tokio::test]
+    async fn stash_detail_and_file_diff_cover_tracked_and_untracked_files() {
+        let fixture = crate::test_support::git_fixture("stash-detail-diff");
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("tracked.txt"), "old-1\nold-2\n").unwrap();
+        git(&repo, &["add", "tracked.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+
+        fs::write(repo.join("tracked.txt"), "old-1\nnew-2\nadded-3\n").unwrap();
+        fs::write(repo.join("notes.txt"), "hello\nworld\n").unwrap();
+        fs::write(repo.join("blob.bin"), [0u8, 1, 2, 3, 4, 5]).unwrap();
+
+        let backend = fixture.backend();
+        let root = canonical_existing(&repo).unwrap();
+        let gen = generation(&backend, &root);
+        let saved = save_stash(&backend, &repo_key(&root), true, "with untracked", gen, 1)
+            .await
+            .unwrap();
+
+        let detail = stash_detail(
+            &backend,
+            &repo_key(&root),
+            &saved.oid,
+            saved.state.generation,
+            2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(detail.oid, saved.oid);
+        let tracked = detail
+            .files
+            .iter()
+            .find(|f| f.path == "tracked.txt")
+            .expect("tracked file in stash detail");
+        assert!(!tracked.untracked);
+        assert_eq!(tracked.additions, Some(2));
+        assert_eq!(tracked.deletions, Some(1));
+
+        let untracked_text = detail
+            .files
+            .iter()
+            .find(|f| f.path == "notes.txt")
+            .expect("untracked text file in stash detail");
+        assert!(untracked_text.untracked);
+        assert_eq!(untracked_text.additions, Some(2));
+        assert_eq!(untracked_text.deletions, Some(0));
+
+        let untracked_bin = detail
+            .files
+            .iter()
+            .find(|f| f.path == "blob.bin")
+            .expect("untracked binary file in stash detail");
+        assert!(untracked_bin.untracked);
+        assert!(untracked_bin.binary);
+        assert_eq!(untracked_bin.new_size, Some(6));
+
+        let tracked_diff = stash_file_diff(
+            &backend,
+            &repo_key(&root),
+            &saved.oid,
+            "tracked.txt",
+            None,
+            false,
+            detail.generation,
+            3,
+            0,
+            0,
+        )
+        .await
+        .unwrap();
+        assert!(!tracked_diff.binary);
+        assert!(tracked_diff
+            .lines
+            .iter()
+            .any(|l| l.kind == "add" && l.text == "+added-3"));
+        assert!(tracked_diff
+            .lines
+            .iter()
+            .any(|l| l.kind == "del" && l.text == "-old-2"));
+
+        let untracked_diff = stash_file_diff(
+            &backend,
+            &repo_key(&root),
+            &saved.oid,
+            "notes.txt",
+            None,
+            true,
+            detail.generation,
+            4,
+            0,
+            0,
+        )
+        .await
+        .unwrap();
+        assert!(!untracked_diff.binary);
+        assert!(untracked_diff
+            .lines
+            .iter()
+            .any(|l| l.kind == "add" && l.text == "+hello"));
+        assert!(untracked_diff
+            .lines
+            .iter()
+            .any(|l| l.kind == "add" && l.text == "+world"));
+
+        let bin_diff = stash_file_diff(
+            &backend,
+            &repo_key(&root),
+            &saved.oid,
+            "blob.bin",
+            None,
+            true,
+            detail.generation,
+            5,
+            0,
+            0,
+        )
+        .await
+        .unwrap();
+        assert!(bin_diff.binary);
+        assert_eq!(bin_diff.new_size, Some(6));
+
+        // Reject non-stash commit oid
+        let head_oid = git_text(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        let err = stash_detail(
+            &backend,
+            &repo_key(&root),
+            &head_oid,
+            detail.generation,
+            6,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, "stash_missing");
+    }
+
+    #[tokio::test]
+    async fn pop_stash_deletes_on_clean_apply_and_keeps_on_conflict() {
+        let fixture = crate::test_support::git_fixture("stash-pop");
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("file.txt"), "base\n").unwrap();
+        git(&repo, &["add", "file.txt"]);
+        git(&repo, &["commit", "-m", "base"]);
+
+        let backend = fixture.backend();
+        let root = canonical_existing(&repo).unwrap();
+        let gen = generation(&backend, &root);
+
+        // Clean pop: restores worktree and removes stash record
+        fs::write(repo.join("file.txt"), "clean-stashed\n").unwrap();
+        let saved_clean = save_stash(&backend, &repo_key(&root), false, "clean", gen, 1)
+            .await
+            .unwrap();
+        assert_eq!(fs::read_to_string(repo.join("file.txt")).unwrap(), "base\n");
+
+        let popped_clean = pop_stash(
+            &backend,
+            &repo_key(&root),
+            &saved_clean.oid,
+            saved_clean.state.generation,
+            2,
+        )
+        .await
+        .unwrap();
+        assert!(!popped_clean.kept);
+        assert!(!popped_clean.conflicted);
+        assert!(popped_clean.conflict_paths.is_empty());
+        assert_eq!(
+            fs::read_to_string(repo.join("file.txt")).unwrap(),
+            "clean-stashed\n"
+        );
+        assert!(!git_text(&repo, &["stash", "list", "--format=%H"]).contains(&saved_clean.oid));
+
+        // Conflict pop: preserves stash record and reports conflict_paths
+        git(&repo, &["checkout", "--", "file.txt"]);
+        fs::write(repo.join("file.txt"), "stashed-conflict\n").unwrap();
+        let saved_conflict = save_stash(
+            &backend,
+            &repo_key(&root),
+            false,
+            "conflict",
+            popped_clean.generation,
+            3,
+        )
+        .await
+        .unwrap();
+        fs::write(repo.join("file.txt"), "main-conflict\n").unwrap();
+        git(&repo, &["add", "file.txt"]);
+        git(&repo, &["commit", "-m", "conflicting commit"]);
+
+        let popped_conflict = pop_stash(
+            &backend,
+            &repo_key(&root),
+            &saved_conflict.oid,
+            saved_conflict.state.generation,
+            4,
+        )
+        .await
+        .unwrap();
+        assert!(popped_conflict.kept);
+        assert!(popped_conflict.conflicted);
+        assert_eq!(popped_conflict.conflict_paths, vec!["file.txt".to_string()]);
+        assert!(!popped_conflict.can_abort_merge);
+        assert!(git_text(&repo, &["stash", "list", "--format=%H"]).contains(&saved_conflict.oid));
+        assert!(!repo.join(".git/MERGE_HEAD").exists());
     }
 }

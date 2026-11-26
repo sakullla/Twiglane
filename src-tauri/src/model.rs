@@ -229,6 +229,18 @@ pub struct DiffResponse {
     pub new_size: Option<u64>,
 }
 
+/// 差异上下文按段展开返回的行切片（1 起算）。只读，不改动原始差异快照与块索引。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffContextSlice {
+    pub generation: u64,
+    pub path: String,
+    pub staged: bool,
+    pub start_line: u32,
+    pub total_lines: u32,
+    pub lines: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitResult {
@@ -622,6 +634,35 @@ pub struct StashSaveResult {
     pub oid: String,
     pub note: String,
     pub state: StashState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StashFileChange {
+    pub path: String,
+    pub original_path: Option<String>,
+    pub status: String,
+    pub untracked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additions: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deletions: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub binary: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StashDetail {
+    pub generation: u64,
+    pub oid: String,
+    pub message: String,
+    pub committed_at: i64,
+    pub files: Vec<StashFileChange>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -334,6 +334,28 @@ pub fn apply_cached_command(
     (git.to_path_buf(), args)
 }
 
+/// 在工作区直接应用或逆向应用补丁（不带 `--cached`，无 shell）。
+/// 用于未暂存已跟踪文件的按块/按行放弃修改。
+pub fn apply_worktree_command(
+    git: &Path,
+    root: &Path,
+    reverse: bool,
+    check: bool,
+) -> (PathBuf, Vec<OsString>) {
+    let mut args = repo_prefix(root, false);
+    args.extend([
+        OsString::from("apply"),
+        OsString::from("--whitespace=nowarn"),
+    ]);
+    if reverse {
+        args.push(OsString::from("--reverse"));
+    }
+    if check {
+        args.push(OsString::from("--check"));
+    }
+    (git.to_path_buf(), args)
+}
+
 pub fn commit_command(git: &Path, root: &Path, message: &str) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, false);
     args.extend([
@@ -2315,6 +2337,8 @@ mod tests {
             head_match_command(git, root, true, &[PathBuf::from("a.txt")]).1,
             checkout_side_command(git, root, "--ours", Path::new("my file.txt")).1,
             restore_worktree_command(git, root, &[PathBuf::from("my file.txt")]).1,
+            apply_worktree_command(git, root, true, true).1,
+            apply_worktree_command(git, root, true, false).1,
         ] {
             assert_no_force(&builder);
             assert!(!builder.iter().any(|arg| {

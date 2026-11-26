@@ -648,6 +648,69 @@ describe("提交区", () => {
     await fireEvent.click(amendBtn);
     expect(onAmend).toHaveBeenCalledTimes(1);
   });
+
+  it("窄左栏下最近提交说明弹层向左钳位在视口安全区内，1280x840 与 900x600 均不向左溢出", async () => {
+    const recentMessages = [{ oid: "1234567", summary: "feat: 测试定位" }];
+    const origWidth = window.innerWidth;
+    const origHeight = window.innerHeight;
+    try {
+      for (const [w, h] of [
+        [1280, 840],
+        [900, 600],
+      ]) {
+        document.body.innerHTML = "";
+        Object.defineProperty(window, "innerWidth", { configurable: true, value: w });
+        Object.defineProperty(window, "innerHeight", { configurable: true, value: h });
+        renderDraft({ value: "", recentMessages });
+        const btn = screen.getByRole("button", { name: "最近提交说明" });
+        vi.spyOn(btn, "getBoundingClientRect").mockReturnValue({
+          left: 210,
+          right: 240,
+          top: h - 140,
+          bottom: h - 114,
+          width: 30,
+          height: 26,
+          x: 210,
+          y: h - 140,
+          toJSON: () => ({}),
+        });
+        await fireEvent.click(btn);
+        const dialog = screen.getByRole("dialog", { name: "最近提交说明" }) as HTMLElement;
+        expect(dialog.style.left, `${w}x${h}`).toBe("8px");
+        expect(dialog.style.right, `${w}x${h}`).toBe("auto");
+      }
+    } finally {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: origWidth });
+      Object.defineProperty(window, "innerHeight", { configurable: true, value: origHeight });
+    }
+  });
+
+  it("切换分支或加载器时清除旧缓存并忽略过期并发请求，防止跨仓残留", async () => {
+    let resolveSlow!: (items: { oid: string; summary: string }[]) => void;
+    const slowLoader = vi.fn(
+      () =>
+        new Promise<{ oid: string; summary: string }[]>((resolve) => {
+          resolveSlow = resolve;
+        }),
+    );
+    const fastLoader = vi.fn(async () => [{ oid: "bbbbbbb", summary: "fix: 新仓库提交" }]);
+
+    const { rerender } = renderDraft({ branch: "repo-a", value: "", onLoadRecentMessages: slowLoader });
+    await fireEvent.click(screen.getByRole("button", { name: "最近提交说明" }));
+    expect(slowLoader).toHaveBeenCalledTimes(1);
+
+    // 在旧请求返回前切换分支与加载器
+    await rerender({ branch: "repo-b", paths: ["a.ts"], value: "", onLoadRecentMessages: fastLoader });
+    resolveSlow([{ oid: "aaaaaaa", summary: "feat: 旧仓库提交" }]);
+    await tick();
+    expect(screen.queryByText("feat: 旧仓库提交")).toBeNull();
+
+    // 重新打开弹层应展示新仓库的提交
+    await fireEvent.click(screen.getByRole("button", { name: "最近提交说明" }));
+    await fireEvent.click(screen.getByRole("button", { name: "最近提交说明" }));
+    expect(await screen.findByText("fix: 新仓库提交")).toBeTruthy();
+    expect(screen.queryByText("feat: 旧仓库提交")).toBeNull();
+  });
 });
 
 describe("并排差异", () => {

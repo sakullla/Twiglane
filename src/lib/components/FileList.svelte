@@ -253,9 +253,10 @@
     }
     const rect = statusMenuTrigger?.getBoundingClientRect();
     if (rect && typeof window !== "undefined") {
-      const right = Math.max(8, window.innerWidth - rect.right);
-      const top = Math.max(8, rect.bottom + 4);
-      statusMenuStyle = `position:fixed;top:${top}px;right:${right}px;left:auto`;
+      const width = Math.min(160, Math.max(120, window.innerWidth - 16));
+      const left = Math.round(Math.min(Math.max(8, rect.right - width), Math.max(8, window.innerWidth - width - 8)));
+      const top = Math.max(8, Math.round(rect.bottom + 4));
+      statusMenuStyle = `position:fixed;top:${top}px;left:${left}px;right:auto`;
     }
     statusMenuOpen = true;
     if (focusFirst) {
@@ -619,6 +620,7 @@
   }
 
   function onKey(event: KeyboardEvent) {
+    if (event.target instanceof Element && event.target.closest("button")) return;
     const current = rows.findIndex((row) => row.path === selected?.path && row.side === selected.side);
     if ((event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) && current >= 0 && onContextMenu) {
       event.preventDefault();

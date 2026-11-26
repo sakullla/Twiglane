@@ -241,4 +241,48 @@ describe("FileList 分组折叠、状态筛选与多选批量操作条", () => {
     await fireEvent.click(screen.getByRole("button", { name: "退出多选" }));
     expect(onClearMultiSelect).toHaveBeenCalledTimes(1);
   });
+
+  it("聚焦分组折叠按钮或组级动作按钮按 Space 时不被列表 onKey 拦截，不误触当前文件暂存", async () => {
+    const { onStage, onUnstage } = renderList();
+    const unstagedToggle = screen.getByRole("button", { name: "未暂存的改动（3）" });
+    unstagedToggle.focus();
+    const toggleSpace = new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true });
+    unstagedToggle.dispatchEvent(toggleSpace);
+    expect(toggleSpace.defaultPrevented).toBe(false);
+    expect(onStage).not.toHaveBeenCalled();
+    expect(onUnstage).not.toHaveBeenCalled();
+
+    const stageAllBtn = screen.getByRole("button", { name: "全部暂存" });
+    stageAllBtn.focus();
+    const actionSpace = new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true });
+    stageAllBtn.dispatchEvent(actionSpace);
+    expect(actionSpace.defaultPrevented).toBe(false);
+    expect(onStage).not.toHaveBeenCalled();
+  });
+
+  it("窄左栏下状态筛选菜单的固定定位向左钳位到安全边距，不溢出视口左侧", async () => {
+    renderList();
+    const origWidth = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 900 });
+    try {
+      const filterBtn = screen.getByRole("button", { name: "按变更状态筛选" });
+      vi.spyOn(filterBtn, "getBoundingClientRect").mockReturnValue({
+        left: 80,
+        right: 110,
+        top: 40,
+        bottom: 66,
+        width: 30,
+        height: 26,
+        x: 80,
+        y: 40,
+        toJSON: () => ({}),
+      });
+      await fireEvent.click(filterBtn);
+      const menu = screen.getByRole("menu", { name: "变更状态筛选" }) as HTMLElement;
+      expect(menu.style.left).toBe("8px");
+      expect(menu.style.right).toBe("auto");
+    } finally {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: origWidth });
+    }
+  });
 });

@@ -192,6 +192,7 @@
   let historyError = $state<string | null>(null);
   let loadedRecent = $state<RecentCommitMessage[] | null>(null);
   let pendingRecent = $state<{ summary: string; text: string } | null>(null);
+  let historyRequestSeq = 0;
   let recentSource = $derived((loadedRecent ?? recentMessages ?? []).slice(0, 10));
   let hasHistoryEntry = $derived(Boolean(onLoadRecentMessages || (recentMessages && recentMessages.length > 0)));
   let prefixes = $derived(extractConventionalPrefixes(recentSource));
@@ -240,13 +241,27 @@
     };
   });
 
+  /** 分支、静态近期列表或加载回调变化时失效旧缓存与在途请求，防止跨仓/跨分支残留。 */
+  $effect(() => {
+    void branch;
+    void recentMessages;
+    void onLoadRecentMessages;
+    historyRequestSeq += 1;
+    loadedRecent = null;
+    historyError = null;
+    historyLoading = false;
+    pendingRecent = null;
+  });
+
   /** 最近提交说明弹层：点击外部收起，Esc 优先取消覆盖确认再收起并归还焦点。 */
   $effect(() => {
     if (!historyOpen) return;
     const close = (event: MouseEvent) => {
       if (openModalCount() > 0) return;
       if (historyAnchor && !historyAnchor.contains(event.target as Node)) {
+        historyRequestSeq += 1;
         historyOpen = false;
+        historyLoading = false;
         pendingRecent = null;
       }
     };
@@ -270,7 +285,9 @@
 
   async function toggleHistory() {
     if (historyOpen) {
+      historyRequestSeq += 1;
       historyOpen = false;
+      historyLoading = false;
       pendingRecent = null;
       return;
     }
@@ -279,26 +296,34 @@
     historyError = null;
     const rect = historyButton?.getBoundingClientRect();
     if (rect && typeof window !== "undefined") {
-      const right = Math.max(8, window.innerWidth - rect.right);
-      const bottom = Math.max(8, window.innerHeight - rect.top + 6);
-      const room = Math.max(180, Math.min(340, rect.top - 16));
-      historyStyle = `position:fixed;top:auto;left:auto;right:${right}px;bottom:${bottom}px;max-height:${room}px`;
+      const width = Math.min(320, Math.max(200, window.innerWidth - 16));
+      const left = Math.round(Math.min(Math.max(8, rect.right - width), Math.max(8, window.innerWidth - width - 8)));
+      const bottom = Math.max(8, Math.round(window.innerHeight - rect.top + 6));
+      const room = Math.max(180, Math.min(340, Math.round(rect.top - 16)));
+      historyStyle = `position:fixed;top:auto;left:${left}px;right:auto;bottom:${bottom}px;max-height:${room}px`;
     }
     historyOpen = true;
     if (onLoadRecentMessages) {
+      const seq = ++historyRequestSeq;
+      const loader = onLoadRecentMessages;
       historyLoading = true;
       try {
-        loadedRecent = (await onLoadRecentMessages()).slice(0, 10);
+        const loaded = (await loader()).slice(0, 10);
+        if (seq !== historyRequestSeq) return;
+        loadedRecent = loaded;
       } catch (caught) {
+        if (seq !== historyRequestSeq) return;
         historyError = caught instanceof Error ? caught.message : "读取最近提交说明失败";
       } finally {
-        historyLoading = false;
+        if (seq === historyRequestSeq) historyLoading = false;
       }
     }
   }
 
   async function closeHistory(restoreFocus = false) {
+    historyRequestSeq += 1;
     historyOpen = false;
+    historyLoading = false;
     pendingRecent = null;
     if (restoreFocus) {
       await tick();

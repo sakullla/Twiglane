@@ -7,6 +7,49 @@
   export const MESSAGE_HEIGHT_COMPACT = 36;
   const STORAGE_KEY = "twiglane.commitMessageHeight";
 
+  export interface RecentCommitMessage {
+    oid: string;
+    summary: string;
+    /** 完整提交说明（含正文）；缺省时退回 summary。 */
+    message?: string;
+  }
+
+  export const DEFAULT_CONVENTIONAL_PREFIXES = ["feat:", "fix:", "refactor:", "docs:", "chore:"] as const;
+
+  const CONVENTIONAL_PREFIX_RE = /^\s*([a-z][a-z0-9-]{1,15})(?:\([^)]+\))?:\s*/i;
+
+  /** 从近期提交中提取最常用的规范前缀，不足时以默认前缀补齐。 */
+  export function extractConventionalPrefixes(messages: readonly RecentCommitMessage[], limit = 5): string[] {
+    const counts = new Map<string, number>();
+    for (const item of messages) {
+      const firstLine = (item.summary || item.message || "").split("\n")[0] ?? "";
+      const match = firstLine.match(CONVENTIONAL_PREFIX_RE);
+      if (!match) continue;
+      const prefix = `${match[1].toLowerCase()}:`;
+      counts.set(prefix, (counts.get(prefix) ?? 0) + 1);
+    }
+    const ranked = [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([prefix]) => prefix);
+    const result: string[] = [];
+    for (const prefix of [...ranked, ...DEFAULT_CONVENTIONAL_PREFIXES]) {
+      if (!result.includes(prefix)) result.push(prefix);
+      if (result.length >= limit) break;
+    }
+    return result;
+  }
+
+  /** 在提交说明首行插入或替换规范前缀，保留其余摘要与正文内容。 */
+  export function applyConventionalPrefix(current: string, prefix: string): string {
+    const newline = current.indexOf("\n");
+    const first = newline === -1 ? current : current.slice(0, newline);
+    const rest = newline === -1 ? "" : current.slice(newline);
+    const nextFirst = CONVENTIONAL_PREFIX_RE.test(first)
+      ? first.replace(CONVENTIONAL_PREFIX_RE, `${prefix} `)
+      : `${prefix} ${first.trimStart()}`;
+    return `${nextFirst}${rest}`;
+  }
+
   export function clampMessageHeight(value: number, max = MESSAGE_HEIGHT_MAX): number {
     const upper = Math.max(MESSAGE_HEIGHT_MIN, Math.min(MESSAGE_HEIGHT_MAX, max));
     return Math.round(Math.min(upper, Math.max(MESSAGE_HEIGHT_MIN, value)));
@@ -76,6 +119,14 @@
     onCommitPush?: () => void;
     /** 打开「本次提交范围」modal。 */
     onScope?: () => void;
+    /** 近期提交说明列表（可选，静态传入或作为默认回退）。 */
+    recentMessages?: RecentCommitMessage[];
+    /** 按需读取当前仓库最近提交说明（最多取前 10 条）。 */
+    onLoadRecentMessages?: () => Promise<RecentCommitMessage[]>;
+    /** 当前仓库是否满足修订最近一次提交（本地未推送普通 HEAD）的条件。 */
+    canAmend?: boolean;
+    /** 触发修订最近提交（Amend）预览与确认流。 */
+    onAmend?: () => void;
     /** 溢出菜单内容：由外壳注入，参数用来收起菜单并把焦点还给「更多」按钮。 */
     overflow?: Snippet<[() => void]>;
   }
@@ -98,6 +149,10 @@
     onCommit,
     onCommitPush,
     onScope,
+    recentMessages,
+    onLoadRecentMessages,
+    canAmend = false,
+    onAmend,
     overflow,
   }: Props = $props();
 
@@ -127,7 +182,19 @@
   let dragging = $derived(dragHeight !== null);
   /** 用户正在写说明或调高度。只由说明框和分隔线打开，点提交区里的按钮不改变布局，否则按钮会在按下时移位。 */
   let active = $state(false);
-  let shownHeight = $derived(dragHeight ?? (active || value.length > 0 ? height : MESSAGE_HEIGHT_COMPACT));
+  let expanded = $derived(active || value.length > 0);
+  let shownHeight = $derived(dragHeight ?? (expanded ? height : MESSAGE_HEIGHT_COMPACT));
+  let historyOpen = $state(false);
+  let historyAnchor = $state<HTMLDivElement | null>(null);
+  let historyButton = $state<HTMLButtonElement | null>(null);
+  let historyStyle = $state("");
+  let historyLoading = $state(false);
+  let historyError = $state<string | null>(null);
+  let loadedRecent = $state<RecentCommitMessage[] | null>(null);
+  let pendingRecent = $state<{ summary: string; text: string } | null>(null);
+  let recentSource = $derived((loadedRecent ?? recentMessages ?? []).slice(0, 10));
+  let hasHistoryEntry = $derived(Boolean(onLoadRecentMessages || (recentMessages && recentMessages.length > 0)));
+  let prefixes = $derived(extractConventionalPrefixes(recentSource));
   let committing = $derived(busy === "commit" || busy === "commit-push");
   let retryingPush = $derived(busy === "push");
   let ready = $derived(hasCommitSummary(value) && paths.length > 0 && !disabled);
@@ -172,6 +239,108 @@
       window.removeEventListener("keydown", key);
     };
   });
+
+  /** 最近提交说明弹层：点击外部收起，Esc 优先取消覆盖确认再收起并归还焦点。 */
+  $effect(() => {
+    if (!historyOpen) return;
+    const close = (event: MouseEvent) => {
+      if (openModalCount() > 0) return;
+      if (historyAnchor && !historyAnchor.contains(event.target as Node)) {
+        historyOpen = false;
+        pendingRecent = null;
+      }
+    };
+    const key = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || openModalCount() > 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (pendingRecent) {
+        pendingRecent = null;
+        return;
+      }
+      void closeHistory(true);
+    };
+    window.addEventListener("mousedown", close);
+    window.addEventListener("keydown", key);
+    return () => {
+      window.removeEventListener("mousedown", close);
+      window.removeEventListener("keydown", key);
+    };
+  });
+
+  async function toggleHistory() {
+    if (historyOpen) {
+      historyOpen = false;
+      pendingRecent = null;
+      return;
+    }
+    moreOpen = false;
+    pendingRecent = null;
+    historyError = null;
+    const rect = historyButton?.getBoundingClientRect();
+    if (rect && typeof window !== "undefined") {
+      const right = Math.max(8, window.innerWidth - rect.right);
+      const bottom = Math.max(8, window.innerHeight - rect.top + 6);
+      const room = Math.max(180, Math.min(340, rect.top - 16));
+      historyStyle = `position:fixed;top:auto;left:auto;right:${right}px;bottom:${bottom}px;max-height:${room}px`;
+    }
+    historyOpen = true;
+    if (onLoadRecentMessages) {
+      historyLoading = true;
+      try {
+        loadedRecent = (await onLoadRecentMessages()).slice(0, 10);
+      } catch (caught) {
+        historyError = caught instanceof Error ? caught.message : "读取最近提交说明失败";
+      } finally {
+        historyLoading = false;
+      }
+    }
+  }
+
+  async function closeHistory(restoreFocus = false) {
+    historyOpen = false;
+    pendingRecent = null;
+    if (restoreFocus) {
+      await tick();
+      historyButton?.focus();
+    }
+  }
+
+  async function applyDraftText(next: string) {
+    onInput(next);
+    historyOpen = false;
+    pendingRecent = null;
+    active = true;
+    await tick();
+    textarea?.focus();
+  }
+
+  function pickRecent(item: RecentCommitMessage) {
+    const text = (item.message ?? item.summary).trim();
+    if (!text) return;
+    if (value.trim() === "" || value.trim() === text) {
+      void applyDraftText(text);
+      return;
+    }
+    pendingRecent = { summary: item.summary, text };
+  }
+
+  function confirmRecent(mode: "replace" | "append") {
+    if (!pendingRecent) return;
+    const next =
+      mode === "replace"
+        ? pendingRecent.text
+        : `${value.replace(/\s+$/u, "")}\n\n${pendingRecent.text}`;
+    void applyDraftText(next);
+  }
+
+  async function insertPrefix(prefix: string) {
+    if (disabled) return;
+    onInput(applyConventionalPrefix(value, prefix));
+    active = true;
+    await tick();
+    textarea?.focus();
+  }
 
   /** 按提交区外的位置或焦点离开时才收起，提交区内的点击不会让布局中途变化。 */
   $effect(() => {
@@ -389,6 +558,107 @@
         aria-label={`摘要 ${summaryChars} 个字符`}
       ><span class="composer-count-label">{"摘要 "}</span>{summaryChars}/{SUMMARY_HARD}</span>
     {/if}
+    {#if onAmend && canAmend}
+      <button
+        type="button"
+        class="composer-amend"
+        disabled={disabled}
+        aria-label="修订最近提交"
+        title={disabled ? BUSY_REASON : "修订最近一次未推送的本地提交（Amend）"}
+        onclick={onAmend}
+      >
+        <Icon name="pencil" size={12} />
+        <span>修订</span>
+      </button>
+    {/if}
+    {#if hasHistoryEntry}
+      <div class="menu-anchor composer-history-anchor" bind:this={historyAnchor}>
+        <button
+          type="button"
+          class="icon-btn sm composer-history-btn"
+          disabled={disabled}
+          aria-label="最近提交说明"
+          aria-haspopup="dialog"
+          aria-expanded={historyOpen}
+          title={disabled ? BUSY_REASON : "参考或填入最近提交说明"}
+          bind:this={historyButton}
+          onclick={() => void toggleHistory()}
+        >
+          <Icon name="history" size={14} />
+        </button>
+        {#if historyOpen}
+          <div
+            class="menu composer-history-popover"
+            role="dialog"
+            aria-label="最近提交说明"
+            style={historyStyle}
+          >
+            <div class="composer-history-head">
+              <strong>最近提交说明</strong>
+              <button
+                type="button"
+                class="icon-btn sm"
+                aria-label="关闭最近提交说明"
+                onclick={() => void closeHistory(true)}
+              >
+                <Icon name="x" size={12} />
+              </button>
+            </div>
+            {#if pendingRecent}
+              <div class="composer-history-confirm" role="alertdialog" aria-label="确认填入提交说明">
+                <p class="composer-history-confirm-title">当前已有提交说明草稿，请选择填入方式：</p>
+                <p class="composer-history-confirm-preview">{pendingRecent.summary}</p>
+                <div class="composer-history-confirm-actions">
+                  <button
+                    type="button"
+                    class="btn btn-primary btn-sm"
+                    onclick={() => confirmRecent("replace")}
+                  >替换当前草稿</button>
+                  <button
+                    type="button"
+                    class="btn btn-secondary btn-sm"
+                    onclick={() => confirmRecent("append")}
+                  >追加到末尾</button>
+                  <button
+                    type="button"
+                    class="btn btn-ghost btn-sm"
+                    onclick={() => (pendingRecent = null)}
+                  >取消</button>
+                </div>
+              </div>
+            {:else if historyLoading}
+              <p class="composer-history-empty" role="status">
+                <span class="spinner" aria-hidden="true"></span>
+                <span>正在读取最近提交…</span>
+              </p>
+            {:else if historyError}
+              <p class="composer-history-empty danger" role="alert">{historyError}</p>
+            {:else if recentSource.length === 0}
+              <p class="composer-history-empty" role="status">暂无可参考的最近提交</p>
+            {:else}
+              <div class="composer-history-list" role="list">
+                {#each recentSource as item (item.oid)}
+                  {@const full = (item.message ?? item.summary).trim()}
+                  {@const hasBody = full.includes("\n")}
+                  <button
+                    type="button"
+                    class="composer-history-item"
+                    title={full}
+                    onclick={() => pickRecent(item)}
+                  >
+                    <span class="composer-history-oid">{item.oid.slice(0, 7)}</span>
+                    <span class="composer-history-summary">{item.summary}</span>
+                    {#if hasBody}
+                      <span class="composer-history-tag" aria-label="含详细说明">含正文</span>
+                    {/if}
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/if}
+      </div>
+    {/if}
     {#if overflow}
       <div class="menu-anchor" bind:this={moreAnchor}>
         <button
@@ -465,6 +735,20 @@
         }
       }}
     ></textarea>
+    {#if expanded}
+      <div class="composer-prefixes" role="group" aria-label="快捷规范前缀">
+        {#each prefixes as prefix (prefix)}
+          <button
+            type="button"
+            class="composer-prefix-chip"
+            disabled={disabled}
+            aria-label={`插入前缀 ${prefix}`}
+            title={disabled ? BUSY_REASON : `在首行插入或替换为 ${prefix}`}
+            onclick={() => void insertPrefix(prefix)}
+          >{prefix}</button>
+        {/each}
+      </div>
+    {/if}
   </div>
 
   <!-- 状态行只在有话要说时出现（没暂存 / 提交失败），平时不占高度。 -->
@@ -567,3 +851,207 @@
     </button>
   </div>
 </section>
+
+<style>
+  .composer-amend {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-4);
+    height: var(--control-pill);
+    padding: 0 var(--space-6);
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-xs);
+    background: var(--surface);
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
+    font-weight: var(--weight-medium);
+    cursor: pointer;
+    transition: var(--transition-interactive);
+  }
+
+  .composer-amend:hover:not(:disabled) {
+    border-color: var(--control-border-hover);
+    background: var(--hover);
+    color: var(--fg);
+  }
+
+  .composer-amend:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: -1px;
+  }
+
+  .composer-amend:disabled {
+    opacity: var(--opacity-disabled);
+    cursor: not-allowed;
+  }
+
+  .composer-history-anchor {
+    position: relative;
+  }
+
+  .composer-history-popover {
+    width: min(320px, calc(100vw - 16px));
+    padding: var(--space-6);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-6);
+    overflow: hidden;
+    z-index: var(--z-menu);
+  }
+
+  .composer-history-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-8);
+    padding: var(--space-2) var(--space-4);
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
+  }
+
+  .composer-history-head strong {
+    font-weight: var(--weight-semibold);
+    color: var(--fg);
+  }
+
+  .composer-history-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    overflow-y: auto;
+    max-height: 240px;
+  }
+
+  .composer-history-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-6);
+    width: 100%;
+    padding: var(--space-6) var(--space-8);
+    border: 0;
+    border-radius: var(--radius-xs);
+    background: transparent;
+    color: var(--fg);
+    font-size: var(--text-sm);
+    text-align: left;
+    cursor: pointer;
+    transition: var(--transition-colors);
+  }
+
+  .composer-history-item:hover {
+    background: var(--hover);
+  }
+
+  .composer-history-item:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: -2px;
+  }
+
+  .composer-history-oid {
+    flex: none;
+    font-family: var(--mono);
+    font-size: var(--text-xs);
+    color: var(--fg-subtle);
+  }
+
+  .composer-history-summary {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .composer-history-tag {
+    flex: none;
+    padding: 0 var(--space-4);
+    border-radius: var(--radius-xs);
+    background: var(--surface-3);
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
+  }
+
+  .composer-history-empty {
+    margin: 0;
+    padding: var(--space-12) var(--space-8);
+    display: flex;
+    align-items: center;
+    gap: var(--space-6);
+    font-size: var(--text-sm);
+    color: var(--fg-muted);
+  }
+
+  .composer-history-empty.danger {
+    color: var(--danger);
+  }
+
+  .composer-history-confirm {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-8);
+    padding: var(--space-6);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+  }
+
+  .composer-history-confirm-title {
+    margin: 0;
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
+  }
+
+  .composer-history-confirm-preview {
+    margin: 0;
+    font-size: var(--text-sm);
+    font-weight: var(--weight-medium);
+    color: var(--fg);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .composer-history-confirm-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-6);
+  }
+
+  .composer-prefixes {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+    margin-top: var(--space-4);
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .composer-prefix-chip {
+    flex: none;
+    height: var(--control-pill);
+    padding: 0 var(--space-6);
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-xs);
+    background: var(--surface-2);
+    color: var(--fg-muted);
+    font-family: var(--mono);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    transition: var(--transition-interactive);
+  }
+
+  .composer-prefix-chip:hover:not(:disabled) {
+    border-color: var(--control-border-hover);
+    background: var(--accent-softer);
+    color: var(--accent-text);
+  }
+
+  .composer-prefix-chip:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: -1px;
+  }
+
+  .composer-prefix-chip:disabled {
+    opacity: var(--opacity-disabled);
+    cursor: not-allowed;
+  }
+</style>

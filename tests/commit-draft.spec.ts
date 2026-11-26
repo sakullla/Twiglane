@@ -8,7 +8,9 @@ import CommitDraft, {
   MESSAGE_HEIGHT_DEFAULT,
   MESSAGE_HEIGHT_MAX,
   MESSAGE_HEIGHT_MIN,
+  applyConventionalPrefix,
   clampMessageHeight,
+  extractConventionalPrefixes,
 } from "../src/lib/components/CommitDraft.svelte";
 import DiffView from "../src/lib/components/DiffView.svelte";
 
@@ -566,6 +568,85 @@ describe("提交区", () => {
     await tick();
     expect(screen.queryByRole("menu", { name: "更多提交操作" })).toBeNull();
     expect(document.activeElement).toBe(trigger);
+  });
+
+  it("最近提交说明弹层支持按需加载，空草稿直接填入，非空草稿需确认替换或追加", async () => {
+    const recent = [
+      { oid: "1234567abcdef", summary: "feat: 支持分组折叠", message: "feat: 支持分组折叠\n\n保留真实计数与快捷操作" },
+      { oid: "89abcdef01234", summary: "fix: 修复筛选状态" },
+    ];
+    const onLoadRecentMessages = vi.fn(async () => recent);
+    const { onInput, rerender } = renderDraft({ value: "", onLoadRecentMessages });
+
+    const historyBtn = screen.getByRole("button", { name: "最近提交说明" });
+    await fireEvent.click(historyBtn);
+    expect(onLoadRecentMessages).toHaveBeenCalledTimes(1);
+    const firstItem = await screen.findByRole("button", { name: /feat: 支持分组折叠/ });
+    expect(firstItem.textContent).toContain("1234567");
+    expect(firstItem.textContent).toContain("含正文");
+
+    // 空草稿：直接填入完整提交说明并收起弹层
+    await fireEvent.click(firstItem);
+    expect(onInput).toHaveBeenLastCalledWith("feat: 支持分组折叠\n\n保留真实计数与快捷操作");
+    expect(screen.queryByRole("dialog", { name: "最近提交说明" })).toBeNull();
+
+    // 已有非空不同草稿：弹出确认，取消零修改，支持替换或追加
+    await rerender({ value: "已有草稿", paths: ["a.ts", "b.ts"], onLoadRecentMessages });
+    onInput.mockClear();
+    await fireEvent.click(historyBtn);
+    await fireEvent.click(await screen.findByRole("button", { name: /fix: 修复筛选状态/ }));
+    expect(onInput, "非空草稿不直接覆盖").not.toHaveBeenCalled();
+    expect(screen.getByRole("alertdialog", { name: "确认填入提交说明" })).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(onInput).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alertdialog", { name: "确认填入提交说明" })).toBeNull();
+
+    await fireEvent.click(screen.getByRole("button", { name: /fix: 修复筛选状态/ }));
+    await fireEvent.click(screen.getByRole("button", { name: "追加到末尾" }));
+    expect(onInput).toHaveBeenLastCalledWith("已有草稿\n\nfix: 修复筛选状态");
+
+    await fireEvent.click(historyBtn);
+    await fireEvent.click(await screen.findByRole("button", { name: /feat: 支持分组折叠/ }));
+    await fireEvent.click(screen.getByRole("button", { name: "替换当前草稿" }));
+    expect(onInput).toHaveBeenLastCalledWith("feat: 支持分组折叠\n\n保留真实计数与快捷操作");
+  });
+
+  it("展开态提供可选规范前缀快捷插入，静止收起态不渲染不增高", async () => {
+    const recentMessages = [
+      { oid: "1", summary: "perf(ui): 优化虚拟列表" },
+      { oid: "2", summary: "perf: 减少重绘" },
+      { oid: "3", summary: "fix: 修复焦点" },
+    ];
+    expect(extractConventionalPrefixes(recentMessages)).toEqual(["perf:", "fix:", "feat:", "refactor:", "docs:"]);
+    expect(applyConventionalPrefix("", "feat:")).toBe("feat: ");
+    expect(applyConventionalPrefix("优化列表", "fix:")).toBe("fix: 优化列表");
+    expect(applyConventionalPrefix("feat(ui): 优化列表\n\n详细说明", "refactor:")).toBe("refactor: 优化列表\n\n详细说明");
+
+    const { onInput } = renderDraft({ value: "", recentMessages });
+    // 静止且为空时不渲染前缀条，不增加提交区高度
+    expect(screen.queryByRole("group", { name: "快捷规范前缀" })).toBeNull();
+
+    // 聚焦展开后展示快捷前缀条，高频前缀排在前列
+    await fireEvent.focus(message());
+    const prefixBar = screen.getByRole("group", { name: "快捷规范前缀" });
+    const chips = [...prefixBar.querySelectorAll("button")].map((btn) => btn.textContent);
+    expect(chips).toEqual(["perf:", "fix:", "feat:", "refactor:", "docs:"]);
+
+    await fireEvent.click(screen.getByRole("button", { name: "插入前缀 perf:" }));
+    expect(onInput).toHaveBeenLastCalledWith("perf: ");
+  });
+
+  it("满足可修订条件时提供修订最近提交快捷触发入口", async () => {
+    const onAmend = vi.fn();
+    const { rerender } = renderDraft({ canAmend: false, onAmend });
+    expect(screen.queryByRole("button", { name: "修订最近提交" })).toBeNull();
+
+    await rerender({ canAmend: true, onAmend, paths: ["a.ts"], value: "" });
+    const amendBtn = screen.getByRole("button", { name: "修订最近提交" }) as HTMLButtonElement;
+    expect(amendBtn.disabled).toBe(false);
+    await fireEvent.click(amendBtn);
+    expect(onAmend).toHaveBeenCalledTimes(1);
   });
 });
 

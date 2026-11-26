@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import { nextIndex, scrollIndexIntoView, visibleRange } from "../layout";
   import { matchParts } from "../history";
   import { bucketByDirectory, filterRows, groupFiles } from "../labels";
@@ -7,8 +8,10 @@
     ALL_REVIEWED,
     BUSY_REASON,
     NO_REVIEW_FILES,
+    batchTargets,
     rangeSelection,
     rowMark,
+    rowsInSelection,
     sameSelection,
     splitPath,
     toggleSelection,
@@ -16,6 +19,24 @@
   } from "../ui";
   import Icon from "./Icon.svelte";
   import LineCounts from "./LineCounts.svelte";
+
+  type StatusFilter = "all" | "modified" | "added" | "deleted" | "renamed";
+
+  const STATUS_FILTERS: readonly { id: StatusFilter; label: string }[] = [
+    { id: "all", label: "全部" },
+    { id: "modified", label: "修改" },
+    { id: "added", label: "新增与未跟踪" },
+    { id: "deleted", label: "删除" },
+    { id: "renamed", label: "重命名" },
+  ];
+
+  const STATUS_FILTER_LABEL: Record<StatusFilter, string> = {
+    all: "全部",
+    modified: "修改",
+    added: "新增与未跟踪",
+    deleted: "删除",
+    renamed: "重命名",
+  };
 
   interface Props {
     files: FileChange[];
@@ -31,6 +52,12 @@
     onMultiSelect?: (set: FileSelection[], focus: FileSelection) => void;
     /** 对全部选中文件执行暂存或取消暂存；不传时只作用在这一行。 */
     onBatch?: (side: DiffSide) => void;
+    /** 多选批量操作条：未传时分别回退到 onStageAll/onUnstageAll/onBatch 或剪贴板。 */
+    onBatchStage?: (paths: string[]) => void;
+    onBatchUnstage?: (paths: string[]) => void;
+    onBatchDiscard?: (paths: string[]) => void;
+    onBatchCopyPaths?: (paths: string[]) => void;
+    onClearMultiSelect?: () => void;
     onStage: (path: string) => void;
     onUnstage: (path: string) => void;
     onStageAll?: (paths: string[]) => void;
@@ -100,13 +127,20 @@
 
   type SectionSide = DiffSide | "conflicted";
   type Item =
-    | { kind: "header"; side: SectionSide; count: number; paths: string[] }
+    | { kind: "header"; side: SectionSide; count: number; paths: string[]; collapsed: boolean }
     | { kind: "dir"; side: SectionSide; directory: string; label: string; count: number; paths: string[]; collapsed: boolean }
     | { kind: "row"; row: FileRow };
 
-  // 分组只改呈现，不写入设置，默认仍是列表。
+  // 分组、分组折叠与变更状态筛选只改呈现，不写入设置。
   let directoryMode = $state(false);
   let collapsedDirs = $state<Set<string>>(new Set());
+  let collapsedSections = $state<Set<SectionSide>>(new Set());
+  let statusFilter = $state<StatusFilter>("all");
+  let statusMenuOpen = $state(false);
+  let statusMenuAnchor = $state<HTMLDivElement | null>(null);
+  let statusMenuTrigger = $state<HTMLButtonElement | null>(null);
+  let statusMenu = $state<HTMLDivElement | null>(null);
+  let statusMenuStyle = $state("");
 
   /** 每行 30px：文件行单行排布（名字在前、目录弱化跟在后面），实际画 28px、上下各留 1px 呼吸；
       分组表头用整行。单行比旧的两行行高几乎多放一倍文件，长列表扫一眼就能看全。 */
@@ -123,6 +157,11 @@
     onSelect,
     onMultiSelect,
     onBatch,
+    onBatchStage,
+    onBatchUnstage,
+    onBatchDiscard,
+    onBatchCopyPaths,
+    onClearMultiSelect,
     onStage,
     onUnstage,
     onStageAll,
@@ -172,8 +211,123 @@
   let unstagedRows = $derived(filterRows(groups.unstaged, nameQuery));
   let stagedRows = $derived(filterRows(groups.staged, nameQuery));
 
+  function sectionLabel(side: SectionSide): string {
+    if (side === "conflicted") return "冲突";
+    if (taskMode) return "任务文件";
+    return side === "unstaged" ? "未暂存的改动" : "已暂存";
+  }
+
+  function matchesStatusFilter(row: FileRow, filter: StatusFilter): boolean {
+    if (filter === "all") return true;
+    if (row.unmerged) return false;
+    if (row.untracked) return filter === "added";
+    const kind = row.side === "staged" ? row.staged : row.unstaged;
+    switch (filter) {
+      case "modified":
+        return kind === "modified" || kind === "typeChanged";
+      case "added":
+        return kind === "added" || kind === "copied";
+      case "deleted":
+        return kind === "deleted";
+      case "renamed":
+        return kind === "renamed";
+    }
+  }
+
+  function toggleSection(side: SectionSide) {
+    const next = new Set(collapsedSections);
+    if (next.has(side)) next.delete(side);
+    else next.add(side);
+    collapsedSections = next;
+  }
+
+  function statusMenuItems(): HTMLButtonElement[] {
+    if (!statusMenu) return [];
+    return [...statusMenu.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]:not(:disabled)')];
+  }
+
+  async function toggleStatusMenu(focusFirst = false) {
+    if (statusMenuOpen) {
+      statusMenuOpen = false;
+      return;
+    }
+    const rect = statusMenuTrigger?.getBoundingClientRect();
+    if (rect && typeof window !== "undefined") {
+      const right = Math.max(8, window.innerWidth - rect.right);
+      const top = Math.max(8, rect.bottom + 4);
+      statusMenuStyle = `position:fixed;top:${top}px;right:${right}px;left:auto`;
+    }
+    statusMenuOpen = true;
+    if (focusFirst) {
+      await tick();
+      const items = statusMenuItems();
+      const current = items.find((item) => item.getAttribute("aria-checked") === "true") ?? items[0];
+      current?.focus();
+    }
+  }
+
+  async function closeStatusMenu(restoreFocus = false) {
+    statusMenuOpen = false;
+    if (restoreFocus) {
+      await tick();
+      statusMenuTrigger?.focus();
+    }
+  }
+
+  function selectStatusFilter(next: StatusFilter) {
+    statusFilter = next;
+    void closeStatusMenu(true);
+  }
+
+  function onStatusMenuKey(event: KeyboardEvent) {
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      void closeStatusMenu(true);
+      return;
+    }
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Home" && event.key !== "End") return;
+    const items = statusMenuItems();
+    if (items.length === 0) return;
+    event.preventDefault();
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    if (event.key === "Home") {
+      items[0]?.focus();
+      return;
+    }
+    if (event.key === "End") {
+      items[items.length - 1]?.focus();
+      return;
+    }
+    const delta = event.key === "ArrowDown" ? 1 : -1;
+    const next = current < 0 ? (delta > 0 ? 0 : items.length - 1) : (current + delta + items.length) % items.length;
+    items[next]?.focus();
+  }
+
+  $effect(() => {
+    if (!statusMenuOpen) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (statusMenuAnchor && !statusMenuAnchor.contains(event.target as Node)) {
+        statusMenuOpen = false;
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        void closeStatusMenu(true);
+      }
+    };
+    window.addEventListener("mousedown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("mousedown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  });
+
   /**
-   * 分组只由全部行决定：隐藏已审阅只影响显示出来的行，
+   * 分组只由全部行决定：隐藏已审阅与变更状态筛选只影响显示出来的行，
    * 表头数量与「全部暂存 / 全部取消暂存」的路径范围仍是完整分组。
    */
   function sectionItems(
@@ -183,13 +337,15 @@
     paths: string[],
   ): Item[] {
     if (rows.length === 0) return [];
-    const header: Item = { kind: "header", side, count: rows.length, paths };
+    const collapsed = collapsedSections.has(side);
+    const header: Item = { kind: "header", side, count: rows.length, paths, collapsed };
+    if (collapsed) return [header];
     if (!directoryMode) return [header, ...shown.map((row) => ({ kind: "row" as const, row }))];
     const needle = (contentSearch?.active ? query : nameQuery).trim();
     const items: Item[] = [header];
     for (const bucket of bucketByDirectory(shown)) {
       const key = `${side}:${bucket.directory}`;
-      const collapsed = collapsedDirs.has(key) && needle === "";
+      const dirCollapsed = collapsedDirs.has(key) && needle === "";
       items.push({
         kind: "dir",
         side,
@@ -197,9 +353,9 @@
         label: bucket.directory || "仓库根目录",
         count: bucket.rows.length,
         paths: bucket.rows.filter((row) => !row.unmerged).map((row) => row.path),
-        collapsed,
+        collapsed: dirCollapsed,
       });
-      if (!collapsed) {
+      if (!dirCollapsed) {
         for (const row of bucket.rows) items.push({ kind: "row", row });
       }
     }
@@ -208,8 +364,13 @@
 
   function shownRows(list: FileRow[]): FileRow[] {
     const filter = visiblePaths;
-    if (!hideReviewed && !filter) return list;
-    return list.filter((row) => (!hideReviewed || !reviewed.has(row.path)) && (!filter || filter.has(row.path)));
+    if (!hideReviewed && !filter && statusFilter === "all") return list;
+    return list.filter(
+      (row) =>
+        (!hideReviewed || !reviewed.has(row.path)) &&
+        (!filter || filter.has(row.path)) &&
+        matchesStatusFilter(row, statusFilter),
+    );
   }
 
   let conflictedShown = $derived(shownRows(conflictedRows));
@@ -231,7 +392,14 @@
       stagedRows.filter((row) => !row.unmerged).map((row) => row.path),
     ),
   ]);
-  let rows = $derived([...conflictedShown, ...unstagedShown, ...stagedShown]);
+  /** 满足全部筛选条件的行（不受分组折叠影响），用于空状态与匹配计数。 */
+  let matchedRows = $derived([...conflictedShown, ...unstagedShown, ...stagedShown]);
+  /** 当前展开分组中可键盘导航与框选的行。 */
+  let rows = $derived([
+    ...(collapsedSections.has("conflicted") ? [] : conflictedShown),
+    ...(collapsedSections.has("unstaged") ? [] : unstagedShown),
+    ...(collapsedSections.has("staged") ? [] : stagedShown),
+  ]);
   let scrollTop = $state(0);
   let viewport = $state(0);
   let list = $state<HTMLDivElement | null>(null);
@@ -242,6 +410,43 @@
   let total = $derived(groups.conflicted.length + groups.unstaged.length + groups.staged.length);
 
   let multi = $derived(selectedSet.length > 1);
+  let allGroupRows = $derived([...groups.conflicted, ...groups.unstaged, ...groups.staged]);
+  let multiRows = $derived(multi ? rowsInSelection(allGroupRows, selectedSet) : []);
+  let multiTargets = $derived(batchTargets(multiRows));
+  let multiPaths = $derived([...new Set(multiRows.map((row) => row.path))]);
+
+  function exitMultiSelect() {
+    if (onClearMultiSelect) {
+      onClearMultiSelect();
+    } else {
+      const target = selected ?? selectedSet[0];
+      if (target) single(target);
+    }
+    list?.focus({ preventScroll: true });
+  }
+
+  function runBatchStage() {
+    if (disabled || multiTargets.stage.length === 0) return;
+    if (onBatchStage) onBatchStage(multiTargets.stage);
+    else if (onStageAll) onStageAll(multiTargets.stage);
+    else onBatch?.("unstaged");
+  }
+
+  function runBatchUnstage() {
+    if (disabled || multiTargets.unstage.length === 0) return;
+    if (onBatchUnstage) onBatchUnstage(multiTargets.unstage);
+    else if (onUnstageAll) onUnstageAll(multiTargets.unstage);
+    else onBatch?.("staged");
+  }
+
+  function runBatchCopyPaths() {
+    if (multiPaths.length === 0) return;
+    if (onBatchCopyPaths) {
+      onBatchCopyPaths(multiPaths);
+    } else {
+      void navigator.clipboard?.writeText(multiPaths.join("\n"));
+    }
+  }
   /** Shift 扩展选择的起点：普通选择时落下，扩展过程中不动。 */
   let anchor: FileSelection | null = null;
 
@@ -430,7 +635,7 @@
     if (event.key === "Escape" && multi && selected) {
       event.preventDefault();
       event.stopPropagation();
-      single(selected);
+      exitMultiSelect();
       return;
     }
     if (event.altKey || event.ctrlKey || event.metaKey) return;
@@ -480,7 +685,7 @@
     {/if}
     {#if query}
       {#if total > 0 && !contentSearch?.busy}
-        <span class="field-count" title={`当前匹配 ${rows.length} 条，共 ${total} 条`}>{rows.length}/{total}</span>
+        <span class="field-count" title={`当前匹配 ${matchedRows.length} 条，共 ${total} 条`}>{matchedRows.length}/{total}</span>
       {/if}
       <button type="button" class="field-clear" aria-label="清空筛选" onclick={() => onQuery("")}>
         <Icon name="x" size={12} />
@@ -495,6 +700,54 @@
         title={contentSearch.active ? "正在按文件内容搜索；点击改回按文件名搜索" : "改为按文件内容搜索（在任务文件的当前内容里找关键词）"}
         onclick={() => contentSearch?.onToggle(!contentSearch.active)}
       ><Icon name="code" size={13} /></button>
+    {/if}
+  </div>
+  <div class="menu-anchor status-filter-anchor" bind:this={statusMenuAnchor}>
+    <button
+      type="button"
+      class="icon-btn sm status-filter-btn"
+      data-active={statusFilter !== "all" ? "true" : undefined}
+      aria-label="按变更状态筛选"
+      aria-haspopup="menu"
+      aria-expanded={statusMenuOpen}
+      title={statusFilter === "all" ? "按变更状态筛选" : `当前状态筛选：${STATUS_FILTER_LABEL[statusFilter]}（点击切换）`}
+      bind:this={statusMenuTrigger}
+      onclick={(event) => void toggleStatusMenu(event.detail === 0)}
+      onkeydown={(event) => {
+        if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+        if (event.key === "ArrowDown") {
+          event.preventDefault();
+          void toggleStatusMenu(true);
+        }
+      }}
+    >
+      <Icon name="filter" size={14} />
+    </button>
+    {#if statusMenuOpen}
+      <div
+        class="menu status-filter-menu"
+        role="menu"
+        tabindex="-1"
+        aria-label="变更状态筛选"
+        style={statusMenuStyle}
+        bind:this={statusMenu}
+        onkeydown={onStatusMenuKey}
+      >
+        {#each STATUS_FILTERS as option (option.id)}
+          <button
+            type="button"
+            class="menu-item"
+            role="menuitemradio"
+            aria-checked={statusFilter === option.id}
+            onclick={() => selectStatusFilter(option.id)}
+          >
+            <span class="status-check" aria-hidden="true">
+              {#if statusFilter === option.id}<Icon name="check" size={13} />{/if}
+            </span>
+            <span>{option.label}</span>
+          </button>
+        {/each}
+      </div>
     {/if}
   </div>
   {#if onToggleReview || reviewTotal > 0}
@@ -540,6 +793,100 @@
     <button type="button" aria-pressed={directoryMode} aria-label="目录" title="按目录分组" onclick={() => (directoryMode = true)}><Icon name="folder" size={14} /></button>
   </div>
 </div>
+{#if statusFilter !== "all"}
+  <div class="status-filter-bar" role="status">
+    <span class="status-filter-chip">
+      <Icon name="filter" size={12} />
+      <span>状态：{STATUS_FILTER_LABEL[statusFilter]}</span>
+      <span class="status-filter-count">{matchedRows.length}/{total}</span>
+    </span>
+    <span class="spacer"></span>
+    <button
+      type="button"
+      class="btn btn-ghost btn-sm status-filter-clear"
+      aria-label="清除状态筛选"
+      onclick={() => (statusFilter = "all")}
+    >
+      <Icon name="x" size={12} />
+      <span>清除</span>
+    </button>
+  </div>
+{/if}
+{#if multi}
+  <div class="file-batch-bar" role="region" aria-label="多选批量操作">
+    <div class="file-batch-summary">
+      <strong>已选中 {selectedSet.length} 项</strong>
+      {#if multiTargets.conflicts > 0}
+        <span class="file-batch-note" title="冲突文件不参与批量暂存或放弃">含 {multiTargets.conflicts} 个冲突</span>
+      {/if}
+      <span class="spacer"></span>
+      <button
+        type="button"
+        class="icon-btn sm file-batch-exit"
+        aria-label="退出多选"
+        title="退出多选（Esc）"
+        onclick={exitMultiSelect}
+      >
+        <Icon name="x" size={13} />
+      </button>
+    </div>
+    <div class="file-batch-actions" role="group" aria-label="批量操作">
+      {#if !taskMode && multiTargets.stage.length > 0 && (onBatchStage || onStageAll || onBatch)}
+        <button
+          type="button"
+          class="btn btn-ghost btn-sm"
+          disabled={disabled}
+          aria-label="批量暂存"
+          title={disabled
+            ? BUSY_REASON
+            : multiTargets.conflicts > 0
+              ? `暂存 ${multiTargets.stage.length} 个未暂存文件（已自动排除 ${multiTargets.conflicts} 个冲突文件）`
+              : `暂存选中的 ${multiTargets.stage.length} 个未暂存文件`}
+          onclick={runBatchStage}
+        >
+          <Icon name="plus" size={12} /><span>暂存</span>
+        </button>
+      {/if}
+      {#if !taskMode && multiTargets.unstage.length > 0 && (onBatchUnstage || onUnstageAll || onBatch)}
+        <button
+          type="button"
+          class="btn btn-ghost btn-sm"
+          disabled={disabled}
+          aria-label="批量取消暂存"
+          title={disabled ? BUSY_REASON : `取消暂存选中的 ${multiTargets.unstage.length} 个已暂存文件`}
+          onclick={runBatchUnstage}
+        >
+          <Icon name="minus" size={12} /><span>取消暂存</span>
+        </button>
+      {/if}
+      {#if !taskMode && onBatchDiscard && multiTargets.discard.length > 0}
+        <button
+          type="button"
+          class="btn btn-ghost btn-sm file-batch-danger"
+          disabled={disabled}
+          aria-label="批量放弃修改"
+          title={disabled
+            ? BUSY_REASON
+            : multiTargets.conflicts > 0
+              ? `放弃 ${multiTargets.discard.length} 个文件的修改（已自动排除 ${multiTargets.conflicts} 个冲突文件）`
+              : `放弃选中的 ${multiTargets.discard.length} 个文件的修改`}
+          onclick={() => onBatchDiscard?.(multiTargets.discard)}
+        >
+          <Icon name="undo" size={12} /><span>放弃</span>
+        </button>
+      {/if}
+      <button
+        type="button"
+        class="btn btn-ghost btn-sm"
+        aria-label="复制已选路径"
+        title={`复制 ${multiPaths.length} 个文件路径`}
+        onclick={runBatchCopyPaths}
+      >
+        <Icon name="copy" size={12} /><span>复制路径</span>
+      </button>
+    </div>
+  </div>
+{/if}
 {#if reviewToolsShown}
   <!-- 审阅辅助条：未审阅跳转与隐藏已审阅。按钮与 review.prev/next 命令同源。 -->
   <div class="review-bar" role="group" aria-label="审阅工具">
@@ -591,7 +938,7 @@
 {#if stageNote}
   <p class="file-tree-status" role="status">{stageNote}</p>
 {/if}
-{#if reviewNav && reviewNav.total > 0 && reviewNav.remaining === 0 && rows.length > 0 && (!visiblePaths || reviewReviewed >= reviewTotal)}
+{#if reviewNav && reviewNav.total > 0 && reviewNav.remaining === 0 && matchedRows.length > 0 && (!visiblePaths || reviewReviewed >= reviewTotal)}
   <!-- 队尾/全部完成的下一步：隐藏已审阅，或按真实暂存范围提交；都不改任务范围。 -->
   <p class="file-tree-status review-done" role="status">
     <Icon name="check-circle" size={13} />
@@ -619,14 +966,28 @@
       <span class="empty-icon ok"><Icon name="check-circle" size={24} /></span>
       <strong>工作区很干净</strong>
     </div>
-  {:else if rows.length === 0 && filterEmpty}
+  {:else if matchedRows.length === 0 && filterEmpty}
     <!-- 空状态零：审查队列的筛选段没有命中。清除筛选恢复完整队列，进度与记录不变。 -->
     <div class="empty">
       <span class="empty-icon"><Icon name="search" size={22} /></span>
       <strong>{filterEmpty.message}</strong>
       <button type="button" class="btn btn-secondary btn-sm" onclick={filterEmpty.onClear}>清除筛选</button>
     </div>
-  {:else if rows.length === 0 && hideReviewed}
+  {:else if matchedRows.length === 0 && statusFilter !== "all"}
+    <!-- 空状态：变更状态筛选（可叠加关键词）没有命中。 -->
+    <div class="empty">
+      <span class="empty-icon"><Icon name="filter" size={22} /></span>
+      <strong>没有符合「{STATUS_FILTER_LABEL[statusFilter]}」的文件</strong>
+      <button
+        type="button"
+        class="btn btn-secondary btn-sm"
+        onclick={() => {
+          statusFilter = "all";
+          if (query.trim()) onQuery("");
+        }}
+      >清除筛选</button>
+    </div>
+  {:else if matchedRows.length === 0 && hideReviewed}
     <!-- 空状态一：已审阅的文件被隐藏。 -->
     <div class="empty">
       <span class="empty-icon ok"><Icon name="check-circle" size={22} /></span>
@@ -635,14 +996,14 @@
         <button type="button" class="btn btn-secondary btn-sm" onclick={() => onHideReviewed?.(false)}>显示已审阅</button>
       {/if}
     </div>
-  {:else if rows.length === 0 && query.trim() !== ""}
+  {:else if matchedRows.length === 0 && query.trim() !== ""}
     <!-- 空状态二：筛选没有结果。下一步是清掉筛选，而不是换一个范围。 -->
     <div class="empty">
       <span class="empty-icon"><Icon name="search" size={22} /></span>
       <strong>没有匹配的文件</strong>
       <button type="button" class="btn btn-secondary btn-sm" onclick={() => onQuery("")}>清除筛选</button>
     </div>
-  {:else if rows.length === 0}
+  {:else if matchedRows.length === 0}
     <!-- 空状态三：范围内没有未审阅文件可继续，或本来就没有文件。 -->
     <div class="empty">
       <span class="empty-icon ok"><Icon name="check-circle" size={22} /></span>
@@ -658,11 +1019,22 @@
           <div
             class="file-group"
             class:first={range.start + index === 0}
+            class:collapsed={item.collapsed}
             role="presentation"
             style={`top:${top}px;height:${ROW_HEIGHT}px`}
           >
-            <span>{item.side === "conflicted" ? "冲突" : taskMode ? "任务文件" : item.side === "unstaged" ? "未暂存的改动" : "已暂存"}</span>
-            <span class="count" class:danger={item.side === "conflicted"}>{item.count}</span>
+            <button
+              type="button"
+              class="file-group-toggle"
+              aria-expanded={!item.collapsed}
+              aria-label={`${sectionLabel(item.side)}（${item.count}）`}
+              title={item.collapsed ? `展开${sectionLabel(item.side)}` : `折叠${sectionLabel(item.side)}`}
+              onclick={() => toggleSection(item.side)}
+            >
+              <Icon name={item.collapsed ? "chevron-right" : "chevron-down"} size={13} />
+              <span>{sectionLabel(item.side)}</span>
+              <span class="count" class:danger={item.side === "conflicted"}>{item.count}</span>
+            </button>
             <span class="spacer"></span>
             {#if item.side === "conflicted" && onResolve}
               <button
@@ -909,3 +1281,140 @@
     </div>
   {/if}
 </div>
+
+<style>
+  .status-filter-anchor {
+    position: relative;
+    flex: none;
+  }
+
+  .status-filter-btn[data-active="true"] {
+    color: var(--accent-text);
+    background: var(--accent-soft);
+  }
+
+  .status-filter-menu {
+    min-width: 148px;
+    padding: var(--space-4);
+    z-index: var(--z-menu);
+  }
+
+  .status-check {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    flex: none;
+    color: var(--accent-text);
+  }
+
+  .status-filter-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-6);
+    padding: var(--space-4) var(--space-12);
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
+  }
+
+  .status-filter-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-4);
+    color: var(--accent-text);
+    font-weight: var(--weight-medium);
+    min-width: 0;
+  }
+
+  .status-filter-count {
+    color: var(--fg-subtle);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .status-filter-clear {
+    height: var(--control-height-xs);
+    padding: 0 var(--space-6);
+    font-size: var(--text-xs);
+  }
+
+  .file-batch-bar {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+    padding: var(--space-6) var(--space-12);
+    background: var(--accent-softer);
+    border-bottom: 1px solid var(--border);
+    font-size: var(--text-xs);
+  }
+
+  .file-batch-summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-6);
+    color: var(--fg);
+  }
+
+  .file-batch-summary strong {
+    font-weight: var(--weight-semibold);
+    color: var(--accent-text);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .file-batch-note {
+    color: var(--fg-subtle);
+    white-space: nowrap;
+  }
+
+  .file-batch-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-4);
+  }
+
+  .file-batch-actions .btn {
+    height: var(--control-height-xs);
+    padding: 0 var(--space-6);
+    font-size: var(--text-xs);
+    gap: var(--space-4);
+  }
+
+  .file-batch-danger {
+    color: var(--danger);
+  }
+
+  .file-batch-danger:hover:not(:disabled) {
+    background: var(--danger-soft);
+    color: var(--danger-hover);
+  }
+
+  .file-group-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-6);
+    min-width: 0;
+    padding: var(--space-2) var(--space-4);
+    margin-left: calc(var(--space-4) * -1);
+    border: 0;
+    border-radius: var(--radius-xs);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    letter-spacing: inherit;
+    cursor: pointer;
+    transition: var(--transition-colors);
+  }
+
+  .file-group-toggle:hover {
+    background: var(--hover);
+    color: var(--fg);
+  }
+
+  .file-group-toggle:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: -2px;
+  }
+</style>

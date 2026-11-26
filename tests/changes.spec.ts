@@ -3741,4 +3741,97 @@ describe("差异逐行选择交互：Shift 连选与 Esc 退出", () => {
     expect(onRetry).toHaveBeenCalledTimes(1);
     expect(hunkDialog.textContent).toContain("差异快照已过期");
   });
+
+  it("右键菜单提供「放弃选中行」并复用确认框，未选行或受阻时给出明确中文原因", async () => {
+    const onDiscardLines = vi.fn().mockResolvedValue(undefined);
+    const lines: DiffLine[] = [
+      { kind: "hunk", text: "@@ -1,2 +1,3 @@", oldNo: null, newNo: null, hunkIndex: 0 },
+      { kind: "context", text: " a", oldNo: 1, newNo: 1, hunkIndex: 0 },
+      { kind: "add", text: "+b", oldNo: null, newNo: 2, hunkIndex: 0 },
+      { kind: "context", text: " c", oldNo: 2, newNo: 3, hunkIndex: 0 },
+    ];
+    const baseDiff = pickableDiff({
+      path: "src/ctx-menu.ts",
+      snapshot: "snap-ctx",
+      lines,
+      totalLines: lines.length,
+      hunks: [{ index: 0, header: "@@ -1,2 +1,3 @@", complete: true, stageable: true, startLine: 0, lineCount: lines.length }],
+    });
+    const view = render(DiffView, {
+      props: {
+        selection: { path: "src/ctx-menu.ts", side: "unstaged" },
+        diff: baseDiff,
+        error: null,
+        loading: false,
+        disabled: false,
+        onStageHunk: () => {},
+        onStageLines: () => {},
+        onDiscardLines,
+        onLoadMore: () => {},
+      },
+    });
+
+    const openContextMenu = async () => {
+      const row = document.querySelector<HTMLElement>("[data-line='2']")!;
+      await fireEvent.contextMenu(row, { clientX: 80, clientY: 80 });
+      return screen.getByRole("menu", { name: "差异操作" });
+    };
+
+    // 1. 未选行时禁用并说明原因。
+    let menu = await openContextMenu();
+    let item = within(menu).getByRole("menuitem", { name: /放弃选中行/ });
+    expect(item.getAttribute("aria-disabled")).toBe("true");
+    expect(item.getAttribute("title")).toContain("先选中要放弃的新增或删除行");
+    await fireEvent.keyDown(menu, { key: "Escape" });
+
+    // 2. 选中行后右键触发「放弃选中行」进入 ConfirmDialog，确认后调用 onDiscardLines。
+    const ln = document.querySelector<HTMLElement>(".diff-line .ln.ln-pickable")!;
+    await fireEvent.click(ln);
+    menu = await openContextMenu();
+    item = within(menu).getByRole("menuitem", { name: /放弃选中行/ });
+    expect(item.getAttribute("aria-disabled")).toBeNull();
+    await fireEvent.click(item);
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.textContent).toContain("src/ctx-menu.ts");
+    await fireEvent.click(within(dialog).getByRole("button", { name: "放弃选中行" }));
+    await waitFor(() =>
+      expect(onDiscardLines).toHaveBeenCalledWith([
+        expect.objectContaining({ hunkIndex: 0, kind: "add", newNo: 2 }),
+      ]),
+    );
+
+    // 3. 未跟踪、已暂存、完整文件、远端与写入中受阻时均给出明确中文原因。
+    const blockedCases: Array<{ props: Record<string, unknown>; expected: string }> = [
+      { props: { untracked: true }, expected: "未跟踪文件不能按块或按行放弃" },
+      {
+        props: { selection: { path: "src/ctx-menu.ts", side: "staged" }, diff: { ...baseDiff, staged: true } },
+        expected: "已暂存内容不能直接放弃",
+      },
+      { props: { fullFile: true }, expected: "完整文件视图不能按块或按行放弃" },
+      { props: { discardBlockedReason: "远端 SSH 仓库暂不支持按块或按行放弃修改" }, expected: "远端 SSH 仓库暂不支持" },
+      { props: { disabled: true }, expected: "正在读取或写入" },
+    ];
+    for (const c of blockedCases) {
+      await view.rerender({
+        selection: { path: "src/ctx-menu.ts", side: "unstaged" },
+        diff: baseDiff,
+        error: null,
+        loading: false,
+        disabled: false,
+        untracked: false,
+        fullFile: false,
+        discardBlockedReason: null,
+        onStageHunk: () => {},
+        onStageLines: () => {},
+        onDiscardLines,
+        onLoadMore: () => {},
+        ...c.props,
+      });
+      const m = await openContextMenu();
+      const entry = within(m).getByRole("menuitem", { name: /放弃选中行/ });
+      expect(entry.getAttribute("aria-disabled")).toBe("true");
+      expect(entry.getAttribute("title")).toContain(c.expected);
+      await fireEvent.keyDown(m, { key: "Escape" });
+    }
+  });
 });

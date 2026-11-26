@@ -1308,15 +1308,15 @@
     const target = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-line]");
     const index = target ? Number(target.dataset.line) : -1;
     const line = index >= 0 ? lines[index] : undefined;
-    const picked = typeof window !== "undefined" ? (window.getSelection()?.toString() ?? "") : "";
+    const textSelection = typeof window !== "undefined" ? (window.getSelection()?.toString() ?? "") : "";
     const hunk = index >= 0 ? hunkOf(index) : null;
     const entries: ContextMenuEntry[] = [
       {
         id: "copy-selection",
         label: "复制选中内容",
         icon: "copy",
-        disabledReason: picked ? undefined : "先在差异里选中文字",
-        run: () => void copy(picked),
+        disabledReason: textSelection ? undefined : "先在差异里选中文字",
+        run: () => void copy(textSelection),
       },
       {
         id: "copy-line",
@@ -1381,6 +1381,23 @@
           danger: true,
           disabledReason: discardReason,
           run: () => hunk && requestDiscardHunk(hunk),
+        });
+      }
+      if (onDiscardLines) {
+        const discardLinesReason = discardBlocker
+          ? discardBlocker
+          : disabled
+            ? "正在读取或写入，稍后再试"
+            : picked.length === 0
+              ? "先选中要放弃的新增或删除行"
+              : undefined;
+        entries.push({
+          id: "discard-lines",
+          label: "放弃选中行",
+          icon: "trash",
+          danger: true,
+          disabledReason: discardLinesReason,
+          run: () => requestDiscardLines(),
         });
       }
     }

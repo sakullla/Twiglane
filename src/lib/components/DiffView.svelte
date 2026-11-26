@@ -350,6 +350,12 @@
     buildExpandedDiffLines(view.lines, view.origin, expandedContext, expandedTotalLines, canExpandContext),
   );
 
+  function expandBtnTitle(actionLabel: string): string {
+    if (expandingGapId !== null) return "正在展开上下文，稍后再试";
+    if (disabled) return BUSY_REASON;
+    return actionLabel;
+  }
+
   async function expandGap(spec: ContextExpandSpec, direction: "up" | "down" | "all"): Promise<void> {
     if (!onExpandContext || expandingGapId !== null || disabled) return;
     let startLine = spec.startNew;
@@ -2526,34 +2532,34 @@
                   {#if expandingGapId === spec.id}
                     <span class="diff-expand-busy"><span class="spinner muted" aria-hidden="true"></span>正在展开上下文…</span>
                   {:else if spec.position === "top"}
-                    <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "up")}>
+                    <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} title={expandBtnTitle(`展开上方 ${Math.min(CONTEXT_EXPAND_STEP, spec.remaining ?? CONTEXT_EXPAND_STEP)} 行上下文`)} onclick={() => void expandGap(spec, "up")}>
                       <Icon name="chevron-up" size={12} /><span>展开上方 {Math.min(CONTEXT_EXPAND_STEP, spec.remaining ?? CONTEXT_EXPAND_STEP)} 行</span>
                     </button>
                     {#if (spec.remaining ?? 0) > CONTEXT_EXPAND_STEP && (spec.remaining ?? 0) <= 200}
-                      <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "all")}>
+                      <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} title={expandBtnTitle(`展开全部 ${spec.remaining} 行上下文`)} onclick={() => void expandGap(spec, "all")}>
                         <span>展开全部 {spec.remaining} 行</span>
                       </button>
                     {/if}
                   {:else if spec.position === "between"}
                     {#if (spec.remaining ?? 0) <= CONTEXT_EXPAND_STEP}
-                      <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "all")}>
+                      <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} title={expandBtnTitle(`展开中间 ${spec.remaining} 行上下文`)} onclick={() => void expandGap(spec, "all")}>
                         <Icon name="rows" size={12} /><span>展开中间 {spec.remaining} 行</span>
                       </button>
                     {:else}
-                      <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "down")}>
+                      <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} title={expandBtnTitle(`向下展开 ${CONTEXT_EXPAND_STEP} 行上下文`)} onclick={() => void expandGap(spec, "down")}>
                         <Icon name="chevron-down" size={12} /><span>向下展开 {CONTEXT_EXPAND_STEP} 行</span>
                       </button>
-                      <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "up")}>
+                      <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} title={expandBtnTitle(`向上展开 ${CONTEXT_EXPAND_STEP} 行上下文`)} onclick={() => void expandGap(spec, "up")}>
                         <Icon name="chevron-up" size={12} /><span>向上展开 {CONTEXT_EXPAND_STEP} 行</span>
                       </button>
                       {#if (spec.remaining ?? 0) <= 200}
-                        <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "all")}>
+                        <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} title={expandBtnTitle(`展开全部 ${spec.remaining} 行上下文`)} onclick={() => void expandGap(spec, "all")}>
                           <span>展开全部 {spec.remaining} 行</span>
                         </button>
                       {/if}
                     {/if}
                   {:else}
-                    <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "down")}>
+                    <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} title={expandBtnTitle(`展开下方 ${spec.remaining !== null ? Math.min(CONTEXT_EXPAND_STEP, spec.remaining) : CONTEXT_EXPAND_STEP} 行上下文`)} onclick={() => void expandGap(spec, "down")}>
                       <Icon name="chevron-down" size={12} /><span>展开下方 {spec.remaining !== null ? Math.min(CONTEXT_EXPAND_STEP, spec.remaining) : CONTEXT_EXPAND_STEP} 行</span>
                     </button>
                   {/if}
@@ -2656,34 +2662,34 @@
                     {#if expandingGapId === spec.id}
                       <span class="diff-expand-busy"><span class="spinner muted" aria-hidden="true"></span>正在展开上下文…</span>
                     {:else if spec.position === "top"}
-                      <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "up")}>
+                      <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} title={expandBtnTitle(`展开上方 ${Math.min(CONTEXT_EXPAND_STEP, spec.remaining ?? CONTEXT_EXPAND_STEP)} 行上下文`)} onclick={() => void expandGap(spec, "up")}>
                         <Icon name="chevron-up" size={12} /><span>展开上方 {Math.min(CONTEXT_EXPAND_STEP, spec.remaining ?? CONTEXT_EXPAND_STEP)} 行</span>
                       </button>
                       {#if (spec.remaining ?? 0) > CONTEXT_EXPAND_STEP && (spec.remaining ?? 0) <= 200}
-                        <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "all")}>
+                        <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} title={expandBtnTitle(`展开全部 ${spec.remaining} 行上下文`)} onclick={() => void expandGap(spec, "all")}>
                           <span>展开全部 {spec.remaining} 行</span>
                         </button>
                       {/if}
                     {:else if spec.position === "between"}
                       {#if (spec.remaining ?? 0) <= CONTEXT_EXPAND_STEP}
-                        <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "all")}>
+                        <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} title={expandBtnTitle(`展开中间 ${spec.remaining} 行上下文`)} onclick={() => void expandGap(spec, "all")}>
                           <Icon name="rows" size={12} /><span>展开中间 {spec.remaining} 行</span>
                         </button>
                       {:else}
-                        <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "down")}>
+                        <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} title={expandBtnTitle(`向下展开 ${CONTEXT_EXPAND_STEP} 行上下文`)} onclick={() => void expandGap(spec, "down")}>
                           <Icon name="chevron-down" size={12} /><span>向下展开 {CONTEXT_EXPAND_STEP} 行</span>
                         </button>
-                        <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "up")}>
+                        <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} title={expandBtnTitle(`向上展开 ${CONTEXT_EXPAND_STEP} 行上下文`)} onclick={() => void expandGap(spec, "up")}>
                           <Icon name="chevron-up" size={12} /><span>向上展开 {CONTEXT_EXPAND_STEP} 行</span>
                         </button>
                         {#if (spec.remaining ?? 0) <= 200}
-                          <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "all")}>
+                          <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} title={expandBtnTitle(`展开全部 ${spec.remaining} 行上下文`)} onclick={() => void expandGap(spec, "all")}>
                             <span>展开全部 {spec.remaining} 行</span>
                           </button>
                         {/if}
                       {/if}
                     {:else}
-                      <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "down")}>
+                      <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} title={expandBtnTitle(`展开下方 ${spec.remaining !== null ? Math.min(CONTEXT_EXPAND_STEP, spec.remaining) : CONTEXT_EXPAND_STEP} 行上下文`)} onclick={() => void expandGap(spec, "down")}>
                         <Icon name="chevron-down" size={12} /><span>展开下方 {spec.remaining !== null ? Math.min(CONTEXT_EXPAND_STEP, spec.remaining) : CONTEXT_EXPAND_STEP} 行</span>
                       </button>
                     {/if}

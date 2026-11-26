@@ -603,6 +603,28 @@ export interface TaskReviewToken {
 export const REMOTE_HUNKS_UNSTAGEABLE_REASON =
   "远端没有为这份差异提供可核对的局部暂存快照。可以暂存或撤出整个文件。";
 
+/** 远端 SSH 仓库不支持按块/按行放弃修改时的明确中文原因。 */
+export const REMOTE_DISCARD_PATCH_UNSUPPORTED_REASON =
+  "远端 SSH 仓库暂不支持按块或按行放弃修改，请在文件列表放弃整文件或在远端终端处理。";
+
+/** 远端 SSH 仓库不支持按段展开差异上下文时的明确中文原因。 */
+export const REMOTE_CONTEXT_EXPAND_UNSUPPORTED_REASON =
+  "远端 SSH 仓库暂不支持按段展开上下文，可切换「查看完整文件」。";
+
+/** 远端 SSH 仓库不支持临时保存内容预览与原子恢复并删除时的明确中文原因。 */
+export const REMOTE_STASH_EXTENDED_UNSUPPORTED_REASON =
+  "远端 SSH 仓库暂不支持预览临时保存内容或「恢复并删除」，仍可使用「恢复」与「删除」。";
+
+/** 差异上下文按段展开返回的行切片（1 起算）。只读，不改动原始差异快照与块索引。 */
+export interface DiffContextSlice {
+  generation: number;
+  path: string;
+  staged: boolean;
+  startLine: number;
+  totalLines: number;
+  lines: string[];
+}
+
 export interface DiffResponse {
   preview?: PreviewSources;
   /** Explicit Markdown sides; independent of binary resource preview rendering. */
@@ -1152,6 +1174,26 @@ export interface StashSaveResult {
   oid: string;
   note: string;
   state: StashState;
+}
+
+export interface StashFileChange {
+  path: string;
+  originalPath: string | null;
+  status: string;
+  untracked: boolean;
+  additions?: number | null;
+  deletions?: number | null;
+  binary?: boolean;
+  oldSize?: number | null;
+  newSize?: number | null;
+}
+
+export interface StashDetail {
+  generation: number;
+  oid: string;
+  message: string;
+  committedAt: number;
+  files: StashFileChange[];
 }
 
 export interface StashApplyResult {

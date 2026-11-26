@@ -878,6 +878,22 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     if (offset === 0) return ok({ ...result, totalLines: result.lines.length + 400 });
     return ok({ ...result, lines: [], hunks: [], offset }, 8000);
   },
+  diffContextLines: (_repo: string, path: string, staged: boolean, startLine: number, count: number) => {
+    const sample = sampleFor(path);
+    const allLines = sample
+      ? sample.after.split(/\r?\n/)
+      : Array.from({ length: 120 }, (_, i) => `  // ${path} 上下文第 ${i + 1} 行`);
+    const start = Math.max(1, startLine);
+    const slice = allLines.slice(start - 1, start - 1 + Math.min(count, 500));
+    return ok({
+      generation,
+      path,
+      staged,
+      startLine: start,
+      totalLines: allLines.length,
+      lines: slice,
+    });
+  },
   stageFiles: (_repo: string, paths: string[]) => {
     files = files.map((item) =>
       paths.includes(item.path) && !item.unmerged
@@ -895,6 +911,15 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
     return ok(snapshot());
   },
   stageHunks: () => ok(snapshot()),
+  stageLines: () => ok(snapshot()),
+  discardHunks: () => {
+    generation += 1;
+    return ok(snapshot());
+  },
+  discardLines: () => {
+    generation += 1;
+    return ok(snapshot());
+  },
   saveDraft: (path: string, message: string) => { commitDrafts.set(path, message); return ok(undefined); },
   commitChanges: async (repo: string, message: string) => {
     if (previewParams.get("commit") === "error") {
@@ -1654,7 +1679,77 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
   applyStash: (_repo: string, oid: string) => {
     if (files.length === 0) files = [file("src/lib/restored.ts", "none", "none", { untracked: true })];
     generation += 1;
-    return ok({ generation, oid, kept: true, operation: "none", conflicted: false, conflictPaths: [], canAbortMerge: false, note: "临时保存已恢复，原记录仍保留。", snapshot: snapshot() });
+    return ok({ generation, oid, kept: true, operation: "stash", conflicted: false, conflictPaths: [], canAbortMerge: false, note: "临时保存已恢复，原记录仍保留。", snapshot: snapshot() });
+  },
+  popStash: (_repo: string, oid: string) => {
+    if (previewParams.get("stash") === "conflict") {
+      generation += 1;
+      return ok({
+        generation,
+        oid,
+        kept: true,
+        operation: "stash",
+        conflicted: true,
+        conflictPaths: ["src/App.svelte"],
+        canAbortMerge: false,
+        note: "恢复发生冲突，原保存记录仍保留。这不是分支合并，没有可中止的合并。",
+        snapshot: snapshot(),
+      });
+    }
+    stashRecords = stashRecords.filter((item) => item.oid !== oid);
+    if (files.length === 0) files = [file("src/lib/restored.ts", "none", "none", { untracked: true })];
+    generation += 1;
+    return ok({
+      generation,
+      oid,
+      kept: false,
+      operation: "stash",
+      conflicted: false,
+      conflictPaths: [],
+      canAbortMerge: false,
+      note: "临时保存已恢复并删除原记录。",
+      snapshot: snapshot(),
+    });
+  },
+  stashDetail: (_repo: string, oid: string) => {
+    const record = stashRecords.find((item) => item.oid === oid) ?? { oid, message: "", committedAt: now };
+    return ok({
+      generation,
+      oid: record.oid,
+      message: record.message,
+      committedAt: record.committedAt,
+      files: [
+        { path: "src/App.svelte", originalPath: null, status: "modified", untracked: false, additions: 4, deletions: 2, binary: false },
+        { path: "src/lib/components/ScratchNote.svelte", originalPath: null, status: "added", untracked: true, additions: 12, deletions: 0, binary: false },
+      ],
+    });
+  },
+  stashFileDiff: (_repo: string, _oid: string, path: string, untracked: boolean) => {
+    if (untracked) {
+      const content = ["<script lang=\"ts\">", "  export let title = \"草稿\";", "</script>", "<p>{title}</p>"];
+      const diffLines: DiffLine[] = [
+        { kind: "hunk", text: `@@ -0,0 +1,${content.length} @@`, oldNo: null, newNo: null, hunkIndex: 0 },
+        ...content.map((text, idx) => ({ kind: "add", text: `+${text}`, oldNo: null, newNo: idx + 1, hunkIndex: 0 })),
+      ];
+      return ok({
+        generation,
+        path,
+        staged: false,
+        binary: false,
+        text: null,
+        summary: `未跟踪文件，新增 ${content.length} 行。`,
+        additions: content.length,
+        deletions: 0,
+        complete: true,
+        truncated: false,
+        snapshot: "stash-untracked",
+        hunks: [{ index: 0, header: `@@ -0,0 +1,${content.length} @@`, complete: true, stageable: false, startLine: 0, lineCount: diffLines.length }],
+        lines: diffLines,
+        offset: 0,
+        totalLines: diffLines.length,
+      });
+    }
+    return ok(withHeaders(diffFor(path, false)));
   },
   deleteStash: (_repo: string, oid: string) => {
     stashRecords = stashRecords.filter((item) => item.oid !== oid);

@@ -13,7 +13,7 @@ import {
   toggleIgnoreEol,
   toggleShowWhitespace,
 } from "../src/lib/diff-prefs.svelte";
-import { analyzeDiffSpecials, createTextDiff, filterDiffHunks } from "../src/lib/diff";
+import { analyzeDiffSpecials, buildExpandedDiffLines, createTextDiff, filterDiffHunks, parseHunkRange, toSideRows } from "../src/lib/diff";
 
 const KEY = "twiglane.diffPrefs";
 
@@ -198,5 +198,60 @@ describe("增强差异比对规则与性能", () => {
     expect(diff.deletions).toBe(1);
     expect(diff.lines.some((line) => line.kind === "del" && line.text === "-line_1200")).toBe(true);
     expect(diff.lines.some((line) => line.kind === "add" && line.text === "+line_1200_changed")).toBe(true);
+  });
+
+  it("按段展开折叠上下文生成首尾与块间展开条，并保留原始块索引与并排跨栏行", () => {
+    expect(parseHunkRange("@@ -10,2 +10,3 @@ fn demo")).toMatchObject({
+      oldStart: 10,
+      oldCount: 2,
+      newStart: 10,
+      newCount: 3,
+      beforeOffset: 0,
+      afterOffset: -1,
+      gapBeforeEnd: 9,
+      gapAfterStart: 13,
+    });
+
+    const base = [
+      { kind: "hunk", text: "@@ -10,2 +10,3 @@", oldNo: null, newNo: null, hunkIndex: 0 },
+      { kind: "context", text: " a", oldNo: 10, newNo: 10, hunkIndex: 0 },
+      { kind: "add", text: "+b", oldNo: null, newNo: 11, hunkIndex: 0 },
+      { kind: "context", text: " c", oldNo: 11, newNo: 12, hunkIndex: 0 },
+      { kind: "hunk", text: "@@ -20,2 +21,2 @@", oldNo: null, newNo: null, hunkIndex: 1 },
+      { kind: "context", text: " x", oldNo: 20, newNo: 21, hunkIndex: 1 },
+      { kind: "context", text: " y", oldNo: 21, newNo: 22, hunkIndex: 1 },
+    ];
+    const origin = [2, 3, 4, 5, 6, 7, 8];
+
+    const initial = buildExpandedDiffLines(base, origin, new Map(), null, true);
+    expect(initial[0].kind).toBe("expand");
+    expect(initial[0].expand).toMatchObject({ position: "top", startNew: 1, endNew: 9, remaining: 9 });
+    expect(initial[1]).toMatchObject({ kind: "hunk", originIndex: 2 });
+
+    const between = initial.find((line) => line.expand?.position === "between");
+    expect(between?.expand).toMatchObject({ startNew: 13, endNew: 20, oldOffset: -1, remaining: 8 });
+    const bottom = initial.find((line) => line.expand?.position === "bottom");
+    expect(bottom?.expand).toMatchObject({ startNew: 23, endNew: null, oldOffset: -1, remaining: null });
+
+    const expanded = buildExpandedDiffLines(
+      base,
+      origin,
+      new Map([
+        [13, "mid-13"],
+        [14, "mid-14"],
+      ]),
+      22,
+      true,
+    );
+    const inserted = expanded.filter((line) => line.expanded);
+    expect(inserted).toEqual([
+      expect.objectContaining({ kind: "context", text: " mid-13", oldNo: 12, newNo: 13, hunkIndex: null, originIndex: null, expanded: true }),
+      expect.objectContaining({ kind: "context", text: " mid-14", oldNo: 13, newNo: 14, hunkIndex: null, originIndex: null, expanded: true }),
+    ]);
+    // 已知总行数 22 时不再显示底部展开条。
+    expect(expanded.some((line) => line.expand?.position === "bottom")).toBe(false);
+    // 并排视图把展开条映射为跨两栏行且不显示块暂存按钮。
+    const side = toSideRows(expanded);
+    expect(side.some((row) => row.span && row.left?.kind === "expand" && !row.showStage)).toBe(true);
   });
 });

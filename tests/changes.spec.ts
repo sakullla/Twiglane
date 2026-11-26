@@ -3642,4 +3642,103 @@ describe("差异逐行选择交互：Shift 连选与 Esc 退出", () => {
     expect(screen.getByRole("button", { name: "选择行" }).getAttribute("aria-pressed")).toBe("false");
     expect(document.querySelector("[data-line-count]")).toBeNull();
   });
+
+  it("点击可操作行的行号列直接进入选行模式并支持 Shift 连选，且支持按块/按行放弃确认与防过期", async () => {
+    const onStageHunk = vi.fn();
+    const onStageLines = vi.fn();
+    const onDiscardHunk = vi.fn().mockResolvedValue(undefined);
+    const onDiscardLines = vi.fn().mockResolvedValue(undefined);
+    const onRetry = vi.fn();
+    const onExpandContext = vi.fn().mockResolvedValue({
+      generation: 1,
+      path: "src/range.ts",
+      staged: false,
+      startLine: 1,
+      totalLines: 30,
+      lines: ["ctx-1", "ctx-2", "ctx-3"],
+    });
+    const lines: DiffLine[] = [
+      { kind: "hunk", text: "@@ -4,4 +4,5 @@ fn demo", oldNo: null, newNo: null, hunkIndex: 0 },
+      { kind: "context", text: " head", oldNo: 4, newNo: 4, hunkIndex: 0 },
+      { kind: "del", text: "-old1", oldNo: 5, newNo: null, hunkIndex: 0 },
+      { kind: "add", text: "+new1", oldNo: null, newNo: 5, hunkIndex: 0 },
+      { kind: "add", text: "+new2", oldNo: null, newNo: 6, hunkIndex: 0 },
+      { kind: "context", text: " tail", oldNo: 6, newNo: 7, hunkIndex: 0 },
+    ];
+    const baseDiff = pickableDiff({
+      path: "src/range.ts",
+      snapshot: "snap-v1",
+      lines,
+      totalLines: lines.length,
+      hunks: [{ index: 0, header: "@@ -4,4 +4,5 @@ fn demo", complete: true, stageable: true, startLine: 0, lineCount: lines.length }],
+    });
+    const view = render(DiffView, {
+      props: {
+        selection: { path: "src/range.ts", side: "unstaged" },
+        diff: baseDiff,
+        error: null,
+        loading: false,
+        disabled: false,
+        onStageHunk,
+        onStageLines,
+        onDiscardHunk,
+        onDiscardLines,
+        onExpandContext,
+        onRetry,
+        onLoadMore: () => {},
+      },
+    });
+
+    // 1. 按段展开上方折叠上下文，不禁用按块暂存。
+    await fireEvent.click(screen.getByRole("button", { name: /展开上方 3 行/ }));
+    expect(onExpandContext).toHaveBeenCalledWith(1, 3);
+    await waitFor(() => expect(document.body.textContent).toContain("ctx-1"));
+    const stageHunkBtn = screen.getByRole("button", { name: "暂存此块" });
+    expect((stageHunkBtn as HTMLButtonElement).disabled).toBe(false);
+    await fireEvent.click(stageHunkBtn);
+    expect(onStageHunk).toHaveBeenCalledWith(expect.objectContaining({ index: 0 }));
+
+    // 2. 未开启选行模式时直接点击删除行号列自动进入选行，再 Shift+点击新增行号列连选。
+    const lnNodes = [...document.querySelectorAll<HTMLElement>(".diff-line .ln.ln-pickable")];
+    expect(lnNodes.length).toBeGreaterThanOrEqual(4);
+    await fireEvent.click(lnNodes[0]);
+    expect(screen.getByRole("button", { name: "选择行" }).getAttribute("aria-pressed")).toBe("true");
+    expect(document.querySelector("[data-line-count]")?.textContent).toBe("1 行");
+    await fireEvent.click(lnNodes[lnNodes.length - 1], { shiftKey: true });
+    expect(document.querySelector("[data-line-count]")?.textContent).toBe("3 行");
+
+    // 3. 按行放弃经 ConfirmDialog 确认：取消零写入，确认才触发回调。
+    await fireEvent.click(screen.getByRole("button", { name: "放弃选中行" }));
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.textContent).toContain("src/range.ts");
+    expect(dialog.textContent).toContain("3 行");
+    await fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(onDiscardLines).not.toHaveBeenCalled();
+
+    await fireEvent.click(screen.getByRole("button", { name: "放弃选中行" }));
+    await fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "放弃选中行" }));
+    await waitFor(() => expect(onDiscardLines).toHaveBeenCalledTimes(1));
+
+    // 4. 按块放弃时若快照过期，拒绝写入并触发刷新。
+    await fireEvent.click(screen.getByRole("button", { name: "放弃此块" }));
+    const hunkDialog = screen.getByRole("dialog");
+    await view.rerender({
+      selection: { path: "src/range.ts", side: "unstaged" },
+      diff: { ...baseDiff, snapshot: "snap-v2" },
+      error: null,
+      loading: false,
+      disabled: false,
+      onStageHunk,
+      onStageLines,
+      onDiscardHunk,
+      onDiscardLines,
+      onExpandContext,
+      onRetry,
+      onLoadMore: () => {},
+    });
+    await fireEvent.click(within(hunkDialog).getByRole("button", { name: "放弃此块" }));
+    expect(onDiscardHunk).not.toHaveBeenCalled();
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    expect(hunkDialog.textContent).toContain("差异快照已过期");
+  });
 });

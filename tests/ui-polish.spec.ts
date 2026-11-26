@@ -7,6 +7,7 @@ import BranchSwitcher from "../src/lib/components/BranchSwitcher.svelte";
 import CommandPalette from "../src/lib/components/CommandPalette.svelte";
 import DiffView from "../src/lib/components/DiffView.svelte";
 import FileList from "../src/lib/components/FileList.svelte";
+import StashPanel from "../src/lib/components/StashPanel.svelte";
 import InlineCommentEditor from "../src/lib/components/review/InlineCommentEditor.svelte";
 import ReviewCommentsDrawer from "../src/lib/components/review/ReviewCommentsDrawer.svelte";
 import ReviewCompletionBar from "../src/lib/components/review/ReviewCompletionBar.svelte";
@@ -15,7 +16,12 @@ import ReviewStatePanel from "../src/lib/components/review/ReviewStatePanel.svel
 import type { ReviewSourceEntry } from "../src/lib/review-actions.svelte";
 import type { ReviewComment, StaleCommentBatch } from "../src/lib/review-comments.svelte";
 import { reviewCompletion } from "../src/lib/review-completion";
-import type { DiffResponse, FileChange, OpenedRepository } from "../src/lib/types";
+import type { DiffResponse, FileChange, OpenedRepository, StashState } from "../src/lib/types";
+import {
+  REMOTE_CONTEXT_EXPAND_UNSUPPORTED_REASON,
+  REMOTE_DISCARD_PATCH_UNSUPPORTED_REASON,
+  REMOTE_STASH_EXTENDED_UNSUPPORTED_REASON,
+} from "../src/lib/types";
 
 const styles = path.resolve(__dirname, "../src/styles");
 /** 去掉注释后的样式文本：只按真实规则判定。 */
@@ -350,6 +356,166 @@ describe("UI/UX 交互与视觉细节", () => {
       const review = css("review.css");
       expect(declarations(review, ".view-review-dot")).toMatch(/border-radius:\s*50%/);
       expect(declarations(review, '.view-review-dot[data-tone="warn"]')).toMatch(/border-radius:\s*3px/);
+    });
+  });
+
+  describe("临时保存预览、筛选、恢复并删除与远端降级", () => {
+    const baseOpened = {
+      generation: 5,
+      summary: { name: "twiglane", path: "/repo/twiglane" },
+      draft: "",
+      watchDegraded: false,
+      snapshot: {
+        generation: 5,
+        branch: {
+          name: "main",
+          detached: false,
+          unborn: false,
+          headOid: "a".repeat(40),
+          upstream: null,
+          ahead: 0,
+          behind: 0,
+          liveRemoteChecked: false,
+          remoteCheckedAtMs: null,
+          remoteCheckStale: false,
+        },
+        files: [],
+      },
+    } as OpenedRepository;
+
+    const stashStateData: StashState = {
+      generation: 5,
+      preview: {
+        trackedCount: 0,
+        untrackedCount: 0,
+        ignoredCount: 0,
+        trackedPaths: [],
+        untrackedPaths: [],
+        ignoredPaths: [],
+        includeUntracked: false,
+        canSave: false,
+        summary: "没有可保存的改动。",
+      },
+      records: [
+        { oid: "1111111111111111111111111111111111111111", message: "实验性重构", committedAt: 1_700_000_100 },
+        { oid: "2222222222222222222222222222222222222222", message: "修样式细节", committedAt: 1_700_000_000 },
+      ],
+      snapshot: baseOpened.snapshot,
+    };
+
+    it("支持记录筛选、展开预览已跟踪与未跟踪文件及只读差异，以及恢复并删除（含冲突保留记录）", async () => {
+      vi.spyOn(api, "stashState").mockResolvedValue(stashStateData);
+      const detailSpy = vi.spyOn(api, "stashDetail").mockResolvedValue({
+        generation: 5,
+        oid: stashStateData.records[0].oid,
+        message: stashStateData.records[0].message,
+        committedAt: stashStateData.records[0].committedAt,
+        files: [
+          { path: "src/app.ts", originalPath: null, status: "modified", untracked: false, additions: 2, deletions: 1, binary: false },
+          { path: "notes/draft.md", originalPath: null, status: "added", untracked: true, additions: 1, deletions: 0, binary: false },
+        ],
+      });
+      const diffSpy = vi.spyOn(api, "stashFileDiff").mockImplementation(async (_repo, _oid, rel, untracked) => ({
+        generation: 5,
+        path: rel,
+        staged: false,
+        binary: false,
+        text: null,
+        summary: untracked ? "未跟踪新增" : "修改",
+        additions: 1,
+        deletions: 0,
+        complete: true,
+        truncated: false,
+        snapshot: `stash-${rel}`,
+        hunks: [{ index: 0, header: "@@ -1,1 +1,2 @@", complete: true, stageable: false, startLine: 0, lineCount: 2 }],
+        lines: [
+          { kind: "hunk", text: "@@ -1,1 +1,2 @@", oldNo: null, newNo: null, hunkIndex: 0 },
+          { kind: "add", text: untracked ? "+草稿内容" : "+const ok = true;", oldNo: null, newNo: 1, hunkIndex: 0 },
+        ],
+        offset: 0,
+        totalLines: 2,
+      }));
+      const popSpy = vi.spyOn(api, "popStash").mockResolvedValue({
+        generation: 6,
+        oid: stashStateData.records[0].oid,
+        kept: true,
+        operation: "stash",
+        conflicted: true,
+        conflictPaths: ["src/app.ts"],
+        canAbortMerge: false,
+        note: "恢复发生冲突，原保存记录仍保留。",
+        snapshot: baseOpened.snapshot,
+      });
+      const onOpenChanges = vi.fn();
+
+      render(StashPanel, {
+        props: {
+          opened: baseOpened,
+          disabled: false,
+          nextId: () => 1,
+          onGeneration: vi.fn(),
+          onSnapshot: vi.fn(),
+          onFailure: vi.fn(),
+          onNotice: vi.fn(),
+          onOpenChanges,
+        },
+      });
+
+      expect(await screen.findByText("实验性重构")).toBeTruthy();
+      expect(screen.getByText("修样式细节")).toBeTruthy();
+
+      // 筛选记录
+      const filterInput = screen.getByLabelText("筛选临时保存记录");
+      await fireEvent.input(filterInput, { target: { value: "重构" } });
+      expect(screen.queryByText("修样式细节")).toBeNull();
+      expect(screen.getByText("实验性重构")).toBeTruthy();
+
+      // 展开预览已跟踪与未跟踪文件及只读 DiffView
+      await fireEvent.click(screen.getByRole("button", { name: /预览临时保存 1111111 内容/ }));
+      await waitFor(() => expect(detailSpy).toHaveBeenCalledWith("/repo/twiglane", stashStateData.records[0].oid, 5, 1));
+      expect(await screen.findByText("未跟踪")).toBeTruthy();
+      await waitFor(() => expect(diffSpy).toHaveBeenCalledWith("/repo/twiglane", stashStateData.records[0].oid, "src/app.ts", false, 5, 1, null, 0, 0));
+      expect(document.body.textContent).toContain("const ok = true;");
+
+      // 切换到未跟踪文件预览
+      await fireEvent.click(screen.getByRole("button", { name: /draft\.md/ }));
+      await waitFor(() => expect(diffSpy).toHaveBeenCalledWith("/repo/twiglane", stashStateData.records[0].oid, "notes/draft.md", true, 5, 1, null, 0, 0));
+      expect(document.body.textContent).toContain("草稿内容");
+
+      // 恢复并删除（冲突时保留记录并提供冲突文件入口）
+      await fireEvent.click(screen.getByRole("button", { name: "恢复并删除" }));
+      await waitFor(() => expect(popSpy).toHaveBeenCalledWith("/repo/twiglane", stashStateData.records[0].oid, 5, 1));
+      const conflictBtn = await screen.findByRole("button", { name: "查看冲突 src/app.ts" });
+      await fireEvent.click(conflictBtn);
+      expect(onOpenChanges).toHaveBeenCalledWith("src/app.ts");
+    });
+
+    it("远端 SSH 仓库对新增补丁/上下文/Stash 扩展命令明确返回中文限制说明", async () => {
+      const remoteKey = "ssh://host-1/srv/app";
+      await expect(api.diffContextLines(remoteKey, "a.ts", false, 1, 20, 1, 1)).rejects.toMatchObject({
+        code: "remote_unsupported",
+        message: REMOTE_CONTEXT_EXPAND_UNSUPPORTED_REASON,
+      });
+      await expect(api.discardHunks(remoteKey, "a.ts", false, [0], "snap", 1, 1)).rejects.toMatchObject({
+        code: "remote_unsupported",
+        message: REMOTE_DISCARD_PATCH_UNSUPPORTED_REASON,
+      });
+      await expect(api.discardLines(remoteKey, "a.ts", false, [], "snap", 1, 1)).rejects.toMatchObject({
+        code: "remote_unsupported",
+        message: REMOTE_DISCARD_PATCH_UNSUPPORTED_REASON,
+      });
+      await expect(api.stashDetail(remoteKey, "a".repeat(40), 1, 1)).rejects.toMatchObject({
+        code: "remote_unsupported",
+        message: REMOTE_STASH_EXTENDED_UNSUPPORTED_REASON,
+      });
+      await expect(api.stashFileDiff(remoteKey, "a".repeat(40), "a.ts", false, 1, 1)).rejects.toMatchObject({
+        code: "remote_unsupported",
+        message: REMOTE_STASH_EXTENDED_UNSUPPORTED_REASON,
+      });
+      await expect(api.popStash(remoteKey, "a".repeat(40), 1, 1)).rejects.toMatchObject({
+        code: "remote_unsupported",
+        message: REMOTE_STASH_EXTENDED_UNSUPPORTED_REASON,
+      });
     });
   });
 });

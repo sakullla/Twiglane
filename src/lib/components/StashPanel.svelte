@@ -2,10 +2,23 @@
   import { api } from "../api";
   import { normalizeError } from "../errors";
   import { formatAuthoredAt, shortOid, stashPathBadge } from "../history";
-  import type { OpenedRepository, StashApplyResult, StashRecord, StashState, StatusSnapshot } from "../types";
+  import { isRemoteRepositoryKey } from "../remote-worktree";
+  import {
+    REMOTE_STASH_EXTENDED_UNSUPPORTED_REASON,
+    type DiffResponse,
+    type OpenedRepository,
+    type StashApplyResult,
+    type StashDetail,
+    type StashFileChange,
+    type StashRecord,
+    type StashState,
+    type StatusSnapshot,
+  } from "../types";
   import { BUSY_REASON, relativeTime, splitPath } from "../ui";
   import { isContextKey } from "./ContextMenu.svelte";
+  import DiffView from "./DiffView.svelte";
   import Icon from "./Icon.svelte";
+  import LineCounts from "./LineCounts.svelte";
   import ConfirmDialog from "./ConfirmDialog.svelte";
 
   interface Props {
@@ -43,8 +56,55 @@
   let errorText = $state<string | null>(null);
   let busy = $state(false);
   let confirmRecord = $state<StashRecord | null>(null);
+  let recordQuery = $state("");
 
+  /* 展开预览单个临时保存记录的文件清单与只读差异。 */
+  let expandedOid = $state<string | null>(null);
+  let detail = $state<StashDetail | null>(null);
+  let detailLoading = $state(false);
+  let detailError = $state<string | null>(null);
+  let selectedFile = $state<StashFileChange | null>(null);
+  let fileDiff = $state<DiffResponse | null>(null);
+  let fileDiffLoading = $state(false);
+  let fileDiffError = $state<string | null>(null);
+  let detailToken = 0;
+  let fileDiffToken = 0;
+
+  let isRemoteRepo = $derived(isRemoteRepositoryKey(opened.summary.path));
   let preview = $derived(stash?.preview ?? null);
+  let filteredRecords = $derived.by(() => {
+    const records = stash?.records ?? [];
+    const needle = recordQuery.trim().toLowerCase();
+    if (!needle) return records;
+    return records.filter(
+      (record) =>
+        record.message.toLowerCase().includes(needle) ||
+        record.oid.toLowerCase().includes(needle) ||
+        shortOid(record.oid).toLowerCase().includes(needle),
+    );
+  });
+
+  function clearPreview() {
+    detailToken += 1;
+    fileDiffToken += 1;
+    expandedOid = null;
+    detail = null;
+    detailLoading = false;
+    detailError = null;
+    selectedFile = null;
+    fileDiff = null;
+    fileDiffLoading = false;
+    fileDiffError = null;
+  }
+
+  let seenRepo = "";
+  $effect(() => {
+    const repo = opened.summary.path;
+    if (repo === seenRepo) return;
+    seenRepo = repo;
+    recordQuery = "";
+    clearPreview();
+  });
 
   type ScopeKind = "tracked" | "untracked" | "ignored";
   /**
@@ -219,6 +279,127 @@
     });
   }
 
+  function pop(oid: string) {
+    const repo = opened.summary.path;
+    const generation = opened.generation;
+    void withBusy(async () => {
+      try {
+        const result = await callWithStale((gen) => api.popStash(repo, oid, gen, nextId()), generation);
+        if (opened.summary.path !== repo) return;
+        applied = result;
+        errorText = null;
+        onSnapshot(result.snapshot);
+        onNotice(result.note);
+        if (!result.kept && expandedOid === oid) clearPreview();
+        stash = await api.stashState(repo, includeUntracked, result.generation, nextId());
+      } catch (error) {
+        const failure = normalizeError(error);
+        errorText = failure.message;
+        onFailure(failure);
+        await reloadAfterFailure(repo);
+      }
+    });
+  }
+
+  function stashStatusLetter(file: StashFileChange): string {
+    if (file.untracked) return "?";
+    switch (file.status) {
+      case "added":
+        return "A";
+      case "deleted":
+        return "D";
+      case "renamed":
+        return "R";
+      case "copied":
+        return "C";
+      default:
+        return "M";
+    }
+  }
+
+  async function loadFileDiff(oid: string, file: StashFileChange, generation: number, offset = 0) {
+    const repo = opened.summary.path;
+    const token = ++fileDiffToken;
+    fileDiffLoading = true;
+    fileDiffError = null;
+    if (offset === 0) fileDiff = null;
+    try {
+      const result = await callWithStale(
+        (gen) => api.stashFileDiff(repo, oid, file.path, file.untracked, gen, nextId(), file.originalPath, offset, 0),
+        generation,
+      );
+      if (token !== fileDiffToken || opened.summary.path !== repo || expandedOid !== oid) return;
+      if (offset > 0 && fileDiff && fileDiff.path === result.path) {
+        fileDiff = {
+          ...result,
+          offset: fileDiff.offset,
+          lines: [...fileDiff.lines, ...result.lines],
+        };
+      } else {
+        fileDiff = result;
+      }
+    } catch (error) {
+      if (token !== fileDiffToken || opened.summary.path !== repo || expandedOid !== oid) return;
+      fileDiffError = normalizeError(error).message;
+    } finally {
+      if (token === fileDiffToken) fileDiffLoading = false;
+    }
+  }
+
+  function selectPreviewFile(file: StashFileChange) {
+    if (!expandedOid) return;
+    selectedFile = file;
+    void loadFileDiff(expandedOid, file, detail?.generation ?? opened.generation, 0);
+  }
+
+  function loadMoreFileDiff() {
+    if (!expandedOid || !selectedFile || !fileDiff || fileDiffLoading) return;
+    const nextOffset = fileDiff.offset + fileDiff.lines.length;
+    if (nextOffset >= fileDiff.totalLines) return;
+    void loadFileDiff(expandedOid, selectedFile, fileDiff.generation, nextOffset);
+  }
+
+  function retryFileDiff() {
+    if (!expandedOid || !selectedFile) return;
+    void loadFileDiff(expandedOid, selectedFile, detail?.generation ?? opened.generation, 0);
+  }
+
+  async function togglePreview(record: StashRecord) {
+    if (expandedOid === record.oid) {
+      clearPreview();
+      return;
+    }
+    const repo = opened.summary.path;
+    const token = ++detailToken;
+    fileDiffToken += 1;
+    expandedOid = record.oid;
+    detail = null;
+    detailError = null;
+    selectedFile = null;
+    fileDiff = null;
+    fileDiffError = null;
+    fileDiffLoading = false;
+    detailLoading = true;
+    try {
+      const result = await callWithStale(
+        (gen) => api.stashDetail(repo, record.oid, gen, nextId()),
+        opened.generation,
+      );
+      if (token !== detailToken || opened.summary.path !== repo || expandedOid !== record.oid) return;
+      detail = result;
+      detailError = null;
+      if (result.files.length > 0) {
+        selectedFile = result.files[0];
+        void loadFileDiff(record.oid, result.files[0], result.generation, 0);
+      }
+    } catch (error) {
+      if (token !== detailToken || opened.summary.path !== repo || expandedOid !== record.oid) return;
+      detailError = normalizeError(error).message;
+    } finally {
+      if (token === detailToken) detailLoading = false;
+    }
+  }
+
   function askDelete(record: StashRecord) {
     confirmRecord = record;
   }
@@ -241,6 +422,7 @@
         );
         if (opened.summary.path !== repo) return;
         stash = result;
+        if (expandedOid === record.oid) clearPreview();
         errorText = null;
         onSnapshot(result.snapshot);
         onNotice(`已删除临时保存 ${shortOid(record.oid)}。`);
@@ -407,22 +589,144 @@
         <div class="stash-section-head">
           <h2 id="stash-records-title">已有记录</h2>
           {#if stash}<span class="count">{stash.records.length}</span>{/if}
+          <span class="spacer"></span>
+          {#if stash && stash.records.length > 0}
+            <div class="field sm stash-records-filter">
+              <Icon name="search" size={13} />
+              <input
+                aria-label="筛选临时保存记录"
+                placeholder="筛选说明或哈希…"
+                autocomplete="off"
+                spellcheck="false"
+                bind:value={recordQuery}
+                onkeydown={(event) => {
+                  if (event.key === "Escape" && recordQuery) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    recordQuery = "";
+                  }
+                }}
+              />
+              {#if recordQuery}
+                <button type="button" class="field-clear" aria-label="清空记录筛选" onclick={() => (recordQuery = "")}><Icon name="x" size={12} /></button>
+              {/if}
+            </div>
+          {/if}
         </div>
         {#if stash && stash.records.length === 0}
           <p class="stash-records-empty">还没有临时保存记录。</p>
+        {:else if stash && filteredRecords.length === 0}
+          <div class="stash-records-empty-filter" role="status">
+            <span>没有匹配「{recordQuery.trim()}」的临时保存记录。</span>
+            <button type="button" class="btn btn-ghost btn-sm" onclick={() => (recordQuery = "")}>清空筛选</button>
+          </div>
         {/if}
         <div class="stash-list">
-          {#each stash?.records ?? [] as record (record.oid)}
-            <div class="stash-record">
-              <span class="sr-icon"><Icon name="archive" size={14} /></span>
-              <div class="sr-main">
-                <strong class:untitled={!record.message}>{record.message || "未填写说明"}</strong>
-                <span class="hint" title={`${record.oid}\n${formatAuthoredAt(record.committedAt)}`}>
-                  <span class="mono">{shortOid(record.oid)}</span> · {relativeTime(record.committedAt)}
-                </span>
+          {#each filteredRecords as record (record.oid)}
+            {@const isExpanded = expandedOid === record.oid}
+            <div class="stash-record-wrap" class:expanded={isExpanded}>
+              <div class="stash-record">
+                <button
+                  type="button"
+                  class="stash-record-toggle"
+                  aria-expanded={isExpanded}
+                  aria-label={isExpanded ? `收起临时保存 ${shortOid(record.oid)} 预览` : `预览临时保存 ${shortOid(record.oid)} 内容`}
+                  title={isRemoteRepo ? REMOTE_STASH_EXTENDED_UNSUPPORTED_REASON : isExpanded ? "收起内容预览" : "展开查看变更文件与只读差异"}
+                  onclick={() => void togglePreview(record)}
+                >
+                  <span class="sr-chevron"><Icon name="chevron-right" size={13} class={isExpanded ? "rot90" : ""} /></span>
+                  <span class="sr-icon"><Icon name="archive" size={14} /></span>
+                  <div class="sr-main">
+                    <strong class:untitled={!record.message}>{record.message || "未填写说明"}</strong>
+                    <span class="hint" title={`${record.oid}\n${formatAuthoredAt(record.committedAt)}`}>
+                      <span class="mono">{shortOid(record.oid)}</span> · {relativeTime(record.committedAt)}
+                    </span>
+                  </div>
+                </button>
+                <div class="stash-record-actions">
+                  <button
+                    type="button"
+                    class="btn btn-primary btn-sm"
+                    title={isRemoteRepo ? REMOTE_STASH_EXTENDED_UNSUPPORTED_REASON : disabled || busy ? BUSY_REASON : "恢复到工作区；若无冲突则自动删除此记录，发生冲突时保留记录"}
+                    disabled={disabled || busy || isRemoteRepo}
+                    onclick={() => pop(record.oid)}
+                  >恢复并删除</button>
+                  <button
+                    type="button"
+                    class="btn btn-secondary btn-sm"
+                    title={disabled || busy ? BUSY_REASON : "恢复到工作区，原记录仍保留"}
+                    disabled={disabled || busy}
+                    onclick={() => restore(record.oid)}
+                  >恢复</button>
+                  <button
+                    type="button"
+                    class="btn btn-danger-soft btn-sm"
+                    title={disabled || busy ? BUSY_REASON : undefined}
+                    disabled={disabled || busy}
+                    onclick={() => askDelete(record)}
+                  >删除</button>
+                </div>
               </div>
-              <button type="button" class="btn btn-secondary btn-sm" title={disabled || busy ? BUSY_REASON : "恢复到工作区，原记录仍保留"} disabled={disabled || busy} onclick={() => restore(record.oid)}>恢复</button>
-              <button type="button" class="btn btn-danger-soft btn-sm" title={disabled || busy ? BUSY_REASON : undefined} disabled={disabled || busy} onclick={() => askDelete(record)}>删除</button>
+              {#if isExpanded}
+                <div class="stash-preview-panel" data-stash-preview={record.oid}>
+                  {#if detailLoading}
+                    <div class="stash-preview-state" role="status" aria-busy="true">
+                      <span class="spinner muted" aria-hidden="true"></span>
+                      <span>正在读取临时保存文件清单…</span>
+                    </div>
+                  {:else if detailError}
+                    <div class="callout warn stash-preview-error" role="status">
+                      <Icon name="alert" size={14} />
+                      <span>{detailError}</span>
+                    </div>
+                  {:else if detail && detail.files.length === 0}
+                    <p class="stash-preview-state hint">这条临时保存记录中没有可展示的文件改动。</p>
+                  {:else if detail}
+                    <div class="stash-preview-split">
+                      <ul class="stash-preview-files" aria-label="临时保存变更文件">
+                        {#each detail.files as file (`${file.untracked ? "u" : "t"}:${file.path}`)}
+                          {@const parts = splitPath(file.path)}
+                          {@const isSelected = selectedFile?.path === file.path && selectedFile?.untracked === file.untracked}
+                          <li>
+                            <button
+                              type="button"
+                              class="stash-preview-file"
+                              class:active={isSelected}
+                              aria-current={isSelected ? "true" : undefined}
+                              title={file.originalPath ? `${file.originalPath} → ${file.path}` : file.path}
+                              onclick={() => selectPreviewFile(file)}
+                            >
+                              <span class={`badge status-${file.untracked ? "untracked" : file.status}`}>{stashStatusLetter(file)}</span>
+                              <span class="stash-preview-file-name">{parts.name}</span>
+                              {#if parts.dir}<span class="stash-preview-file-dir"><bdi>{parts.dir}</bdi></span>{/if}
+                              {#if file.untracked}<span class="stash-untracked-tag">未跟踪</span>{/if}
+                              <LineCounts
+                                stat={file.binary
+                                  ? { additions: null, deletions: null, oldSize: file.oldSize, newSize: file.newSize }
+                                  : { additions: file.additions ?? null, deletions: file.deletions ?? null }}
+                              />
+                            </button>
+                          </li>
+                        {/each}
+                      </ul>
+                      <div class="stash-preview-diff">
+                        <DiffView
+                          selection={selectedFile ? { path: selectedFile.path, side: "unstaged" } : null}
+                          diff={fileDiff}
+                          error={fileDiffError}
+                          loading={fileDiffLoading}
+                          disabled={busy || disabled}
+                          readOnly
+                          readOnlyLabel={selectedFile?.untracked ? "临时保存 · 未跟踪" : "临时保存预览"}
+                          onStageHunk={() => {}}
+                          onLoadMore={loadMoreFileDiff}
+                          onRetry={retryFileDiff}
+                        />
+                      </div>
+                    </div>
+                  {/if}
+                </div>
+              {/if}
             </div>
           {/each}
         </div>

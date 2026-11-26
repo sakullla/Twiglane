@@ -2,13 +2,14 @@
   import { onDestroy, tick, untrack, type Snippet } from "svelte";
   import { createQuietActivity } from "../quiet-activity";
   import { MODIFIER_LABEL } from "../brand";
-  import { HUNK_LAST, analyzeDiffSpecials, changeRunIndexes, filterDiffHunks, hunkCaption, hunkJump, hunkRowIndexes, lineSelectionScope, splitColumnsFit, toSideRows, visibleDiffLines, type HunkNavReport, type ViewLine, type WhitespaceFilter } from "../diff";
+  import { CONTEXT_EXPAND_STEP, HUNK_LAST, analyzeDiffSpecials, buildExpandedDiffLines, changeRunIndexes, filterDiffHunks, hunkCaption, hunkJump, hunkRowIndexes, lineSelectionScope, splitColumnsFit, toSideRows, visibleDiffLines, type ContextExpandSpec, type DisplayDiffLine, type HunkNavReport, type ViewLine, type WhitespaceFilter } from "../diff";
   import { clearDiffFilterRules, diffPrefs, hasActiveDiffFilters, setWhitespaceMode, toggleHideWhitespaceOnly, toggleIgnoreBlankLines, toggleIgnoreCase, toggleIgnoreEol, toggleShowWhitespace } from "../diff-prefs.svelte";
+  import { normalizeError } from "../errors";
   import type { IconName } from "../icons";
   import { rememberScroll } from "../checkout-context";
   import { trackCodeScroll } from "../codeScroll.svelte";
   import { codeContentSize, codeRuler, rulerPadding, scrollByRows, visibleRange } from "../layout";
-  import type { DiffHunk, DiffLineSelection, DiffResponse, FileSelection, PreviewSources } from "../types";
+  import type { DiffContextSlice, DiffHunk, DiffLineSelection, DiffResponse, FileSelection, PreviewSources } from "../types";
   import { BUSY_REASON, binarySizeText, sizeDelta, splitPath, type FileNavState } from "../ui";
   import { buildDiffDocuments, codeOf, signOf } from "../syntax/diffSyntax";
   import { createHighlight } from "../syntax/highlight.svelte";
@@ -16,6 +17,7 @@
   import { lineSegments } from "../syntax/segments";
   import { commentLineKey } from "../review-comments.svelte";
   import { findSeed, selectedText } from "../find-seed";
+  import ConfirmDialog from "./ConfirmDialog.svelte";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest } from "./ContextMenu.svelte";
   import BinaryPreview from "./BinaryPreview.svelte";
   import FileNav from "./FileNav.svelte";
@@ -45,6 +47,22 @@
      * 那些位置只保留文件级与块级入口。
      */
     onStageLines?: (lines: DiffLineSelection[]) => void;
+    /**
+     * 按块放弃修改（仅本地未暂存已跟踪文本文件）。经 ConfirmDialog 确认后触发。
+     */
+    onDiscardHunk?: (hunk: DiffHunk) => void | Promise<void>;
+    /**
+     * 按行放弃修改（仅本地未暂存已跟踪文本文件）。经 ConfirmDialog 确认后触发。
+     */
+    onDiscardLines?: (lines: DiffLineSelection[]) => void | Promise<void>;
+    /** 当前文件是否为未跟踪文件；未跟踪文件不允许按块/按行放弃。 */
+    untracked?: boolean;
+    /** 外部/远端层面的块/行放弃限制原因。 */
+    discardBlockedReason?: string | null;
+    /**
+     * 按段展开折叠上下文（只读视口扩展，不改动 diff.hunks 与 snapshot）。
+     */
+    onExpandContext?: (startLine: number, count: number) => Promise<DiffContextSlice>;
     /**
      * 本差异能不能按块/按行暂存，以及不能时的真实原因（远端没有 patch 写入时由调用方从
      * `DiffResponse.hunksStageableReason` 传进来）。缺省表示没有远端层面的限制，不能暂存
@@ -170,6 +188,11 @@
     readOnlyLabel,
     onStageHunk,
     onStageLines,
+    onDiscardHunk,
+    onDiscardLines,
+    untracked = false,
+    discardBlockedReason = null,
+    onExpandContext,
     hunksStageableReason = null,
     onLoadMore,
     onFileHistory,
@@ -286,7 +309,81 @@
     });
     return { lines: kept, origin };
   });
-  let lines = $derived<ViewLine[]>(view.lines);
+
+  /* 按段展开折叠上下文（只读视口扩展）：仅影响展示行，不改动 currentDiff.hunks、snapshot 或原始行下标。 */
+  let expandedContext = $state<Map<number, string>>(new Map());
+  let expandedTotalLines = $state<number | null>(null);
+  let expandingGapId = $state<string | null>(null);
+  let expandError = $state<string | null>(null);
+  let expandSession = 0;
+
+  let expandResetKey = $derived(
+    `${selectionKey}\0${currentDiff?.snapshot ?? "-"}\0${currentDiff?.generation ?? "-"}\0${fullFile ? 1 : 0}`,
+  );
+  $effect(() => {
+    expandResetKey;
+    untrack(() => {
+      expandSession += 1;
+      if (expandedContext.size > 0) expandedContext = new Map();
+      expandedTotalLines = null;
+      expandingGapId = null;
+      expandError = null;
+    });
+  });
+
+  let canExpandContext = $derived(
+    Boolean(
+      onExpandContext &&
+        !embedded &&
+        !fullFile &&
+        currentDiff &&
+        !currentDiff.binary &&
+        !currentDiff.preview &&
+        !conflicted &&
+        !currentDiff.truncated &&
+        view.lines.length > 0 &&
+        whitespaceFilter.hunks.size === 0,
+    ),
+  );
+
+  let lines = $derived<DisplayDiffLine[]>(
+    buildExpandedDiffLines(view.lines, view.origin, expandedContext, expandedTotalLines, canExpandContext),
+  );
+
+  async function expandGap(spec: ContextExpandSpec, direction: "up" | "down" | "all"): Promise<void> {
+    if (!onExpandContext || expandingGapId !== null || disabled) return;
+    let startLine = spec.startNew;
+    let count = CONTEXT_EXPAND_STEP;
+    if (direction === "all" && spec.endNew !== null) {
+      startLine = spec.startNew;
+      count = Math.max(1, spec.endNew - spec.startNew + 1);
+    } else if (direction === "up" && spec.endNew !== null) {
+      const span = Math.max(1, spec.endNew - spec.startNew + 1);
+      count = Math.min(CONTEXT_EXPAND_STEP, span);
+      startLine = spec.endNew - count + 1;
+    } else {
+      startLine = spec.startNew;
+      count = spec.remaining !== null ? Math.min(CONTEXT_EXPAND_STEP, Math.max(1, spec.remaining)) : CONTEXT_EXPAND_STEP;
+    }
+    const token = expandSession;
+    expandingGapId = spec.id;
+    expandError = null;
+    try {
+      const slice = await onExpandContext(startLine, count);
+      if (token !== expandSession) return;
+      const next = new Map(expandedContext);
+      slice.lines.forEach((text, offset) => {
+        next.set(slice.startLine + offset, text);
+      });
+      expandedContext = next;
+      expandedTotalLines = slice.totalLines;
+    } catch (err) {
+      if (token !== expandSession) return;
+      expandError = normalizeError(err).message;
+    } finally {
+      if (token === expandSession) expandingGapId = null;
+    }
+  }
   /** 所有代码块都被过滤掉：不能报成「没有文本差异」。 */
   let filteredAll = $derived(whitespaceFilter.hunks.size > 0 && lines.length === 0);
   let metaOnly = $derived(shown.lines.length === 0 && shown.meta.length > 0);
@@ -367,7 +464,7 @@
     return () => untrack(() => report(null));
   });
   /* 宽度取全量差异的最长行，只随内容变化，不随虚拟窗口或布局切换跳动。 */
-  let codeTexts = $derived(lines.filter((line) => line.kind !== "hunk").map((line) => codeOf(line)));
+  let codeTexts = $derived(lines.filter((line) => line.kind !== "hunk" && line.kind !== "expand").map((line) => codeOf(line)));
   let ruler = $derived(codeRuler(codeTexts));
   let codeSize = $derived(codeContentSize(codeTexts));
   /* 并排视图两栏各自横向滚动：每栏的滚动行程按本栏最长的一行算，旧侧是上下文 + 删除，新侧是上下文 + 新增。 */
@@ -441,8 +538,8 @@
   });
   let hunksByStart = $derived(new Map(currentDiff?.hunks.map((hunk) => [hunk.startLine, hunk])));
   function hunkForLine(index: number) {
-    const origin = view.origin[index];
-    return origin === undefined ? null : (hunksByStart.get(origin) ?? null);
+    const origin = lines[index]?.originIndex;
+    return origin === null || origin === undefined ? null : (hunksByStart.get(origin) ?? null);
   }
   let parts = $derived(selection ? splitPath(selection.path) : null);
   let showStats = $derived(Boolean(currentDiff));
@@ -517,16 +614,94 @@
     if (!currentDiff.hunks.some((hunk) => hunk.stageable)) return "没有可逐行暂存的完整代码块";
     return null;
   });
-  let canPickLines = $derived(Boolean(onStageLines && currentDiff && pickBlocker === null));
+  let canPickLines = $derived(Boolean((onStageLines || onDiscardLines) && currentDiff && pickBlocker === null));
   /** 只有完整代码块里的行能写：截断块的坐标不可靠；远端不给 stageable 的块也一律不算。 */
   let pickableHunks = $derived(
     new Set((currentDiff?.hunks ?? []).filter((hunk) => hunk.complete && hunk.stageable).map((hunk) => hunk.index)),
   );
 
-  function canPick(line: { kind: string; hunkIndex: number | null } | null | undefined): boolean {
-    if (!pickMode || !canPickLines || !line) return false;
+  /** 该行是否允许被选中（不要求已进入选行模式：点击其行号列会直接进入选行模式）。 */
+  function isLinePickable(line: { kind: string; hunkIndex: number | null } | null | undefined): boolean {
+    if (!canPickLines || !line) return false;
     if (line.kind !== "add" && line.kind !== "del") return false;
     return line.hunkIndex !== null && pickableHunks.has(line.hunkIndex);
+  }
+
+  function canPick(line: { kind: string; hunkIndex: number | null } | null | undefined): boolean {
+    return pickMode && isLinePickable(line);
+  }
+
+  /** 按块/按行放弃修改的不可用原因（仅允许本地未暂存已跟踪文本文件）。 */
+  let discardBlocker = $derived.by<string | null>(() => {
+    if (!currentDiff) return "还没有读到差异";
+    if (readOnly) return `${readOnlyLabel ?? "历史与审查视图"}只读，不能放弃修改`;
+    if (selection?.side === "staged" || currentDiff.staged) return "已暂存内容不能直接放弃，请先取消暂存";
+    if (untracked) return "未跟踪文件不能按块或按行放弃，请在文件列表放弃整文件";
+    if (discardBlockedReason) return discardBlockedReason;
+    if (stageBlocked) return stageBlocked;
+    if (conflicted) return "冲突文件要在三栏合并里处理";
+    if (currentDiff.binary) return "二进制文件不能按块或按行放弃";
+    if (currentDiff.preview) return "图片预览不能按块或按行放弃";
+    if (fullFile) return "完整文件视图不能按块或按行放弃，先切回「只看改动部分」";
+    if (currentDiff.truncated) return "差异被截断，不能按块或按行放弃";
+    if (currentDiff.lines.some((line) => line.kind === "meta" && PICK_HEADER.test(line.text))) {
+      return "文件本身新增、删除、改名或权限变化，不能按块或按行放弃";
+    }
+    return null;
+  });
+  let showHunkDiscard = $derived(Boolean(!readOnly && !fullFile && selection?.side === "unstaged" && onDiscardHunk && !untracked));
+  let showLineDiscard = $derived(Boolean(!readOnly && selection?.side === "unstaged" && onDiscardLines && !untracked));
+
+  type PendingDiscard =
+    | { kind: "hunk"; hunk: DiffHunk; snapshot: string; path: string }
+    | { kind: "lines"; lines: DiffLineSelection[]; snapshot: string; path: string };
+  let pendingDiscard = $state<PendingDiscard | null>(null);
+  let discardBusy = $state(false);
+  let discardError = $state<string | null>(null);
+
+  function requestDiscardHunk(hunk: DiffHunk): void {
+    if (!onDiscardHunk || !currentDiff || !selection || disabled || discardBlocker || !hunk.stageable) return;
+    discardError = null;
+    pendingDiscard = { kind: "hunk", hunk, snapshot: currentDiff.snapshot, path: selection.path };
+  }
+
+  function requestDiscardLines(): void {
+    if (!onDiscardLines || !currentDiff || !selection || disabled || discardBlocker || picked.length === 0) return;
+    discardError = null;
+    pendingDiscard = { kind: "lines", lines: picked.slice(), snapshot: currentDiff.snapshot, path: selection.path };
+  }
+
+  function cancelDiscard(): void {
+    if (discardBusy) return;
+    pendingDiscard = null;
+    discardError = null;
+  }
+
+  async function confirmDiscard(): Promise<void> {
+    const target = pendingDiscard;
+    if (!target || discardBusy) return;
+    if (!currentDiff || selection?.path !== target.path || currentDiff.snapshot !== target.snapshot) {
+      discardError = "差异快照已过期，已拒绝写入并刷新差异，请核对后再试。";
+      onRetry?.();
+      return;
+    }
+    discardBusy = true;
+    discardError = null;
+    try {
+      if (target.kind === "hunk") {
+        await onDiscardHunk?.(target.hunk);
+      } else {
+        await onDiscardLines?.(target.lines);
+      }
+      pendingDiscard = null;
+      if (target.kind === "lines") clearLineSelection();
+    } catch (err) {
+      const failure = normalizeError(err);
+      discardError = failure.message;
+      if (failure.code === "stale" || failure.code === "stale_patch") onRetry?.();
+    } finally {
+      discardBusy = false;
+    }
   }
 
   /** 并排视图的单元格指回 lines 里的原始行：两栏共用同一份行身份，不另造一套坐标。 */
@@ -944,7 +1119,7 @@
         run: () => readDocument(moreAnchor),
       });
     }
-    const allPickable = lines.filter((line): line is ViewLine & { hunkIndex: number; kind: "add" | "del" } => canPick(line));
+    const allPickable = lines.filter((line): line is DisplayDiffLine & { hunkIndex: number; kind: "add" | "del" } => canPick(line));
     const allPicked = allPickable.length > 0 && picked.length === allPickable.length;
     if (tier === "narrow" && pickMode) {
       tools.push(
@@ -1189,6 +1364,25 @@
           run: () => hunk && onStageHunk(hunk),
         },
       );
+      if (selection.side === "unstaged" && onDiscardHunk && !untracked) {
+        const discardReason = discardBlocker
+          ? discardBlocker
+          : !hunk
+            ? "在某个代码块上右键才能按块放弃"
+            : !hunk.stageable
+              ? stageBlocked ?? "截断的代码块不能按块放弃"
+              : disabled
+                ? "正在读取或写入，稍后再试"
+                : undefined;
+        entries.push({
+          id: "discard-hunk",
+          label: "放弃此块",
+          icon: "trash",
+          danger: true,
+          disabledReason: discardReason,
+          run: () => hunk && requestDiscardHunk(hunk),
+        });
+      }
     }
     menu = { x: point.x, y: point.y, entries, label: "差异操作" };
   }
@@ -1715,10 +1909,19 @@
   });
 
   function onDiffClick(event: MouseEvent): void {
-    if (!pickMode || !(event.target instanceof Element) || event.target.closest("button")) return;
+    if (!(event.target instanceof Element) || event.target.closest("button")) return;
     const target = event.target.closest<HTMLElement>("[data-line]");
     const index = Number(target?.dataset.line);
-    if (Number.isInteger(index)) toggleLineAt(index, event.shiftKey);
+    if (!Number.isInteger(index)) return;
+    if (!pickMode) {
+      if (!event.target.closest(".ln")) return;
+      const line = lines[index];
+      if (!isLinePickable(line)) return;
+      pickMode = true;
+      toggleLineAt(index, event.shiftKey);
+      return;
+    }
+    toggleLineAt(index, event.shiftKey);
   }
 
   function onDiffKey(event: KeyboardEvent) {
@@ -1758,6 +1961,7 @@
   function lineClass(kind: string): string {
     if (kind === "add") return "diff-line add";
     if (kind === "del") return "diff-line del";
+    if (kind === "expand") return "diff-line expand";
     if (kind === "hunk" || kind === "meta" || kind === "nonewline") return "diff-line hunk";
     return "diff-line";
   }
@@ -1902,7 +2106,7 @@
         {/if}
       </div>
     {/if}
-    {#if onStageLines && currentDiff && !readOnly}
+    {#if (onStageLines || onDiscardLines) && currentDiff && !readOnly}
       <!-- 行选（T4）：只在能安全逐行写入的 canonical 差异里出现；不能用时把原因写在 title 上。
            数量、清除与写入入口都在同一个分组里，和块级按钮一样受 disabled 保护。
            窄工具条把「清除」收进溢出，写入入口与已选行数始终留在原位。 -->
@@ -1912,7 +2116,7 @@
           class="btn btn-ghost btn-sm diff-ws-btn diff-pick-btn"
           aria-pressed={pickMode}
           aria-label="选择行"
-          title={pickBlocker ?? (pickMode ? "点击已选行可取消，Shift+点击可连选区间，按 Esc 或再次点「选行」退出" : "开启后点击新增或删除行（Shift+点击连选区间），再单独暂存")}
+          title={pickBlocker ?? (pickMode ? "点击已选行可取消，Shift+点击可连选区间，按 Esc 或再次点「选行」退出" : "开启后点击新增或删除行（或直接点击行号列，Shift+点击连选区间），再单独暂存或放弃")}
           disabled={!canPickLines && !pickMode}
           onclick={() => setPickMode(!pickMode)}
         >
@@ -1921,7 +2125,7 @@
         {#if pickMode}
           <span class="chip" data-line-count aria-label={"已选择 " + picked.length + " 行"}>{picked.length} 行</span>
           {#if tier !== "narrow" && currentDiff.hunks.some((hunk) => hunk.complete)}
-            {@const allPickable = lines.filter((line): line is ViewLine & { hunkIndex: number; kind: "add" | "del" } => canPick(line))}
+            {@const allPickable = lines.filter((line): line is DisplayDiffLine & { hunkIndex: number; kind: "add" | "del" } => canPick(line))}
             <button
               type="button"
               class="btn btn-ghost btn-sm"
@@ -1949,14 +2153,26 @@
               }}
             >清除</button>
           {/if}
-          <button
-            type="button"
-            class="btn btn-secondary btn-sm"
-            aria-label={selection?.side === "staged" ? "取消暂存选中行" : "暂存选中行"}
-            title={stageBlocked ?? (disabled ? BUSY_REASON : picked.length === 0 ? "先在差异里选中新增或删除行" : undefined)}
-            disabled={disabled || Boolean(stageBlocked) || picked.length === 0}
-            onclick={commitPickedLines}
-          >{selection?.side === "staged" ? "取消暂存选中行" : "暂存选中行"}</button>
+          {#if onStageLines}
+            <button
+              type="button"
+              class="btn btn-secondary btn-sm"
+              aria-label={selection?.side === "staged" ? "取消暂存选中行" : "暂存选中行"}
+              title={stageBlocked ?? (disabled ? BUSY_REASON : picked.length === 0 ? "先在差异里选中新增或删除行" : undefined)}
+              disabled={disabled || Boolean(stageBlocked) || picked.length === 0}
+              onclick={commitPickedLines}
+            >{selection?.side === "staged" ? "取消暂存选中行" : "暂存选中行"}</button>
+          {/if}
+          {#if showLineDiscard}
+            <button
+              type="button"
+              class="btn btn-danger-soft btn-sm"
+              aria-label="放弃选中行"
+              title={discardBlocker ?? (disabled ? BUSY_REASON : picked.length === 0 ? "先在差异里选中新增或删除行" : "放弃选中的未暂存修改（将弹出确认）")}
+              disabled={disabled || Boolean(discardBlocker) || picked.length === 0}
+              onclick={requestDiscardLines}
+            >放弃选中行</button>
+          {/if}
         {/if}
       </div>
     {/if}
@@ -2226,6 +2442,13 @@
         <button type="button" class="btn btn-ghost btn-sm" onclick={() => onViewAsText?.(false)}>恢复</button>
       </div>
     {/if}
+    {#if expandError}
+      <div class="infobar error" role="alert" data-diff-expand-error>
+        <Icon name="alert-circle" size={14} />
+        <span class="infobar-text">{expandError}</span>
+        <button type="button" class="btn btn-ghost btn-sm" onclick={() => (expandError = null)}>关闭</button>
+      </div>
+    {/if}
     <div
       class="diff-scroll"
       class:split-x={split}
@@ -2278,9 +2501,47 @@
               style={`top:${rowTop(absolute)}px;height:${ROW_HEIGHT}px`}
               title={canPick(line) ? pickLabel(line) : undefined}
             >
-              <span class="ln">{line.oldNo ?? ""}</span>
-              <span class="ln">{line.newNo ?? ""}</span>
-              {#if line.kind === "add" || line.kind === "del" || line.kind === "context"}
+              <span class="ln" class:ln-pickable={isLinePickable(line)} title={isLinePickable(line) ? (pickMode ? pickLabel(line) : "点击行号选择此行（Shift+点击连选）") : undefined}>{line.oldNo ?? ""}</span>
+              <span class="ln" class:ln-pickable={isLinePickable(line)} title={isLinePickable(line) ? (pickMode ? pickLabel(line) : "点击行号选择此行（Shift+点击连选）") : undefined}>{line.newNo ?? ""}</span>
+              {#if line.kind === "expand" && line.expand}
+                {@const spec = line.expand}
+                <span class="code diff-expand-bar" data-diff-expand={spec.id}>
+                  {#if expandingGapId === spec.id}
+                    <span class="diff-expand-busy"><span class="spinner muted" aria-hidden="true"></span>正在展开上下文…</span>
+                  {:else if spec.position === "top"}
+                    <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "up")}>
+                      <Icon name="chevron-up" size={12} /><span>展开上方 {Math.min(CONTEXT_EXPAND_STEP, spec.remaining ?? CONTEXT_EXPAND_STEP)} 行</span>
+                    </button>
+                    {#if (spec.remaining ?? 0) > CONTEXT_EXPAND_STEP && (spec.remaining ?? 0) <= 200}
+                      <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "all")}>
+                        <span>展开全部 {spec.remaining} 行</span>
+                      </button>
+                    {/if}
+                  {:else if spec.position === "between"}
+                    {#if (spec.remaining ?? 0) <= CONTEXT_EXPAND_STEP}
+                      <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "all")}>
+                        <Icon name="rows" size={12} /><span>展开中间 {spec.remaining} 行</span>
+                      </button>
+                    {:else}
+                      <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "down")}>
+                        <Icon name="chevron-down" size={12} /><span>向下展开 {CONTEXT_EXPAND_STEP} 行</span>
+                      </button>
+                      <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "up")}>
+                        <Icon name="chevron-up" size={12} /><span>向上展开 {CONTEXT_EXPAND_STEP} 行</span>
+                      </button>
+                      {#if (spec.remaining ?? 0) <= 200}
+                        <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "all")}>
+                          <span>展开全部 {spec.remaining} 行</span>
+                        </button>
+                      {/if}
+                    {/if}
+                  {:else}
+                    <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "down")}>
+                      <Icon name="chevron-down" size={12} /><span>展开下方 {spec.remaining !== null ? Math.min(CONTEXT_EXPAND_STEP, spec.remaining) : CONTEXT_EXPAND_STEP} 行</span>
+                    </button>
+                  {/if}
+                </span>
+              {:else if line.kind === "add" || line.kind === "del" || line.kind === "context"}
                 {@const segs = segmentsAt(absolute)}
                 {@const showEol = markWhitespace || documents.eolChanged.has(absolute)}
                 <span class="code"><span class="code-in" data-sign={sign(line.text)} data-len={codeOf(line).length}>{#if segs.length === 1 && !segs[0].k && !segs[0].m && !segs[0].ws}{segs[0].t}{:else}{#each segs as seg, i (i)}<span class={seg.k} class:wd={seg.m} class:ws-space={seg.ws === "space"} class:ws-tab={seg.ws === "tab"} class:ws-special={seg.ws === "special"} data-ws-label={seg.wsLabel}>{seg.t}</span>{/each}{/if}{#if showEol}<span class="ws-eol" class:eol-changed={documents.eolChanged.has(absolute)} data-eol={line.eol ?? "lf"} aria-hidden="true"></span>{/if}</span></span>
@@ -2304,13 +2565,24 @@
               {#if !readOnly && !fullFile && hunkForLine(absolute)}
                 {@const hunk = hunkForLine(absolute)}
                 {#if hunk}
-                  <button
-                    type="button"
-                    class={`btn btn-sm hunk-btn ${hunk.stageable ? "btn-secondary" : "btn-ghost"}`}
-                    disabled={disabled || !hunk.stageable}
-                    title={hunkStageTitle(hunk)}
-                    onclick={() => onStageHunk(hunk)}
-                  >{hunkLabel(hunk)}</button>
+                  <span class="hunk-actions">
+                    {#if showHunkDiscard}
+                      <button
+                        type="button"
+                        class="btn btn-sm hunk-btn btn-danger-soft"
+                        disabled={disabled || !hunk.stageable || Boolean(discardBlocker)}
+                        title={discardBlocker ?? (!hunk.stageable ? hunkStageTitle(hunk) : "放弃这一块未暂存修改（将弹出确认）")}
+                        onclick={() => requestDiscardHunk(hunk)}
+                      >放弃此块</button>
+                    {/if}
+                    <button
+                      type="button"
+                      class={`btn btn-sm hunk-btn ${hunk.stageable ? "btn-secondary" : "btn-ghost"}`}
+                      disabled={disabled || !hunk.stageable}
+                      title={hunkStageTitle(hunk)}
+                      onclick={() => onStageHunk(hunk)}
+                    >{hunkLabel(hunk)}</button>
+                  </span>
                 {/if}
               {/if}
               {#if canPick(line)}
@@ -2359,7 +2631,48 @@
               style={`top:${rowTop(absolute)}px;height:${ROW_HEIGHT}px`}
             >
               <!-- 占位格用 blank 而不是 empty：.empty 是全局空状态（flex + 32px 内边距），会把单元格撑到 64px，相邻行文字叠在一起。 -->
-              {#if row.span && row.left?.kind === "hunk"}
+              {#if row.span && row.left?.kind === "expand" && row.left.index !== undefined && lines[row.left.index]?.expand}
+                {@const spec = lines[row.left.index].expand!}
+                <span class="side-cell expand side-expand" data-diff-expand={spec.id}>
+                  <span class="ln"></span>
+                  <span class="code diff-expand-bar">
+                    {#if expandingGapId === spec.id}
+                      <span class="diff-expand-busy"><span class="spinner muted" aria-hidden="true"></span>正在展开上下文…</span>
+                    {:else if spec.position === "top"}
+                      <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "up")}>
+                        <Icon name="chevron-up" size={12} /><span>展开上方 {Math.min(CONTEXT_EXPAND_STEP, spec.remaining ?? CONTEXT_EXPAND_STEP)} 行</span>
+                      </button>
+                      {#if (spec.remaining ?? 0) > CONTEXT_EXPAND_STEP && (spec.remaining ?? 0) <= 200}
+                        <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "all")}>
+                          <span>展开全部 {spec.remaining} 行</span>
+                        </button>
+                      {/if}
+                    {:else if spec.position === "between"}
+                      {#if (spec.remaining ?? 0) <= CONTEXT_EXPAND_STEP}
+                        <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "all")}>
+                          <Icon name="rows" size={12} /><span>展开中间 {spec.remaining} 行</span>
+                        </button>
+                      {:else}
+                        <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "down")}>
+                          <Icon name="chevron-down" size={12} /><span>向下展开 {CONTEXT_EXPAND_STEP} 行</span>
+                        </button>
+                        <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "up")}>
+                          <Icon name="chevron-up" size={12} /><span>向上展开 {CONTEXT_EXPAND_STEP} 行</span>
+                        </button>
+                        {#if (spec.remaining ?? 0) <= 200}
+                          <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "all")}>
+                            <span>展开全部 {spec.remaining} 行</span>
+                          </button>
+                        {/if}
+                      {/if}
+                    {:else}
+                      <button type="button" class="diff-expand-btn" disabled={disabled || expandingGapId !== null} onclick={() => void expandGap(spec, "down")}>
+                        <Icon name="chevron-down" size={12} /><span>展开下方 {spec.remaining !== null ? Math.min(CONTEXT_EXPAND_STEP, spec.remaining) : CONTEXT_EXPAND_STEP} 行</span>
+                      </button>
+                    {/if}
+                  </span>
+                </span>
+              {:else if row.span && row.left?.kind === "hunk"}
                 {@const caption = hunkCaption(row.left.text)}
                 {@const sideHunk = onCommentLine && row.left.index !== undefined ? headerHunk(row.left.index) : null}
                 <span class="side-cell hunk side-hunk"><span class="ln"></span><span class="code hunk-caption"><span class="hunk-at">{caption.at}</span>{#if caption.context}<span class="hunk-context" title={caption.context}>{caption.context}</span>{/if}</span></span>
@@ -2381,7 +2694,7 @@
                 title={canPick(pickLineOf(row.left)) ? pickLabel(pickLineOf(row.left)!) : undefined}
                 data-line={row.left?.index}
               >
-                {#if row.left}<span class="ln">{row.left.no ?? ""}</span>{#if row.left.index !== undefined && !row.span}{@const leftLine = lines[row.left.index]}{@const showLeftEol = markWhitespace || documents.eolChanged.has(row.left.index)}<span class="code"><span class="code-in" data-sign={sign(row.left.text)} data-len={codeOf(row.left).length}>{#each segmentsAt(row.left.index) as seg, i (i)}{#if !seg.k && !seg.m && !seg.ws}{seg.t}{:else}<span class={seg.k} class:wd={seg.m} class:ws-space={seg.ws === "space"} class:ws-tab={seg.ws === "tab"} class:ws-special={seg.ws === "special"} data-ws-label={seg.wsLabel}>{seg.t}</span>{/if}{/each}{#if showLeftEol && leftLine}<span class="ws-eol" class:eol-changed={documents.eolChanged.has(row.left.index)} data-eol={leftLine.eol ?? "lf"} aria-hidden="true"></span>{/if}</span></span>{:else}<span class="code"><span class="code-in" data-len={row.left.text.length}>{row.left.text}</span></span>{/if}{/if}
+                {#if row.left}<span class="ln" class:ln-pickable={isLinePickable(pickLineOf(row.left))} title={isLinePickable(pickLineOf(row.left)) ? (pickMode ? pickLabel(pickLineOf(row.left)!) : "点击行号选择此行（Shift+点击连选）") : undefined}>{row.left.no ?? ""}</span>{#if row.left.index !== undefined && !row.span}{@const leftLine = lines[row.left.index]}{@const showLeftEol = markWhitespace || documents.eolChanged.has(row.left.index)}<span class="code"><span class="code-in" data-sign={sign(row.left.text)} data-len={codeOf(row.left).length}>{#each segmentsAt(row.left.index) as seg, i (i)}{#if !seg.k && !seg.m && !seg.ws}{seg.t}{:else}<span class={seg.k} class:wd={seg.m} class:ws-space={seg.ws === "space"} class:ws-tab={seg.ws === "tab"} class:ws-special={seg.ws === "special"} data-ws-label={seg.wsLabel}>{seg.t}</span>{/if}{/each}{#if showLeftEol && leftLine}<span class="ws-eol" class:eol-changed={documents.eolChanged.has(row.left.index)} data-eol={leftLine.eol ?? "lf"} aria-hidden="true"></span>{/if}</span></span>{:else}<span class="code"><span class="code-in" data-len={row.left.text.length}>{row.left.text}</span></span>{/if}{/if}
               </span>
               <span
                 class={`side-cell side-r ${row.right?.kind ?? "blank"}`}
@@ -2390,19 +2703,30 @@
                 title={canPick(pickLineOf(row.right)) ? pickLabel(pickLineOf(row.right)!) : undefined}
                 data-line={row.right?.index}
               >
-                {#if row.right}<span class="ln">{row.right.no ?? ""}</span>{#if row.right.index !== undefined && !row.span}{@const rightLine = lines[row.right.index]}{@const showRightEol = markWhitespace || documents.eolChanged.has(row.right.index)}<span class="code"><span class="code-in" data-sign={sign(row.right.text)} data-len={codeOf(row.right).length}>{#each segmentsAt(row.right.index) as seg, i (i)}{#if !seg.k && !seg.m && !seg.ws}{seg.t}{:else}<span class={seg.k} class:wd={seg.m} class:ws-space={seg.ws === "space"} class:ws-tab={seg.ws === "tab"} class:ws-special={seg.ws === "special"} data-ws-label={seg.wsLabel}>{seg.t}</span>{/if}{/each}{#if showRightEol && rightLine}<span class="ws-eol" class:eol-changed={documents.eolChanged.has(row.right.index)} data-eol={rightLine.eol ?? "lf"} aria-hidden="true"></span>{/if}</span></span>{:else}<span class="code"><span class="code-in" data-len={row.right.text.length}>{row.right.text}</span></span>{/if}{/if}
+                {#if row.right}<span class="ln" class:ln-pickable={isLinePickable(pickLineOf(row.right))} title={isLinePickable(pickLineOf(row.right)) ? (pickMode ? pickLabel(pickLineOf(row.right)!) : "点击行号选择此行（Shift+点击连选）") : undefined}>{row.right.no ?? ""}</span>{#if row.right.index !== undefined && !row.span}{@const rightLine = lines[row.right.index]}{@const showRightEol = markWhitespace || documents.eolChanged.has(row.right.index)}<span class="code"><span class="code-in" data-sign={sign(row.right.text)} data-len={codeOf(row.right).length}>{#each segmentsAt(row.right.index) as seg, i (i)}{#if !seg.k && !seg.m && !seg.ws}{seg.t}{:else}<span class={seg.k} class:wd={seg.m} class:ws-space={seg.ws === "space"} class:ws-tab={seg.ws === "tab"} class:ws-special={seg.ws === "special"} data-ws-label={seg.wsLabel}>{seg.t}</span>{/if}{/each}{#if showRightEol && rightLine}<span class="ws-eol" class:eol-changed={documents.eolChanged.has(row.right.index)} data-eol={rightLine.eol ?? "lf"} aria-hidden="true"></span>{/if}</span></span>{:else}<span class="code"><span class="code-in" data-len={row.right.text.length}>{row.right.text}</span></span>{/if}{/if}
               </span>
               {/if}
               {#if !readOnly && !fullFile && row.showStage && row.hunkIndex !== null}
                 {@const hunk = currentDiff.hunks.find((item) => item.index === row.hunkIndex)}
                 {#if hunk}
-                  <button
-                    type="button"
-                    class={`btn btn-sm hunk-btn ${hunk.stageable ? "btn-secondary" : "btn-ghost"}`}
-                    disabled={disabled || !hunk.stageable}
-                    title={hunkStageTitle(hunk)}
-                    onclick={() => onStageHunk(hunk)}
-                  >{hunkLabel(hunk)}</button>
+                  <span class="hunk-actions">
+                    {#if showHunkDiscard}
+                      <button
+                        type="button"
+                        class="btn btn-sm hunk-btn btn-danger-soft"
+                        disabled={disabled || !hunk.stageable || Boolean(discardBlocker)}
+                        title={discardBlocker ?? (!hunk.stageable ? hunkStageTitle(hunk) : "放弃这一块未暂存修改（将弹出确认）")}
+                        onclick={() => requestDiscardHunk(hunk)}
+                      >放弃此块</button>
+                    {/if}
+                    <button
+                      type="button"
+                      class={`btn btn-sm hunk-btn ${hunk.stageable ? "btn-secondary" : "btn-ghost"}`}
+                      disabled={disabled || !hunk.stageable}
+                      title={hunkStageTitle(hunk)}
+                      onclick={() => onStageHunk(hunk)}
+                    >{hunkLabel(hunk)}</button>
+                  </span>
                 {/if}
               {/if}
               {#if canPick(pickLineOf(row.left)) || canPick(pickLineOf(row.right)) || canComment(pickLineOf(row.left)) || canComment(pickLineOf(row.right))}
@@ -2534,5 +2858,40 @@
   {/if}
   {#if menu}
     <ContextMenu request={menu} onClose={() => (menu = null)} />
+  {/if}
+  {#if pendingDiscard}
+    {@const addCount = pendingDiscard.kind === "lines" ? pendingDiscard.lines.filter((item) => item.kind === "add").length : 0}
+    {@const delCount = pendingDiscard.kind === "lines" ? pendingDiscard.lines.filter((item) => item.kind === "del").length : 0}
+    <ConfirmDialog
+      title={pendingDiscard.kind === "hunk" ? "放弃此块修改" : "放弃选中行修改"}
+      titleId="diff-discard-title"
+      icon="trash"
+      tone="danger"
+      message={pendingDiscard.kind === "hunk"
+        ? "确定放弃这一块未暂存的工作区修改？"
+        : `确定放弃选中的 ${pendingDiscard.lines.length} 行未暂存的工作区修改？`}
+      targets={[
+        {
+          icon: "file",
+          name: pendingDiscard.path,
+          detail:
+            pendingDiscard.kind === "hunk"
+              ? `影响块：${hunkCaption(pendingDiscard.hunk.header).at}`
+              : `共 ${pendingDiscard.lines.length} 行（新增 ${addCount} / 删除 ${delCount}）`,
+        },
+      ]}
+      targetsLabel="受影响的文件与范围"
+      notes={[
+        { tone: "warn", text: "此操作不可恢复，被放弃的工作区内容无法从本应用找回。" },
+        { tone: "ok", text: "仅移除目标未暂存修改，已暂存内容与其他未选改动保持不变。" },
+      ]}
+      confirmLabel={pendingDiscard.kind === "hunk" ? "放弃此块" : "放弃选中行"}
+      confirmIcon="trash"
+      busy={discardBusy}
+      error={discardError}
+      impact={pendingDiscard.kind === "hunk" ? "discard-hunk" : "discard-lines"}
+      onConfirm={() => void confirmDiscard()}
+      onCancel={cancelDiscard}
+    />
   {/if}
 </section>

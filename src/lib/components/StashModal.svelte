@@ -38,7 +38,7 @@
   title="临时保存"
   titleId="stash-modal-title"
   icon="archive"
-  size="lg"
+  size="xl"
   task="stash"
   {returnFocus}
   onClose={onClose}

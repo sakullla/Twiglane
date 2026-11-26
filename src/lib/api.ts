@@ -35,7 +35,12 @@ import {
   type RemoteWriteResult,
 } from "./remote-worktree";
 import { TERMINAL_EXIT_EVENT, TERMINAL_OUTPUT_EVENT } from "./terminal";
-import { REMOTE_HUNKS_UNSTAGEABLE_REASON } from "./types";
+import {
+  REMOTE_CONTEXT_EXPAND_UNSUPPORTED_REASON,
+  REMOTE_DISCARD_PATCH_UNSUPPORTED_REASON,
+  REMOTE_HUNKS_UNSTAGEABLE_REASON,
+  REMOTE_STASH_EXTENDED_UNSUPPORTED_REASON,
+} from "./types";
 import type {
   BatchDeleteResult,
   BranchState,
@@ -49,6 +54,7 @@ import type {
   ClioraReturnSent,
   ReviewFeedbackPrepared,
   ReviewFeedbackRequest,
+  DiffContextSlice,
   DiffLineSelection,
   PreviewSource,
   DocumentSource,
@@ -86,6 +92,7 @@ import type {
   RemoteState,
   RemoteTag,
   SettingsDto,
+  StashDetail,
   RemoteSshSettings,
   SshInstallOutcome,
   SshInstallProgress,
@@ -1133,6 +1140,26 @@ const apiBase = {
       ...(context === undefined ? {} : { context }),
       ...(asText ? { asText } : {}),
     }),
+  diffContextLines: (
+    path: string,
+    relative: string,
+    staged: boolean,
+    startLine: number,
+    count: number,
+    generation: number,
+    requestId: number,
+    original: string | null = null,
+  ) =>
+    invoke<DiffContextSlice>("diff_context_lines", {
+      path,
+      relative,
+      original,
+      staged,
+      startLine,
+      count,
+      generation,
+      requestId,
+    }),
   stageFiles: (path: string, paths: string[], generation: number, requestId: number) =>
     invoke<StatusSnapshot>("stage_files", { path, paths, generation, requestId }),
   unstageFiles: (path: string, paths: string[], generation: number, requestId: number) =>
@@ -1169,6 +1196,46 @@ const apiBase = {
     original: string | null = null,
   ) =>
     invoke<StatusSnapshot>("stage_lines", {
+      path,
+      relative,
+      original,
+      staged,
+      lines,
+      snapshot,
+      generation,
+      requestId,
+    }),
+  discardHunks: (
+    path: string,
+    relative: string,
+    staged: boolean,
+    hunks: number[],
+    snapshot: string,
+    generation: number,
+    requestId: number,
+    original: string | null = null,
+  ) =>
+    invoke<StatusSnapshot>("discard_hunks", {
+      path,
+      relative,
+      original,
+      staged,
+      hunks,
+      snapshot,
+      generation,
+      requestId,
+    }),
+  discardLines: (
+    path: string,
+    relative: string,
+    staged: boolean,
+    lines: DiffLineSelection[],
+    snapshot: string,
+    generation: number,
+    requestId: number,
+    original: string | null = null,
+  ) =>
+    invoke<StatusSnapshot>("discard_lines", {
       path,
       relative,
       original,
@@ -1728,6 +1795,32 @@ const apiBase = {
     }),
   applyStash: (path: string, oid: string, generation: number, requestId: number) =>
     invoke<StashApplyResult>("apply_stash", { path, oid, generation, requestId }),
+  popStash: (path: string, oid: string, generation: number, requestId: number) =>
+    invoke<StashApplyResult>("pop_stash", { path, oid, generation, requestId }),
+  stashDetail: (path: string, oid: string, generation: number, requestId: number) =>
+    invoke<StashDetail>("stash_detail", { path, oid, generation, requestId }),
+  stashFileDiff: (
+    path: string,
+    oid: string,
+    relative: string,
+    untracked: boolean,
+    generation: number,
+    requestId: number,
+    original: string | null = null,
+    offset = 0,
+    limit = 0,
+  ) =>
+    invoke<DiffResponse>("stash_file_diff", {
+      path,
+      oid,
+      relative,
+      original,
+      untracked,
+      generation,
+      requestId,
+      offset,
+      limit,
+    }),
   deleteStash: (path: string, oid: string, confirm: boolean, generation: number, requestId: number) =>
     invoke<StashState>("delete_stash", { path, oid, confirm, generation, requestId }),
   /** 只读预览：target 为空时合并到当前分支。 */
@@ -3471,6 +3564,33 @@ const remoteOverrides: Record<string, unknown> = {
     return remoteGitResult(session, generation, "stashApply", "stash", { oid });
   },
 
+  async popStash(path: string, oid: string, generation: number, requestId: number): Promise<StashApplyResult> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.popStash(path, oid, generation, requestId);
+    throw remoteError("remote_unsupported", REMOTE_STASH_EXTENDED_UNSUPPORTED_REASON, generation);
+  },
+
+  async stashDetail(path: string, oid: string, generation: number, requestId: number): Promise<StashDetail> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.stashDetail(path, oid, generation, requestId);
+    throw remoteError("remote_unsupported", REMOTE_STASH_EXTENDED_UNSUPPORTED_REASON, generation);
+  },
+
+  async stashFileDiff(
+    path: string,
+    oid: string,
+    relative: string,
+    untracked: boolean,
+    generation: number,
+    requestId: number,
+    original: string | null = null,
+    offset = 0,
+    limit = 0,
+  ): Promise<DiffResponse> {
+    if (!isRemoteRepositoryKey(path)) {
+      return apiBase.stashFileDiff(path, oid, relative, untracked, generation, requestId, original, offset, limit);
+    }
+    throw remoteError("remote_unsupported", REMOTE_STASH_EXTENDED_UNSUPPORTED_REASON, generation);
+  },
+
   async deleteStash(
     path: string,
     oid: string,
@@ -3696,6 +3816,54 @@ const remoteOverrides: Record<string, unknown> = {
     return remoteStatus(await remoteBridgeWrite(session, generation, "patch", {
       path: relative, original, staged, snapshot, lines,
     }), session.generation);
+  },
+
+  async diffContextLines(
+    path: string,
+    relative: string,
+    staged: boolean,
+    startLine: number,
+    count: number,
+    generation: number,
+    requestId: number,
+    original: string | null = null,
+  ): Promise<DiffContextSlice> {
+    if (!isRemoteRepositoryKey(path)) {
+      return apiBase.diffContextLines(path, relative, staged, startLine, count, generation, requestId, original);
+    }
+    throw remoteError("remote_unsupported", REMOTE_CONTEXT_EXPAND_UNSUPPORTED_REASON, generation);
+  },
+
+  async discardHunks(
+    path: string,
+    relative: string,
+    staged: boolean,
+    hunks: number[],
+    snapshot: string,
+    generation: number,
+    requestId: number,
+    original: string | null = null,
+  ): Promise<StatusSnapshot> {
+    if (!isRemoteRepositoryKey(path)) {
+      return apiBase.discardHunks(path, relative, staged, hunks, snapshot, generation, requestId, original);
+    }
+    throw remoteError("remote_unsupported", REMOTE_DISCARD_PATCH_UNSUPPORTED_REASON, generation);
+  },
+
+  async discardLines(
+    path: string,
+    relative: string,
+    staged: boolean,
+    lines: DiffLineSelection[],
+    snapshot: string,
+    generation: number,
+    requestId: number,
+    original: string | null = null,
+  ): Promise<StatusSnapshot> {
+    if (!isRemoteRepositoryKey(path)) {
+      return apiBase.discardLines(path, relative, staged, lines, snapshot, generation, requestId, original);
+    }
+    throw remoteError("remote_unsupported", REMOTE_DISCARD_PATCH_UNSUPPORTED_REASON, generation);
   },
 
   async commitAndPush(

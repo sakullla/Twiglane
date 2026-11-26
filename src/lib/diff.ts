@@ -55,7 +55,7 @@ export async function finishDiffAttempt<T>(
   }
 }
 
-export type DiffLineKind = "add" | "del" | "hunk" | "meta" | "context";
+export type DiffLineKind = "add" | "del" | "hunk" | "meta" | "context" | "expand";
 
 export function classifyDiffLine(line: string): DiffLineKind {
   if (line.startsWith("@@")) return "hunk";
@@ -173,7 +173,7 @@ export function toSideRows(lines: ViewLine[]): SideRow[] {
       attachNote(line, index);
       return;
     }
-    if (line.kind === "hunk" || line.kind === "meta") {
+    if (line.kind === "hunk" || line.kind === "meta" || line.kind === "expand") {
       flush();
       const row = spanRow(line, index, line.kind, line.kind === "hunk");
       rows.push(row);
@@ -792,4 +792,204 @@ export function hunkCaption(text: string): { at: string; context: string } {
   const first = Math.max(start, 1);
   const at = count <= 1 ? `${prefix}第 ${first} 行` : `${prefix}第 ${first}–${first + count - 1} 行`;
   return { at, context: match[5].trim() };
+}
+
+/** 每次按段展开上下文的默认步长（行）。 */
+export const CONTEXT_EXPAND_STEP = 20;
+
+export interface ContextExpandSpec {
+  id: string;
+  position: "top" | "between" | "bottom";
+  /** 尚未展开区间的新侧起始行号（1 起算）。 */
+  startNew: number;
+  /** 尚未展开区间的新侧结束行号（1 起算）；底部未知总行数时为 null。 */
+  endNew: number | null;
+  /** oldNo - newNo 偏移量。 */
+  oldOffset: number;
+  /** 剩余未展开行数；底部未知总行数时为 null。 */
+  remaining: number | null;
+}
+
+export interface DisplayDiffLine extends ViewLine {
+  /** 原始 diff.lines 中的下标；展开的纯上下文行与展开条为 null。 */
+  originIndex: number | null;
+  /** 动态展开的纯上下文行：hunkIndex 永远为 null，不参与选行或补丁构造。 */
+  expanded?: boolean;
+  /** 展开条行（kind === "expand"）携带的区间信息。 */
+  expand?: ContextExpandSpec;
+}
+
+interface ParsedHunkRange {
+  oldStart: number;
+  oldCount: number;
+  newStart: number;
+  newCount: number;
+  beforeOffset: number;
+  afterOffset: number;
+  gapBeforeEnd: number;
+  gapAfterStart: number;
+}
+
+export function parseHunkRange(text: string): ParsedHunkRange | null {
+  const match = /^@@+ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@+/.exec(text);
+  if (!match) return null;
+  const oldStart = Number(match[1]);
+  const oldCount = match[2] === undefined ? 1 : Number(match[2]);
+  const newStart = Number(match[3]);
+  const newCount = match[4] === undefined ? 1 : Number(match[4]);
+  const beforeOffset =
+    oldCount === 0
+      ? oldStart - newStart + 1
+      : newCount === 0
+        ? oldStart - newStart - 1
+        : oldStart - newStart;
+  const afterOffset = beforeOffset + (oldCount - newCount);
+  const gapBeforeEnd = newCount === 0 ? newStart : newStart - 1;
+  const newEnd = newCount > 0 ? newStart + newCount - 1 : newStart;
+  const gapAfterStart = newEnd + 1;
+  return { oldStart, oldCount, newStart, newCount, beforeOffset, afterOffset, gapBeforeEnd, gapAfterStart };
+}
+
+/**
+ * 将已按段展开的纯上下文行与内联展开条合并进展示行列表。
+ * 只读视口扩展：不改动原始 diff.hunks、snapshot 或任何原始行的 originIndex 与 hunkIndex。
+ */
+export function buildExpandedDiffLines(
+  baseLines: readonly ViewLine[],
+  baseOrigin: readonly number[],
+  expandedByNewLine: ReadonlyMap<number, string>,
+  knownTotalLines: number | null,
+  enabled: boolean,
+): DisplayDiffLine[] {
+  if (!enabled || baseLines.length === 0) {
+    return baseLines.map((line, i) => ({ ...line, originIndex: baseOrigin[i] ?? null }));
+  }
+
+  interface HunkBlock {
+    startIdx: number;
+    endIdx: number;
+    range: ParsedHunkRange;
+  }
+
+  const blocks: HunkBlock[] = [];
+  for (let i = 0; i < baseLines.length; i += 1) {
+    if (baseLines[i].kind !== "hunk") continue;
+    const range = parseHunkRange(baseLines[i].text);
+    if (!range) continue;
+    if (blocks.length > 0) blocks[blocks.length - 1].endIdx = i;
+    blocks.push({ startIdx: i, endIdx: baseLines.length, range });
+  }
+  if (blocks.length === 0) {
+    return baseLines.map((line, i) => ({ ...line, originIndex: baseOrigin[i] ?? null }));
+  }
+
+  const out: DisplayDiffLine[] = [];
+  const pushGap = (
+    idPrefix: string,
+    position: "top" | "between",
+    startNew: number,
+    endNew: number,
+    oldOffset: number,
+  ) => {
+    if (endNew < startNew) return;
+    let cursor = startNew;
+    let segIndex = 0;
+    while (cursor <= endNew) {
+      if (expandedByNewLine.has(cursor)) {
+        const raw = expandedByNewLine.get(cursor) ?? "";
+        out.push({
+          kind: "context",
+          text: ` ${raw}`,
+          oldNo: cursor + oldOffset,
+          newNo: cursor,
+          hunkIndex: null,
+          originIndex: null,
+          expanded: true,
+        });
+        cursor += 1;
+      } else {
+        const segStart = cursor;
+        while (cursor <= endNew && !expandedByNewLine.has(cursor)) cursor += 1;
+        const segEnd = cursor - 1;
+        out.push({
+          kind: "expand",
+          text: "",
+          oldNo: null,
+          newNo: null,
+          hunkIndex: null,
+          originIndex: null,
+          expand: {
+            id: `${idPrefix}-${segIndex}`,
+            position,
+            startNew: segStart,
+            endNew: segEnd,
+            oldOffset,
+            remaining: segEnd - segStart + 1,
+          },
+        });
+        segIndex += 1;
+      }
+    }
+  };
+
+  // 首块之前（如有非 hunk 前导行原样保留）
+  for (let i = 0; i < blocks[0].startIdx; i += 1) {
+    out.push({ ...baseLines[i], originIndex: baseOrigin[i] ?? null });
+  }
+  pushGap("top", "top", 1, blocks[0].range.gapBeforeEnd, blocks[0].range.beforeOffset);
+
+  for (let b = 0; b < blocks.length; b += 1) {
+    const block = blocks[b];
+    for (let i = block.startIdx; i < block.endIdx; i += 1) {
+      out.push({ ...baseLines[i], originIndex: baseOrigin[i] ?? null });
+    }
+    if (b + 1 < blocks.length) {
+      const next = blocks[b + 1];
+      pushGap(
+        `between-${b}`,
+        "between",
+        block.range.gapAfterStart,
+        next.range.gapBeforeEnd,
+        block.range.afterOffset,
+      );
+    }
+  }
+
+  // 末块之后：输出已连续展开的行，若未到达文件尾则挂底部展开条。
+  const last = blocks[blocks.length - 1];
+  let tailCursor = last.range.gapAfterStart;
+  const tailOffset = last.range.afterOffset;
+  while (expandedByNewLine.has(tailCursor)) {
+    const raw = expandedByNewLine.get(tailCursor) ?? "";
+    out.push({
+      kind: "context",
+      text: ` ${raw}`,
+      oldNo: tailCursor + tailOffset,
+      newNo: tailCursor,
+      hunkIndex: null,
+      originIndex: null,
+      expanded: true,
+    });
+    tailCursor += 1;
+  }
+  if (knownTotalLines === null || tailCursor <= knownTotalLines) {
+    out.push({
+      kind: "expand",
+      text: "",
+      oldNo: null,
+      newNo: null,
+      hunkIndex: null,
+      originIndex: null,
+      expand: {
+        id: "bottom",
+        position: "bottom",
+        startNew: tailCursor,
+        endNew: knownTotalLines,
+        oldOffset: tailOffset,
+        remaining: knownTotalLines === null ? null : Math.max(0, knownTotalLines - tailCursor + 1),
+      },
+    });
+  }
+
+  return out;
 }

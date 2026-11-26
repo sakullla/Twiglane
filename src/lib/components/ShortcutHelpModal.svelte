@@ -6,7 +6,8 @@
     id: string;
     title: string;
     hint: string;
-    keys: string[];
+    /** 一组或多组可选快捷键组合；组间以「或」分隔，组内键帽按字面渲染（例如 ⌘ / 中的 /）。 */
+    keyGroups: string[][];
     keywords?: string;
   }
 
@@ -49,7 +50,7 @@
         id: command.id,
         title: command.title,
         hint: command.hint,
-        keys,
+        keyGroups: [keys],
         keywords: command.keywords,
       });
       if (command.id === "dialog.shortcuts") {
@@ -57,7 +58,7 @@
           id: "dialog.shortcuts.question",
           title: "快捷键一览（非输入态）",
           hint: "焦点不在输入框或终端时按 ? 快速打开",
-          keys: ["?"],
+          keyGroups: [["?"]],
           keywords: "help shortcuts 帮助 键盘",
         });
       }
@@ -78,28 +79,28 @@
             id: "files.nav",
             title: "上下移动文件选择",
             hint: "在文件列表与提交列表中切换当前焦点项",
-            keys: ["↑", "↓"],
+            keyGroups: [["↑"], ["↓"]],
             keywords: "list navigate 导航",
           },
           {
             id: "files.stage",
             title: "暂存 / 取消暂存当前文件",
             hint: "在改动列表中快速切换当前行或已多选文件的暂存状态",
-            keys: ["Space"],
+            keyGroups: [["Space"]],
             keywords: "stage unstage 空格",
           },
           {
             id: "files.multi",
             title: "多选与范围连选",
             hint: "组合点击文件或提交进行多选批量操作",
-            keys: [modifierLabel, "点击", "/", "⇧", "点击"],
+            keyGroups: [[modifierLabel, "点击"], ["⇧", "点击"]],
             keywords: "multi select batch 批量",
           },
           {
             id: "files.clearMulti",
             title: "退出多选模式",
             hint: "改动视图多选时回到单个焦点文件",
-            keys: ["Esc"],
+            keyGroups: [["Esc"]],
             keywords: "clear multi selection 取消多选",
           },
         ],
@@ -112,42 +113,42 @@
             id: "diff.find",
             title: "差异 / 文件内查找",
             hint: "在差异代码或只读文件视图内搜索文本并跳转命中",
-            keys: [modifierLabel, "F"],
+            keyGroups: [[modifierLabel, "F"]],
             keywords: "find search 查找",
           },
           {
             id: "diff.pickLine",
             title: "行号直点选行 / 范围连选",
             hint: "点击差异行号列自动进入选行模式，按住 Shift 连续勾选",
-            keys: ["⇧", "点击行号"],
+            keyGroups: [["⇧", "点击行号"]],
             keywords: "pick line stage discard 选行 逐行",
           },
           {
             id: "editor.save",
             title: "保存文件编辑",
             hint: "在文件视图编辑器中保存当前工作区修改",
-            keys: [modifierLabel, "S"],
+            keyGroups: [[modifierLabel, "S"]],
             keywords: "save edit 保存 编辑",
           },
           {
             id: "terminal.clear",
             title: "打开 / 收起并聚焦终端",
             hint: "与命令面板共用同一条终端命令，支持新建标签页",
-            keys: [modifierLabel, "`", "/", modifierLabel, "⇧", "`"],
+            keyGroups: [[modifierLabel, "`"], [modifierLabel, "⇧", "`"]],
             keywords: "terminal shell 命令行",
           },
           {
             id: "dialog.close",
             title: "关闭最上层弹层或对话框",
             hint: "按层级依次关闭菜单、弹层与弹窗并归还焦点",
-            keys: ["Esc"],
+            keyGroups: [["Esc"]],
             keywords: "close cancel escape 取消",
           },
           {
             id: "nav.review",
             title: "审阅队列导航",
             hint: `配合 ${altLabel}+⇧+←/→ 跳转未审阅文件，${altLabel}+M 标记已审阅`,
-            keys: [altLabel, "M"],
+            keyGroups: [[altLabel, "M"]],
             keywords: "review unreviewed 审阅",
           },
         ],
@@ -169,7 +170,7 @@
           item.title,
           item.hint,
           item.keywords ?? "",
-          item.keys.join(" "),
+          item.keyGroups.flat().join(" "),
         ]
           .join(" ")
           .toLowerCase();
@@ -263,13 +264,12 @@
                     <span class="shortcut-title">{item.title}</span>
                     <span class="shortcut-hint">{item.hint}</span>
                   </div>
-                  <span class="shortcut-keys" aria-label={`快捷键 ${item.keys.join(" ")}`}>
-                    {#each item.keys as key, index (`${item.id}:${index}`)}
-                      {#if key === "/"}
-                        <span class="shortcut-or" aria-hidden="true">或</span>
-                      {:else}
+                  <span class="shortcut-keys" aria-label={`快捷键 ${item.keyGroups.map((group) => group.join(" ")).join(" 或 ")}`}>
+                    {#each item.keyGroups as group, groupIndex (`${item.id}:g${groupIndex}`)}
+                      {#if groupIndex > 0}<span class="shortcut-or" aria-hidden="true">或</span>{/if}
+                      {#each group as key, keyIndex (`${item.id}:g${groupIndex}:k${keyIndex}`)}
                         <kbd>{key}</kbd>
-                      {/if}
+                      {/each}
                     {/each}
                   </span>
                 </li>

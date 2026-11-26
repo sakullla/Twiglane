@@ -175,16 +175,42 @@ describe("ShortcutHelpModal 快捷键一览面板", () => {
 
     const macPalette = macShortcuts.find((item) => item.id === "palette.open");
     const winPalette = winShortcuts.find((item) => item.id === "palette.open");
-    expect(macPalette?.keys).toEqual(["⌘", "K"]);
-    expect(winPalette?.keys).toEqual(["Ctrl", "K"]);
+    expect(macPalette?.keyGroups).toEqual([["⌘", "K"]]);
+    expect(winPalette?.keyGroups).toEqual([["Ctrl", "K"]]);
+
+    const macHelp = macShortcuts.find((item) => item.id === "dialog.shortcuts");
+    const winHelp = winShortcuts.find((item) => item.id === "dialog.shortcuts");
+    expect(macHelp?.keyGroups).toEqual([["⌘", "/"]]);
+    expect(winHelp?.keyGroups).toEqual([["Ctrl", "/"]]);
 
     const macReview = macShortcuts.find((item) => item.id === "review.toggle");
     const winReview = winShortcuts.find((item) => item.id === "review.toggle");
-    expect(macReview?.keys).toEqual(["⌥", "M"]);
-    expect(winReview?.keys).toEqual(["Alt", "M"]);
+    expect(macReview?.keyGroups).toEqual([["⌥", "M"]]);
+    expect(winReview?.keyGroups).toEqual([["Alt", "M"]]);
 
     expect(filterShortcutSections(winSections, "终端").flatMap((s) => s.items).length).toBeGreaterThan(0);
     expect(filterShortcutSections(winSections, "不存在的关键词xyz")).toHaveLength(0);
+  });
+
+  it("⌘ / 与 Ctrl / 渲染为字面 <kbd>/</kbd> 而非“或”，多组快捷键才显示“或”分隔", () => {
+    const winView = render(ShortcutHelpModal, {
+      props: { onClose: () => {}, modifierLabel: "Ctrl" },
+    });
+    const winRow = winView.container.querySelector('[data-shortcut-id="dialog.shortcuts"]')!;
+    expect([...winRow.querySelectorAll("kbd")].map((node) => node.textContent)).toEqual(["Ctrl", "/"]);
+    expect(winRow.querySelector(".shortcut-or")).toBeNull();
+
+    const multiRow = winView.container.querySelector('[data-shortcut-id="files.multi"]')!;
+    expect(multiRow.querySelector(".shortcut-or")?.textContent).toBe("或");
+    expect([...multiRow.querySelectorAll("kbd")].map((node) => node.textContent)).toEqual(["Ctrl", "点击", "⇧", "点击"]);
+    cleanup();
+
+    const macView = render(ShortcutHelpModal, {
+      props: { onClose: () => {}, modifierLabel: "⌘" },
+    });
+    const macRow = macView.container.querySelector('[data-shortcut-id="dialog.shortcuts"]')!;
+    expect([...macRow.querySelectorAll("kbd")].map((node) => node.textContent)).toEqual(["⌘", "/"]);
+    expect(macRow.querySelector(".shortcut-or")).toBeNull();
   });
 
   it("支持搜索过滤、清空搜索与 Esc 归还焦点", async () => {

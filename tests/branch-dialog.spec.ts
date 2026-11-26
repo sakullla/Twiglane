@@ -44,6 +44,7 @@ vi.mock("../src/lib/api", () => ({
 }));
 
 import { pickDirectory } from "../src/lib/api";
+import { resetRecentBranchesMemory } from "../src/lib/recent-branches";
 import BranchDialog from "../src/lib/components/BranchDialog.svelte";
 import BranchPicker from "../src/lib/components/BranchPicker.svelte";
 import BranchSwitcher from "../src/lib/components/BranchSwitcher.svelte";
@@ -72,6 +73,11 @@ const opened: OpenedRepository = {
   draft: "",
   watchDegraded: false,
 };
+
+beforeEach(() => {
+  localStorage.clear();
+  resetRecentBranchesMemory();
+});
 
 afterEach(() => cleanup());
 

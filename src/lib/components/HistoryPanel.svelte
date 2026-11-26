@@ -899,11 +899,15 @@
       return;
     }
     if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
-    const index = unionFiles.findIndex((file) => file.path === unionActive?.path);
-    const next = nextIndex(index, event.key, unionFiles.length);
+    const navigable = unionItems
+      .filter((item): item is Extract<FileItem, { kind: "file" }> => item.kind === "file")
+      .map((item) => item.file);
+    if (navigable.length === 0) return;
+    const index = navigable.findIndex((file) => file.path === unionActive?.path);
+    const next = nextIndex(index, event.key, navigable.length);
     if (next === null) return;
     event.preventDefault();
-    focusUnion(unionFiles[next].path);
+    focusUnion(navigable[next].path);
     unionList?.focus({ preventScroll: true });
   }
   let diffSelection = $derived<FileSelection | null>(
@@ -1354,10 +1358,11 @@
     }
   }
 
-  /** 多选文件列表里选中一个文件，并把它滚进可见区。 */
+  /** 多选文件列表里选中一个文件，并把它滚进可见区（目录分组模式下按 unionItems 行索引滚动）。 */
   function focusUnion(path: string) {
     multiFocus = path;
-    const index = unionFiles.findIndex((file) => file.path === path);
+    const index = unionItems.findIndex((item) => item.kind === "file" && item.file.path === path);
+    if (index < 0) return;
     unionScroll = scrollIndexIntoView(index, unionScroll, unionViewport, UNION_ROW_HEIGHT);
     if (unionList) unionList.scrollTop = unionScroll;
   }

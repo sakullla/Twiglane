@@ -2067,7 +2067,8 @@ describe("上一个、下一个文件（R20）", () => {
     expect(prev.disabled).toBe(true);
     expect(prev.title).toBe("已经是第一处改动");
     await altKey("ArrowDown");
-    expect(scroller().scrollTop).toBe(31 * ROW_HEIGHT);
+    // App.svelte 接入 onExpandContext 后，hunk 0 与 hunk 1 之间插入 1 行内联上下文展开行（18px）。
+    expect(scroller().scrollTop).toBe(32 * ROW_HEIGHT);
     await altKey("ArrowUp");
     expect(scroller().scrollTop).toBe(0);
 

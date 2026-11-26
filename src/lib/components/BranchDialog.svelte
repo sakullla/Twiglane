@@ -1052,9 +1052,6 @@
     if (!upstream || !branchName || upstream === currentRepo.snapshot.branch.upstream) return;
     const result = await write(() => api.setUpstream(currentRepo.summary.path, upstream, currentRepo.generation, nextId()));
     if (!result || opened.summary.path !== currentRepo.summary.path) return;
-    if (!currentRepo.snapshot.branch.detached && currentRepo.snapshot.branch.name && currentRepo.snapshot.branch.name !== result.snapshot.branch.name) {
-      recordRecentBranch(currentRepo.summary.path, currentRepo.snapshot.branch.name);
-    }
     applyBranches(result);
     onNotice(`已把 ${branchName} 的上游改为 ${upstream}。这一步没有推送。`);
   }
@@ -1064,6 +1061,9 @@
     const result = await write(() => api.trackRemoteAs(currentRepo.summary.path, remote, local, currentRepo.generation, nextId()));
     if (!result || opened.summary.path !== currentRepo.summary.path) return;
     mismatch = null;
+    if (!currentRepo.snapshot.branch.detached && currentRepo.snapshot.branch.name && currentRepo.snapshot.branch.name !== result.snapshot.branch.name) {
+      recordRecentBranch(currentRepo.summary.path, currentRepo.snapshot.branch.name);
+    }
     applyBranches(result);
     onNotice(`已检出 ${remote} 为本地分支 ${local} 并切换过去。`);
     onClose();

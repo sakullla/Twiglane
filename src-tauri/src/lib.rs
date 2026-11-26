@@ -246,6 +246,7 @@ pub fn run() {
             compare_files,
             commit_branches,
             file_history,
+            file_blame,
             cherry_pick_commits,
             revert_commits,
             checkout_commit,
@@ -2034,6 +2035,18 @@ async fn file_history(
         request_id,
     )
     .await
+}
+
+/// 逐行追溯：只读，追溯当前工作区里这个文件的每一行。
+#[tauri::command(rename_all = "camelCase")]
+async fn file_blame(
+    state: State<'_, Arc<Backend>>,
+    path: String,
+    relative: String,
+    generation: u64,
+    request_id: u64,
+) -> Result<crate::model::FileBlame, AppError> {
+    crate::git::blame::file_blame(state.inner(), &path, &relative, generation, request_id).await
 }
 
 #[tauri::command(rename_all = "camelCase")]

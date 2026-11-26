@@ -25,6 +25,8 @@
     onResizeCommit: () => void;
     onGeneration: (generation: number) => void;
     onFileHistory: (path: string) => void;
+    /** 在历史里定位某个提交（逐行追溯的提交入口）。 */
+    onOpenCommit?: (oid: string) => void;
     /** 从文件进入它的 staged / unstaged 改动：切换视图由外壳负责。 */
     onOpenDiff?: (path: string, side: DiffSide) => void;
     /** 在系统文件管理器中定位：经 App 的 reveal_path 后端（守仓库边界、无 shell）。 */
@@ -69,6 +71,7 @@
     onResizeCommit,
     onGeneration,
     onFileHistory,
+    onOpenCommit,
     onOpenDiff,
     onReveal,
     remote = false,
@@ -126,6 +129,15 @@
   /** 外部（改动列表、命令）定位一个路径：展开必要祖先、选中并按需跳到行。 */
   export function reveal(path: string, line: number | null = null): Promise<boolean> {
     return store.locate(path, line);
+  }
+
+  /** 逐行追溯：定位并打开文件，再让内容区打开 blame。 */
+  let blameRequest = $state<{ path: string; serial: number } | null>(null);
+  export async function openBlame(path: string): Promise<boolean> {
+    searchMode = "none";
+    const placed = await store.locate(path, null);
+    if (placed) blameRequest = { path, serial: (blameRequest?.serial ?? 0) + 1 };
+    return placed;
   }
 
   /** 聚焦某一种搜索的输入框；面板没展开时先展开它。 */
@@ -355,6 +367,7 @@
         onClearSelection={store.clearMultiSelection}
         onSplit={splitRow}
         onHistory={onFileHistory}
+        onBlame={(path) => void openBlame(path)}
         onRefresh={refresh}
         onCollapseAll={() => store.collapseAll()}
         {onReveal}
@@ -408,6 +421,9 @@
     {editReturn}
     {onEditSaved}
     {onEditFailed}
+    {blameRequest}
+    {onOpenCommit}
+    onCopyText={onCopyPath}
   />
   {#if entryRequest && onEntry}
     {#key entryRequest.serial}

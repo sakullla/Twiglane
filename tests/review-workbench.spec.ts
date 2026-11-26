@@ -647,7 +647,9 @@ describe("阅读位置与响应式重排（R3）", () => {
     expect(css).toMatch(/\.review-layout\[data-tier="medium"\] \.review-body > \.review-drawer/);
     expect(css).toMatch(/\.review-layout\[data-tier="narrow"\] \{[^}]*grid-template-columns: minmax\(0, 1fr\)/);
     expect(css).toMatch(/\.review-layout\[data-tier="narrow"\]\.queue-hidden \.review-queue \{ display: none; \}/);
-    expect(css).toMatch(/\.review-layout\.queue-hidden \{ grid-template-columns: 0 0 minmax\(0, 1fr\); \}/);
+    expect(css).toMatch(/\.review-layout\.queue-hidden \{ grid-template-columns: minmax\(0, 1fr\); \}/);
+    // 隐藏的网格项不占格：主区必须显式跨满整行，否则会被排进宽度为 0 的第一列。
+    expect(css).toMatch(/\.review-layout\.queue-hidden > \.review-main \{ grid-column: 1 \/ -1; \}/);
   });
 });
 

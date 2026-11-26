@@ -1416,3 +1416,31 @@ export interface DiscardResult {
   boundary: string;
   snapshot: StatusSnapshot;
 }
+
+/** 逐行追溯里的一个提交；未提交的行归到 uncommitted 的虚拟提交上。 */
+export interface BlameCommit {
+  oid: string;
+  author: string;
+  /** 作者时间（Unix 秒）。 */
+  authorTime: number;
+  summary: string;
+  uncommitted: boolean;
+  boundary: boolean;
+  previousPath: string | null;
+}
+
+/** 连续归属同一提交的一段行：start 是当前文件里 1 起算的行号。 */
+export interface BlameRange {
+  start: number;
+  count: number;
+  commit: number;
+  origStart: number;
+}
+
+export interface FileBlame {
+  generation: number;
+  path: string;
+  lines: number;
+  commits: BlameCommit[];
+  ranges: BlameRange[];
+}

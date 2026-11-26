@@ -775,7 +775,10 @@ describe("仓库弹层的仓库操作", () => {
       "打开",
       "在资源管理器中显示",
       "复制完整路径",
+      "查看改动",
+      "查看提交历史",
       "从最近列表移除",
+      "删除工作区…",
     ]);
     // 点菜单不算点外面。
     await fireEvent.mouseDown(within(menu).getByRole("menuitem", { name: "复制完整路径" }));
@@ -838,6 +841,8 @@ describe("起始页的最近仓库菜单", () => {
       "打开",
       "在资源管理器中显示",
       "复制完整路径",
+      "查看改动",
+      "查看提交历史",
       "从最近列表移除",
     ]);
     expect(mocks.openRepository, "右键不会打开仓库").not.toHaveBeenCalled();

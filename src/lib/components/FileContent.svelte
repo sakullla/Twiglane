@@ -28,6 +28,8 @@
     RepositoryFileContent,
     RepositorySearchScope,
     DocumentSource,
+    FileBlame,
+    BlameCommit,
   } from "../types";
   import { BUSY_REASON, documentSourceLabel, formatBytes, rowMark, splitPath, type FileNavState } from "../ui";
   import type { DiffSide } from "../types";
@@ -84,6 +86,12 @@
     onEditSaved?: (snapshot: RepositoryEditSnapshot) => void;
     /** 保存失败：外壳按真实状态重读（写入可能部分发生）。 */
     onEditFailed?: (code: string) => void;
+    /** 外部（右键「逐行追溯」）要求打开 blame：序号变化且路径相同时生效。 */
+    blameRequest?: { path: string; serial: number } | null;
+    /** 在历史里定位某个提交（逐行追溯的提交入口）。 */
+    onOpenCommit?: (oid: string) => void;
+    /** 复制文字（提交号、说明）：成功与失败的反馈由外壳统一处理。 */
+    onCopyText?: (text: string, what: string) => void;
   }
 
   let {
@@ -109,6 +117,9 @@
     editReturn = null,
     onEditSaved,
     onEditFailed,
+    blameRequest = null,
+    onOpenCommit,
+    onCopyText,
   }: Props = $props();
 
   /** 与 components.css 的 .file-line 行高一致：虚拟窗口按它算，行号与代码同高。 */
@@ -167,6 +178,117 @@
   let searchSerial = 0;
   let fileVersion = $derived(contentVersion ?? generation);
 
+  /* ---------- 逐行追溯（git blame） ----------
+     只读：每一行左侧标出最后写入它的提交、作者与时间；同一提交的连续行只在第一行写字，
+     左沿色条按新旧深浅区分。开关在切换文件时保留（像 IDE 的 Annotate），内容版本变化时重读。 */
+  let blameOn = $state(false);
+  let blame = $state.raw<FileBlame | null>(null);
+  let blameLoading = $state(false);
+  let blameError = $state<string | null>(null);
+  let blameKey = "";
+  let blameSerial = 0;
+  let blameHover = $state<number | null>(null);
+
+  /** 第 no 行（1 起算）所属的区间下标；-1 表示没有追溯信息（例如文件在追溯之后又变了）。 */
+  let blameOwner = $derived.by(() => {
+    const owner = new Int32Array((blame?.lines ?? 0) + 2).fill(-1);
+    blame?.ranges.forEach((range, index) => {
+      for (let line = range.start; line < range.start + range.count && line < owner.length; line += 1) owner[line] = index;
+    });
+    return owner;
+  });
+  /** 按作者时间给提交排名：越新色条越深，未提交的修改用强调色。 */
+  let blameHeat = $derived.by(() => {
+    const commits = blame?.commits ?? [];
+    const times = [...new Set(commits.filter((commit) => !commit.uncommitted).map((commit) => commit.authorTime))].sort((a, b) => a - b);
+    const rank = new Map(times.map((time, index) => [time, times.length > 1 ? index / (times.length - 1) : 1]));
+    return commits.map((commit) => (commit.uncommitted ? 1 : (rank.get(commit.authorTime) ?? 0)));
+  });
+  async function loadBlame(target: string, attempt = 0): Promise<void> {
+    const at = ++blameSerial;
+    blameLoading = true;
+    blameError = null;
+    if (blame?.path !== target) blame = null;
+    try {
+      const result = await api.fileBlame(opened.summary.path, target, generation, nextId());
+      if (at !== blameSerial) return;
+      blame = result;
+    } catch (failure) {
+      if (at !== blameSerial) return;
+      const normalized = normalizeError(failure);
+      if (normalized.code === "stale" && normalized.generation !== undefined && attempt < 2) {
+        onGeneration(normalized.generation);
+        await tick();
+        return loadBlame(target, attempt + 1);
+      }
+      blame = null;
+      blameError = normalized.message;
+    } finally {
+      if (at === blameSerial) blameLoading = false;
+    }
+  }
+
+  function toggleBlame(): void {
+    blameOn = !blameOn;
+    if (blameOn && wrap) wrap = false;
+    if (!blameOn) blameHover = null;
+  }
+
+  let blameRequestSeen = 0;
+  $effect(() => {
+    const request = blameRequest;
+    const current = path;
+    untrack(() => {
+      if (!request || request.serial === blameRequestSeen || request.path !== current) return;
+      blameRequestSeen = request.serial;
+      blameOn = true;
+      wrap = false;
+    });
+  });
+
+  function blameCommitAt(no: number): { commit: BlameCommit; index: number; first: boolean } | null {
+    const at = blameOwner[no] ?? -1;
+    if (!blame || at < 0) return null;
+    const range = blame.ranges[at];
+    // 相邻两段来自同一提交（原文件里不连续）时视觉上仍是一段：只在提交变化的那一行写字。
+    const before = range.start === no ? (blameOwner[no - 1] ?? -1) : at;
+    const first = before < 0 || blame.ranges[before].commit !== range.commit;
+    return { commit: blame.commits[range.commit], index: range.commit, first };
+  }
+
+  function blameDate(seconds: number): string {
+    if (!seconds) return "";
+    const date = new Date(seconds * 1000);
+    const days = Math.floor((Date.now() - date.getTime()) / 86_400_000);
+    if (days < 1) return "今天";
+    if (days < 30) return `${days} 天前`;
+    const pad = (value: number) => String(value).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  }
+
+  function blameTitle(commit: BlameCommit): string {
+    if (commit.uncommitted) return "尚未提交：工作区里还没有提交的修改";
+    const when = commit.authorTime ? new Date(commit.authorTime * 1000).toLocaleString() : "";
+    const lines = [`${commit.oid.slice(0, 10)} · ${commit.author} · ${when}`, commit.summary];
+    if (commit.previousPath) lines.push(`当时的路径：${commit.previousPath}`);
+    if (commit.boundary) lines.push("更早的历史不在本地（浅克隆或边界提交）");
+    lines.push("点击在历史中查看这个提交，右键复制");
+    return lines.join("\n");
+  }
+
+  function openBlameMenu(event: MouseEvent, commit: BlameCommit): void {
+    event.preventDefault();
+    if (commit.uncommitted) return;
+    const entries: ContextMenuEntry[] = [];
+    if (onOpenCommit) entries.push({ id: "open-commit", label: "在历史中查看这个提交", icon: "history", run: () => onOpenCommit?.(commit.oid) });
+    if (onCopyText) {
+      entries.push({ id: "copy-oid", label: "复制提交号", icon: "copy", run: () => onCopyText?.(commit.oid, "提交号") });
+      entries.push({ id: "copy-summary", label: "复制提交说明", icon: "copy", run: () => onCopyText?.(commit.summary, "提交说明") });
+    }
+    if (entries.length === 0) return;
+    menu = { x: event.clientX, y: event.clientY, entries, label: `${commit.oid.slice(0, 7)} 的操作` };
+  }
+
   let parts = $derived(path ? splitPath(path) : null);
   /** 面包屑的每一段：点它列出所在目录，切换到同级目录或文件。 */
   let crumbs = $derived(
@@ -179,9 +301,29 @@
       : [],
   );
   let crumbPicker = $state<{ anchor: HTMLElement; directory: string; current: string } | null>(null);
+  /**
+   * 深层目录（Java 包路径常有十几层）全部挤在一行时每段只剩一两个字母，哪段都读不出。
+   * 超过 4 段时只留第一段与最后两段，中间收成「…」，点它展开全部；换文件后重新收起。
+   */
+  const CRUMB_KEEP_TAIL = 2;
+  let crumbsExpanded = $state(false);
+  let crumbsFolded = $derived(!crumbsExpanded && crumbs.length > CRUMB_KEEP_TAIL + 2);
+  let shownCrumbs = $derived(
+    crumbsFolded
+      ? [
+          { ...crumbs[0], fold: false },
+          { name: "…", path: "\0fold", parent: "", fold: true },
+          ...crumbs.slice(-CRUMB_KEEP_TAIL).map((crumb) => ({ ...crumb, fold: false })),
+        ]
+      : crumbs.map((crumb) => ({ ...crumb, fold: false })),
+  );
+  let foldedPath = $derived(crumbsFolded ? crumbs.slice(1, -CRUMB_KEEP_TAIL).map((crumb) => crumb.name).join("/") : "");
   $effect(() => {
     void path;
-    untrack(() => (crumbPicker = null));
+    untrack(() => {
+      crumbPicker = null;
+      crumbsExpanded = false;
+    });
   });
 
   function openCrumb(event: MouseEvent, directory: string, current: string): void {
@@ -317,6 +459,20 @@
    */
   let isMarkdown = $derived(Boolean(path && isMarkdownPath(path)));
   let documentMode = $state<DocumentMode>("preview");
+  let blameShown = $derived(blameOn && content?.kind === "text" && !editing && !wrap && !(isMarkdown && documentMode === "preview"));
+
+  $effect(() => {
+    const target = path;
+    const want = blameShown;
+    const key = `${target}\0${fileVersion}\0${reloadKey}`;
+    untrack(() => {
+      if (!want || !target) return;
+      if (key === blameKey && (blame || blameLoading)) return;
+      blameKey = key;
+      void loadBlame(target);
+    });
+  });
+
   /* 预览的目录入口放在文件工具条上（不另占一行）；展开状态跨文档保留，按阅读习惯来。 */
   let outlineOpen = $state(false);
   let headingCount = $state(0);
@@ -973,6 +1129,9 @@
     if (onFileHistory) {
       entries.push({ id: "history", label: "查看文件历史", icon: "history", run: () => onFileHistory?.(target) });
     }
+    if (content?.kind === "text" && !editing) {
+      entries.push({ id: "blame", label: blameOn ? "关闭逐行追溯" : "逐行追溯（Blame）", icon: "user", run: toggleBlame });
+    }
     if (entries.length > 0) entries.push({ separator: true });
     entries.push({ id: "copy", label: "复制路径", icon: "copy", run: () => void copyPath() });
     return entries;
@@ -1044,7 +1203,16 @@
       <div class="file-title" title={path}>
         <span class="breadcrumb">
           {#if onRevealPath}
-            {#each crumbs as crumb (crumb.path)}
+            {#each shownCrumbs as crumb (crumb.path)}
+              {#if crumb.fold}
+                <button
+                  type="button"
+                  class="crumb crumb-btn crumb-fold"
+                  aria-label={`展开中间目录 ${foldedPath}`}
+                  title={`${foldedPath}（点击展开完整路径）`}
+                  onclick={() => (crumbsExpanded = true)}
+                >…</button><span class="crumb-sep" aria-hidden="true">/</span>
+              {:else}
               <button
                 type="button"
                 class="crumb crumb-btn"
@@ -1053,6 +1221,7 @@
                 title={`切换到 ${crumb.parent || "仓库根目录"} 下的其他目录或文件`}
                 onclick={(event) => openCrumb(event, crumb.parent, crumb.path)}
               >{crumb.name}</button><span class="crumb-sep" aria-hidden="true">/</span>
+              {/if}
             {/each}
             <button
               type="button"
@@ -1063,8 +1232,12 @@
               onclick={(event) => openCrumb(event, parts?.dir ?? "", path ?? "")}
             >{parts.name}</button>
           {:else}
-            {#each crumbs as crumb (crumb.path)}
-              <span class="crumb">{crumb.name}</span><span class="crumb-sep" aria-hidden="true">/</span>
+            {#each shownCrumbs as crumb (crumb.path)}
+              {#if crumb.fold}
+                <button type="button" class="crumb crumb-btn crumb-fold" aria-label={`展开中间目录 ${foldedPath}`} title={foldedPath} onclick={() => (crumbsExpanded = true)}>…</button><span class="crumb-sep" aria-hidden="true">/</span>
+              {:else}
+                <span class="crumb">{crumb.name}</span><span class="crumb-sep" aria-hidden="true">/</span>
+              {/if}
             {/each}
             <strong class="crumb-name">{parts.name}</strong>
           {/if}
@@ -1202,6 +1375,16 @@
             title={outlineOpen ? "收起目录" : `显示目录（${headingCount} 个标题）`}
             onclick={() => (outlineOpen = !outlineOpen)}
           ><Icon name="list" size={14} /></button>
+        {/if}
+        {#if content?.kind === "text" && !showImage && !editing && !(isMarkdown && documentMode === "preview")}
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm file-blame-btn"
+            aria-pressed={blameOn}
+            aria-label="逐行追溯"
+            title={blameOn ? "关闭逐行追溯" : "逐行追溯（git blame）：标出每一行最后由哪个提交、谁、何时写入"}
+            onclick={toggleBlame}
+          >{#if blameLoading}<span class="spinner" aria-hidden="true"></span>{:else}<Icon name="user" size={13} />{/if}<span>追溯</span></button>
         {/if}
         {#if content?.kind === "text" && !showImage && !editing}
           <button
@@ -1421,6 +1604,14 @@
       {#if content.truncated && content.message}
         <p class="file-note" role="status">{content.message}</p>
       {/if}
+      {#if blameShown && blameError}
+        <p class="file-note" role="status">
+          <Icon name="info" size={13} />
+          <span>{blameError}</span>
+          <button type="button" class="link-btn" onclick={() => path && void loadBlame(path)}>重试</button>
+          <button type="button" class="link-btn" onclick={toggleBlame}>关闭追溯</button>
+        </p>
+      {/if}
       {#if pageOffset > 0}
         <div class="file-note" role="status">
           <Icon name="info" size={13} />
@@ -1441,6 +1632,7 @@
       {:else}
         <div
           class="diff-scroll file-code"
+          class:with-blame={blameShown}
           class:select-all={allSelected}
           role="textbox"
           aria-readonly="true"
@@ -1457,12 +1649,36 @@
               {#each lines.slice(range.start, range.end) as line, index (`${pageOffset}-${range.start + index}`)}
                 {@const absolute = range.start + index}
                 {@const no = pageOffset + absolute + 1}
+                {@const owner = blameShown ? blameCommitAt(no) : null}
                 <div
                   class="diff-line file-line"
                   class:hit={hitLine === no}
+                  class:blame-same={owner !== null && blameHover === owner.index}
                   data-file-line={no}
                   style={`top:${absolute * ROW_HEIGHT}px;height:${ROW_HEIGHT}px`}
                 >
+                  {#if blameShown}
+                    {#if owner}
+                      {@const commit = owner.commit}
+                      {@const showText = owner.first || absolute === range.start}
+                      <button
+                        type="button"
+                        class="blame-cell"
+                        class:first={owner.first}
+                        class:uncommitted={commit.uncommitted}
+                        style={`--heat:${Math.round((blameHeat[owner.index] ?? 0) * 100)}%`}
+                        tabindex="-1"
+                        title={blameTitle(commit)}
+                        aria-label={commit.uncommitted ? `第 ${no} 行尚未提交` : `第 ${no} 行：${commit.author}，${blameDate(commit.authorTime)}，${commit.summary}`}
+                        onmouseenter={() => (blameHover = owner.index)}
+                        onmouseleave={() => (blameHover = null)}
+                        onclick={() => !commit.uncommitted && onOpenCommit?.(commit.oid)}
+                        oncontextmenu={(event) => openBlameMenu(event, commit)}
+                      >{#if showText}<span class="blame-author">{commit.author}</span><span class="blame-date">{commit.uncommitted ? "" : blameDate(commit.authorTime)}</span>{/if}</button>
+                    {:else}
+                      <span class="blame-cell empty" aria-hidden="true">{#if absolute === range.start && blameLoading}<span class="blame-date">读取中…</span>{/if}</span>
+                    {/if}
+                  {/if}
                   <span class="ln" aria-hidden="true">{no}</span>
                   <span class="code"><span class="code-in" data-len={line.length || 1}>{#each segmentsAt(absolute) as seg, i (i)}{#if !seg.k}{seg.t}{:else}<span class={seg.k}>{seg.t}</span>{/if}{/each}</span></span>
                 </div>

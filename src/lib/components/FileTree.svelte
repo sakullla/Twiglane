@@ -60,6 +60,8 @@
     onClearSelection: () => void;
     onSplit: (row: FileTreeRow) => void;
     onHistory?: (path: string) => void;
+    /** 逐行追溯：打开文件并显示每一行最后由哪个提交写入。 */
+    onBlame?: (path: string) => void;
     onRefresh: () => void;
     /** 全部折叠：只改展开状态，不丢已读子项。 */
     onCollapseAll?: () => void;
@@ -127,6 +129,7 @@
     onClearSelection,
     onSplit,
     onHistory,
+    onBlame,
     onRefresh,
     onCollapseAll,
     onReveal,
@@ -591,6 +594,15 @@
       }
       if (onHistory) {
         head.push({ id: "history", label: "查看文件历史", icon: "history", run: () => onHistory?.(row.path) });
+      }
+      if (onBlame) {
+        head.push({
+          id: "blame",
+          label: "逐行追溯（Blame）",
+          icon: "user",
+          disabledReason: row.deleted ? "文件已删除，工作区里没有它" : remote ? "SSH 远端仓库暂不支持逐行追溯" : undefined,
+          run: () => onBlame?.(row.path),
+        });
       }
       if (onOpenDefault) {
         head.push({

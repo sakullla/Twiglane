@@ -567,3 +567,29 @@ export function mockDeleteEntry(relative: string, mode: MockEntryMode): MockEntr
   dropSubtree(relative);
   return { path: relative };
 }
+
+/** 逐行追溯的 mock：按固定节奏把行分给几个提交，最后一段算作「尚未提交」。只用于看界面。 */
+export function mockFileBlame(relative: string, generation: number) {
+  const text = FILES[relative];
+  if (text === undefined) return null;
+  const total = text.split("\n").length;
+  const day = 86_400;
+  const now = Math.floor(Date.now() / 1000);
+  const commits = [
+    { oid: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678", author: "林晓", authorTime: now - 400 * day, summary: "feat: 初始化文件视图", uncommitted: false, boundary: false, previousPath: null },
+    { oid: "b2c3d4e5f60718293a4b5c6d7e8f901234567890", author: "Chen Wei", authorTime: now - 40 * day, summary: "fix: 修复目录树展开后滚动位置丢失", uncommitted: false, boundary: false, previousPath: null },
+    { oid: "c3d4e5f60718293a4b5c6d7e8f90123456789012", author: "王一", authorTime: now - 3 * day, summary: "refactor: 抽出读取逻辑", uncommitted: false, boundary: false, previousPath: null },
+    { oid: "0".repeat(40), author: "尚未提交", authorTime: 0, summary: "工作区里还没有提交的修改", uncommitted: true, boundary: false, previousPath: null },
+  ];
+  const pattern = [0, 0, 1, 2, 2, 0, 3];
+  const ranges: { start: number; count: number; commit: number; origStart: number }[] = [];
+  let line = 1;
+  let step = 0;
+  while (line <= total) {
+    const count = Math.min(total - line + 1, 2 + (step % 4));
+    ranges.push({ start: line, count, commit: pattern[step % pattern.length], origStart: line });
+    line += count;
+    step += 1;
+  }
+  return { generation, path: relative, lines: total, commits, ranges };
+}

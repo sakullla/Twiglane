@@ -130,6 +130,7 @@
     "allow-commit-detail",
     "allow-commit-file-diff",
     "allow-file-history",
+    "allow-file-blame",
     "allow-cherry-pick-commits",
     "allow-revert-commits",
     "allow-checkout-commit",

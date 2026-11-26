@@ -146,6 +146,7 @@ fn capabilities_grant_only_explicit_terminal_ipc_not_a_generic_shell() {
         "allow-commit-detail",
         "allow-commit-file-diff",
         "allow-file-history",
+        "allow-file-blame",
         "allow-cherry-pick-commits",
         "allow-revert-commits",
         "allow-checkout-commit",

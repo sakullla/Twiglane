@@ -150,7 +150,32 @@
     return alive && ticket === serial && opened.summary.path === path;
   }
 
+  /**
+   * 目标分支候选：本地读到的远程跟踪分支（去掉远程名前缀）与本地分支，只作输入提示，
+   * 不访问网络；读不到时输入框照常可用。
+   */
+  let branchNames = $state<string[]>([]);
+  let targetOptions = $derived.by(() => {
+    const remote = prepared?.remote ?? null;
+    const source = prepared?.sourceBranch ?? null;
+    const names = new Set<string>();
+    for (const name of branchNames) {
+      const slash = name.indexOf("/");
+      if (remote && name.startsWith(remote + "/")) names.add(name.slice(remote.length + 1));
+      else if (slash < 0) names.add(name);
+    }
+    names.delete("HEAD");
+    if (source) names.delete(source);
+    return [...names].sort((left, right) => left.localeCompare(right)).slice(0, 300);
+  });
+
   onMount(() => {
+    void Promise.resolve()
+      .then(() => api.branchList(opened.summary.path, opened.generation, nextId()))
+      .then((listing) => {
+        if (alive) branchNames = listing.branches.map((branch) => branch.name);
+      })
+      .catch(() => {});
     void start(null);
     return () => {
       alive = false;
@@ -519,7 +544,14 @@
               readonly={!formPhase || !editable}
               oninput={onTargetInput}
               bind:value={target}
+              list={targetOptions.length > 0 ? "change-request-target-options" : undefined}
+              placeholder="输入或选择目标分支"
             />
+            {#if targetOptions.length > 0}
+              <datalist id="change-request-target-options">
+                {#each targetOptions as name (name)}<option value={name}></option>{/each}
+              </datalist>
+            {/if}
           </div>
         </div>
         {#if info.gitlabInstance}

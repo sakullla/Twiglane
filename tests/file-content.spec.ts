@@ -12,6 +12,7 @@ const cancelDocumentResources = vi.hoisted(() => vi.fn(async () => {}));
 const repositoryEditSnapshot = vi.hoisted(() => vi.fn());
 const repositoryEditSave = vi.hoisted(() => vi.fn());
 const repositoryDirectory = vi.hoisted(() => vi.fn());
+const fileBlame = vi.hoisted(() => vi.fn());
 vi.mock("../src/lib/api", () => ({
   api: {
     repositoryFileContent,
@@ -19,6 +20,7 @@ vi.mock("../src/lib/api", () => ({
     repositoryEditSave,
     repositoryDirectory,
     repositoryContentSearch,
+    fileBlame,
     filePreview,
     repositoryDocument,
     documentResource,
@@ -110,6 +112,7 @@ beforeEach(() => {
   repositoryEditSnapshot.mockReset();
   repositoryEditSave.mockReset();
   repositoryDirectory.mockReset();
+  fileBlame.mockReset();
   resetSyntaxPrefs();
 });
 
@@ -1198,5 +1201,63 @@ describe("面包屑切换", () => {
     render(FileContent, { props: props() as never });
     await screen.findByText("App.ts");
     expect(screen.queryByRole("button", { name: "src" })).toBeNull();
+  });
+});
+
+describe("逐行追溯（git blame）", () => {
+  const older = { oid: "1".repeat(40), author: "Alice", authorTime: 1_700_000_000, summary: "init", uncommitted: false, boundary: false, previousPath: null };
+  const pending = { oid: "0".repeat(40), author: "尚未提交", authorTime: 0, summary: "工作区里还没有提交的修改", uncommitted: true, boundary: false, previousPath: null };
+
+  it("开关后每行标出提交；同一提交的连续行只在第一行写作者；点击进入历史，未提交行不可点", async () => {
+    repositoryFileContent.mockResolvedValue(text());
+    fileBlame.mockResolvedValue({
+      generation: 4,
+      path: "src/App.ts",
+      lines: 3,
+      commits: [older, pending],
+      ranges: [
+        { start: 1, count: 2, commit: 0, origStart: 1 },
+        { start: 3, count: 1, commit: 1, origStart: 3 },
+      ],
+    });
+    const onOpenCommit = vi.fn();
+    const { container } = render(FileContent, { props: props({ onOpenCommit }) as never });
+    await waitFor(() => expect(container.querySelector('[data-file-line="1"]')).toBeTruthy());
+    expect(container.querySelector(".blame-cell")).toBeNull();
+
+    await fireEvent.click(screen.getByRole("button", { name: "逐行追溯" }));
+    await waitFor(() => expect(container.querySelectorAll(".blame-cell").length).toBe(3));
+    expect(fileBlame).toHaveBeenCalledWith(repoPath, "src/App.ts", 4, 1);
+    const cells = [...container.querySelectorAll<HTMLElement>(".blame-cell")];
+    expect(cells[0].textContent).toContain("Alice");
+    expect(cells[1].textContent).toBe("");
+    expect(cells[2].classList.contains("uncommitted")).toBe(true);
+
+    await fireEvent.click(cells[1]);
+    expect(onOpenCommit).toHaveBeenCalledWith(older.oid);
+    await fireEvent.click(cells[2]);
+    expect(onOpenCommit).toHaveBeenCalledTimes(1);
+
+    await fireEvent.click(screen.getByRole("button", { name: "逐行追溯" }));
+    expect(container.querySelector(".blame-cell")).toBeNull();
+  });
+
+  it("未提交过的文件就地说明原因，可以关掉追溯", async () => {
+    repositoryFileContent.mockResolvedValue(text());
+    fileBlame.mockRejectedValue({ code: "blame_untracked", message: "这个文件还没有提交过，没有可以追溯的历史。" });
+    const { container } = render(FileContent, { props: props() as never });
+    await waitFor(() => expect(container.querySelector('[data-file-line="1"]')).toBeTruthy());
+    await fireEvent.click(screen.getByRole("button", { name: "逐行追溯" }));
+    expect(await screen.findByText("这个文件还没有提交过，没有可以追溯的历史。")).toBeTruthy();
+    await fireEvent.click(screen.getByRole("button", { name: "关闭追溯" }));
+    expect(screen.queryByText("这个文件还没有提交过，没有可以追溯的历史。")).toBeNull();
+  });
+
+  it("外部请求（右键「逐行追溯」）对同一路径直接打开追溯", async () => {
+    repositoryFileContent.mockResolvedValue(text());
+    fileBlame.mockResolvedValue({ generation: 4, path: "src/App.ts", lines: 3, commits: [older], ranges: [{ start: 1, count: 3, commit: 0, origStart: 1 }] });
+    const { container } = render(FileContent, { props: props({ blameRequest: { path: "src/App.ts", serial: 1 } }) as never });
+    await waitFor(() => expect(container.querySelectorAll(".blame-cell").length).toBe(3));
+    expect(screen.getByRole("button", { name: "逐行追溯" }).getAttribute("aria-pressed")).toBe("true");
   });
 });

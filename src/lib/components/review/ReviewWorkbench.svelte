@@ -4,7 +4,7 @@
   import { FULL_FILE_CONTEXT, reuseDiffContent, type HunkNavReport } from "../../diff";
   import { normalizeError } from "../../errors";
   import { shortOid } from "../../history";
-  import { branchLabel } from "../../labels";
+  import { branchLabel, parentDirectory } from "../../labels";
   import { LatestReadQueue } from "../../latest-read";
   import {
     anchorKey,
@@ -121,6 +121,8 @@
     onNotice?: (message: string) => void;
     onFailure?: (error: unknown) => void;
     onFileHistory?: (path: string) => void;
+    /** 逐行追溯：切到文件视图打开这个工作区文件并显示 blame。 */
+    onBlameFile?: (path: string) => void;
     onReadDocument?: (sources: PreviewSources, side: "old" | "new", trigger: HTMLElement | null) => void;
     onFileNav?: (nav: FileNavState | null) => void;
     onHunkNav?: (nav: HunkNavReport | null) => void;
@@ -221,6 +223,7 @@
     onNotice,
     onFailure,
     onFileHistory,
+    onBlameFile,
     onReadDocument,
     onFileNav,
     onHunkNav,
@@ -473,7 +476,16 @@
     });
   });
 
-  let files = $derived((task?.files ?? []).map(toChange));
+  /**
+   * 任务文件按「目录 → 文件名」排序：平铺与按目录分组两种排列的先后完全一致，
+   * 键盘上下、「上一个/下一个」、标记并继续与连续阅读都按眼前看到的顺序走，不会跳来跳去。
+   */
+  function compareTaskFiles(left: TaskFileChange, right: TaskFileChange): number {
+    const a = parentDirectory(left.path);
+    const b = parentDirectory(right.path);
+    return a === b ? left.path.localeCompare(right.path) : a.localeCompare(b);
+  }
+  let files = $derived([...(task?.files ?? [])].sort(compareTaskFiles).map(toChange));
   /** 队列筛选段：全部 / 未审阅 / 有意见。只决定哪些文件可见，不写进度与意见。 */
   let filter = $state<ReviewQueueFilter>("all");
   let queueCollapsed = $state(false);
@@ -482,11 +494,122 @@
   let commentedPaths = $derived(new Set(comments.map((comment) => comment.anchor.path)));
   /** 全部任务行：按路径找行（改名的原路径、编辑入口）不受搜索与筛选影响。 */
   let allRows = $derived(orderedRows(files));
+  /*
+   * 内容搜索：搜索框切到「内容」后，按任务文件的当前内容查找关键词（只读，不改 Git）。
+   * 每个文件单独查（范围精确，不会因整仓结果上限漏掉任务文件），并发有上限；
+   * 关键词、任务范围或仓库代次变化时旧结果作废。命中文件里打开差异时自动带入差异内查找。
+   */
+  let contentMode = $state(false);
+  let contentHits = $state.raw<Map<string, number> | null>(null);
+  let contentBusy = $state(false);
+  let contentNote = $state<string | null>(null);
+  let contentSerial = 0;
+  let contentTimer: ReturnType<typeof setTimeout> | null = null;
+  let contentKey = "";
+  const CONTENT_CONCURRENCY = 6;
+  const CONTENT_LIMIT = 500;
+
+  $effect(() => {
+    const needle = contentMode ? query.trim() : "";
+    const current = task;
+    const key = `${needle}\0${scopeKey}\0${opened.generation}`;
+    untrack(() => {
+      if (key === contentKey) return;
+      contentKey = key;
+      if (contentTimer) clearTimeout(contentTimer);
+      contentTimer = null;
+      contentSerial += 1;
+      if (!needle || !current) {
+        contentHits = null;
+        contentBusy = false;
+        contentNote = null;
+        return;
+      }
+      const serial = contentSerial;
+      contentBusy = true;
+      contentTimer = setTimeout(() => void runContentSearch(needle, current, serial), 250);
+    });
+  });
+
+  onDestroy(() => {
+    contentSerial += 1;
+    if (contentTimer) clearTimeout(contentTimer);
+  });
+
+  async function runContentSearch(needle: string, current: TaskReview, serial: number): Promise<void> {
+    const targets = current.files.filter((file) => file.status !== "deleted").map((file) => file.path);
+    const hits = new Map<string, number>();
+    let failed = 0;
+    let truncated = false;
+    let cursor = 0;
+    const repo = opened.summary.path;
+    const generation = opened.generation;
+    const worker = async () => {
+      while (cursor < targets.length && serial === contentSerial) {
+        const path = targets[cursor];
+        cursor += 1;
+        try {
+          const result = await api.repositoryContentSearch(repo, needle, { kind: "file", path }, true, CONTENT_LIMIT, generation, nextId());
+          if (result.matches.length > 0) hits.set(path, result.matches.length);
+          if (result.truncated) truncated = true;
+        } catch {
+          failed += 1;
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(CONTENT_CONCURRENCY, targets.length) }, () => worker()));
+    if (serial !== contentSerial) return;
+    contentHits = hits;
+    contentBusy = false;
+    const parts = [`${hits.size} / ${targets.length} 个文件的当前内容包含“${needle}”`];
+    if (current.files.length > targets.length) parts.push(`已删除的 ${current.files.length - targets.length} 个文件不参与`);
+    if (failed > 0) parts.push(`${failed} 个文件读取失败`);
+    if (truncated) parts.push("部分文件命中过多，只计到上限");
+    contentNote = parts.join("；") + "。";
+  }
+
+  function setContentMode(next: boolean): void {
+    contentMode = next;
+    queueNote = null;
+    document.getElementById("task-file-search")?.focus();
+  }
+
+  /** 内容搜索生效中（有关键词且已有结果）：队列只保留命中的文件。 */
+  let contentFilter = $derived(contentMode && query.trim() !== "" && contentHits ? contentHits : null);
+
   /** 当前可见队列：搜索、筛选段与「隐藏已审阅」之后的有序行。连续阅读与未审阅跳转都作用于它。 */
-  let queueRows = $derived(filterQueueRows(orderedRows(files, query), filter, reviewed, commentedPaths));
+  let queueRows = $derived.by(() => {
+    const base = orderedRows(files, contentMode ? "" : query);
+    const scoped = contentFilter ? base.filter((row) => contentFilter!.has(row.path)) : base;
+    return filterQueueRows(scoped, filter, reviewed, commentedPaths);
+  });
   let rows = $derived(hideReviewed ? queueRows.filter((row) => !reviewed.has(row.path)) : queueRows);
   let rowsByPath = $derived(new Map(allRows.map((row) => [row.path, row])));
-  let filterPaths = $derived(filter === "all" ? null : new Set(queueRows.map((row) => row.path)));
+  let filterPaths = $derived(filter === "all" && !contentFilter ? null : new Set(queueRows.map((row) => row.path)));
+  // 内容搜索出结果后，当前文件不在命中里就定位到第一个命中文件：右侧不再停在一个已被筛掉的文件上。
+  $effect(() => {
+    const hits = contentFilter;
+    untrack(() => {
+      if (!hits || multiActive) return;
+      const first = rows[0];
+      if (first && (!selected || !hits.has(selected.path))) goToRow(first);
+    });
+  });
+  /** 内容搜索命中某文件时，打开它的差异就带入同一个关键词（每个文件 + 关键词只带一次）。 */
+  let findRequest = $derived(
+    contentFilter && selected && contentFilter.has(selected.path)
+      ? { query: query.trim(), nonce: `${selected.path}\0${query.trim()}` }
+      : null,
+  );
+  let queueEmpty = $derived.by(() => {
+    if (contentFilter) {
+      return {
+        message: filter !== "all" ? `「${QUEUE_FILTER_LABELS[filter]}」里没有文件包含“${query.trim()}”` : `没有任务文件的内容包含“${query.trim()}”`,
+        onClear: clearFilters,
+      };
+    }
+    return filter !== "all" ? { message: `「${QUEUE_FILTER_LABELS[filter]}」筛选下没有文件`, onClear: clearFilters } : null;
+  });
   /** 失效撤销的原因：只对仍未重新标记的文件显示。 */
   let revoked = $derived(workbenchId ? workbenchExtras(workbenchId).revoked : {});
   let revokedNotes = $derived(
@@ -1007,6 +1130,39 @@
   }
 
   let fileMenu = $state<ContextMenuRequest | null>(null);
+  let headMenu = $state<ContextMenuRequest | null>(null);
+
+  /** 头部「更多」里的低频动作：都会离开审查视图，不和阅读动作挤在同一行。 */
+  let headEntries = $derived.by<ContextMenuEntry[]>(() => {
+    const entries: ContextMenuEntry[] = [];
+    const current = selected;
+    if (onOpenUnstaged) {
+      entries.push({
+        id: "open-unstaged",
+        label: "在未提交差异里按块/行暂存",
+        icon: "file-diff",
+        disabledReason: !current ? "先选择一个文件" : multiActive || continuous ? "回到单文件阅读后再按块/行暂存" : undefined,
+        run: () => current && onOpenUnstaged?.(current.path),
+      });
+    }
+    if (onShowCommits && task && task.commitCount > 0) {
+      entries.push({ id: "commits", label: `查看范围内提交（${task.commitCount}）`, icon: "history", run: () => onShowCommits?.() });
+    }
+    if (onOpenChanges) {
+      if (entries.length > 0) entries.push({ separator: true });
+      entries.push({ id: "changes", label: "回到提交区", icon: "commit", run: () => onOpenChanges?.() });
+    }
+    return entries;
+  });
+
+  function openHeadMenu(event: MouseEvent): void {
+    if (headMenu) {
+      headMenu = null;
+      return;
+    }
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    headMenu = { x: rect.right - 240, y: rect.bottom + 4, entries: headEntries, label: "更多审查操作" };
+  }
 
   function menuTargets(row: FileRow): FileRow[] {
     return multiActive && selectedKeys.has(selectionKey(row)) ? selectedRows : [row];
@@ -1078,6 +1234,7 @@
       }
       entries.push(...stageEntries([row]));
       if (onFileHistory) entries.push({ id: "history", label: "查看文件历史", icon: "history", run: () => onFileHistory?.(row.path) });
+      if (onBlameFile && row.unstaged !== "deleted") entries.push({ id: "blame", label: "逐行追溯（Blame）", icon: "user", run: () => onBlameFile?.(row.path) });
       if (onEditFile && row.unstaged !== "deleted" && !row.unmerged) {
         entries.push({ id: "edit", label: "编辑工作区文件", icon: "pencil", run: () => onEditFile?.(row.path, null) });
       }
@@ -1428,8 +1585,10 @@
           {onUnstageFile}
           {stageSideFor}
           visiblePaths={filterPaths}
-          filterEmpty={filter !== "all" ? { message: `「${QUEUE_FILTER_LABELS[filter]}」筛选下没有文件`, onClear: clearFilters } : null}
+          filterEmpty={queueEmpty}
           rowNotes={revokedNotes}
+          contentSearch={{ active: contentMode, busy: contentBusy, note: contentMode && query.trim() ? contentNote : null, onToggle: setContentMode }}
+          rowHits={contentFilter}
         />
         </div>
       {/if}
@@ -1462,7 +1621,11 @@
               </span>
               {#if task}
                 <span class="task-stats">
-                  <span class="task-value">{task.commitCount} 个提交</span>
+                  {#if onShowCommits && task.commitCount > 0}
+                    <button type="button" class="task-value task-link" title="转到历史，只看起点之后的提交" onclick={onShowCommits}>{task.commitCount} 个提交</button>
+                  {:else}
+                    <span class="task-value">{task.commitCount} 个提交</span>
+                  {/if}
                   <span class="task-value">{task.filesTotal} 个文件</span>
                   <LineCounts stat={{ additions: task.additions, deletions: task.deletions }} />
                 </span>
@@ -1486,9 +1649,7 @@
                   aria-controls="review-queue"
                   aria-expanded={!queueHidden}
                   aria-label={tier === "narrow" ? (queueHidden ? "打开文件队列" : "关闭文件队列") : queueHidden ? "展开左栏" : "收起左栏"}
-                  title={tier === "narrow"
-                    ? "窄窗口里文件队列是抽屉：打开选文件，选好后自动让出位置"
-                    : queueHidden ? "展开来源卡与文件队列" : "收起来源卡与文件队列，差异用满宽度；当前文件不变"}
+                  title={tier === "narrow" ? (queueHidden ? "打开文件队列" : "关闭文件队列") : queueHidden ? "展开左栏" : "收起左栏"}
                   onclick={toggleQueue}
                 ><Icon name="sidebar" size={13} /><span>文件 {rows.length}</span></button>
                 <button
@@ -1517,14 +1678,6 @@
                   ><Icon name="rows" size={12} /><span>连续</span></button>
                 </div>
               {/if}
-              {#if onShowCommits && task.commitCount > 0}
-                <button
-                  type="button"
-                  class="btn btn-ghost btn-sm"
-                  title="转到历史，只看起点之后的提交"
-                  onclick={onShowCommits}
-                ><Icon name="history" size={13} /><span>范围内提交 {task.commitCount}</span></button>
-              {/if}
               {#if onAddComment || onEditComment || onDeleteComment}
                 <button
                   type="button"
@@ -1537,16 +1690,16 @@
                   <Icon name="list" size={13} /><span>意见</span>{#if comments.length > 0}<span class="count">{comments.length}</span>{/if}
                 </button>
               {/if}
-              {#if onOpenChanges}
+              {#if headEntries.length > 0}
                 <button
                   type="button"
-                  class="btn btn-ghost btn-sm"
-                  aria-label="回到改动视图提交"
-                  title="提交只按真实暂存范围执行；任务净差异不会自动进入提交"
-                  onclick={onOpenChanges}
-                >
-                  <Icon name="commit" size={13} /><span>回到提交区</span>
-                </button>
+                  class="icon-btn sm review-more-btn"
+                  aria-label="更多审查操作"
+                  aria-haspopup="menu"
+                  aria-expanded={headMenu !== null}
+                  title="更多：按块/行暂存、范围内提交、回到提交区"
+                  onclick={openHeadMenu}
+                ><Icon name="more" size={15} /></button>
               {/if}
             </div>
           {/if}
@@ -1617,20 +1770,6 @@
           />
         {:else if task && rows.length > 0}
           <div class="task-diff">
-            {#if selected && onOpenUnstaged && !multiActive && !continuous}
-              <!-- 聚合净差异不能直接应用：按块/行暂存要回到同一文件的真实未提交差异。 -->
-              <div class="task-diff-actions">
-                <button
-                  type="button"
-                  class="btn btn-ghost btn-sm"
-                  aria-label={`在未提交差异里按块/行暂存 ${selected.path}`}
-                  title="任务净差异同时含已提交内容，不能直接做块/行补丁；转到这个文件的真实未提交差异再按块/行暂存"
-                  onclick={() => selected && onOpenUnstaged?.(selected.path)}
-                >
-                  <Icon name="file-diff" size={13} /><span>在未提交差异里按块/行暂存</span>
-                </button>
-              </div>
-            {/if}
             {#if selectedRebuilt}
               <!-- 工作区重建：起点里有旧版本，工作区里是未跟踪的同名文件。行数只统计重建后的内容，
                    不暗示为纯新增；files 列表与这条单文件差异用的是同一份口径。 -->
@@ -1721,6 +1860,8 @@
                 }}
                 fileNav={nav}
                 fileCount={rows.length}
+                {findRequest}
+                onBlame={onBlameFile && selectedEditable ? onBlameFile : undefined}
                 onRetry={() => void loadSelectedDiff()}
                 onHunkNav={onHunkNav}
                 onEdit={onEditFile && selected && selectedEditable
@@ -1735,7 +1876,9 @@
         {:else if task}
           <div class="empty task-placeholder" role="status">
             <span class="empty-icon"><Icon name="search" size={22} /></span>
-            {#if query.trim()}
+            {#if query.trim() && contentMode}
+              <strong>没有任务文件的内容包含“{query.trim()}”</strong>
+            {:else if query.trim()}
               <strong>没有匹配“{query.trim()}”的任务文件</strong>
             {:else}
               <strong>当前筛选下没有文件</strong>
@@ -1833,4 +1976,8 @@
 
 {#if fileMenu}
   <ContextMenu request={fileMenu} onClose={() => (fileMenu = null)} />
+{/if}
+
+{#if headMenu}
+  <ContextMenu request={headMenu} onClose={() => (headMenu = null)} />
 {/if}

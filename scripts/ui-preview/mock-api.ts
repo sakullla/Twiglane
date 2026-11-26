@@ -32,6 +32,7 @@ import {
   mockDocumentResource,
   mockEditSave,
   mockEditSnapshot,
+  mockFileBlame,
   mockFilePage,
   mockMoveEntry,
   mockPathSearch,
@@ -1118,6 +1119,10 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
       branches: ["main"],
       head: "main",
     });
+  },
+  fileBlame: (_repo: string, path: string, generation: number) => {
+    const blame = mockFileBlame(path, generation);
+    return blame ? ok(blame, 120) : Promise.reject({ code: "blame_untracked", message: "这个文件还没有提交过，没有可以追溯的历史。" });
   },
   fileHistory: (_repo: string, path: string, offset: number, _generation?: number, _requestId?: number, filters?: { scope?: string; query?: string }) =>
     ok({

@@ -109,7 +109,7 @@ function taskFixture(overrides: Partial<TaskSnapshot> = {}): TaskSnapshot {
     commitsTruncated: false,
     files: [
       taskFile("src/app.ts", "modified"),
-      taskFile("docs/gone.md", "deleted", { additions: 0, deletions: 7 }),
+      taskFile("src/b-gone.md", "deleted", { additions: 0, deletions: 7 }),
       taskFile("src/fresh.ts", "added", { untracked: true, additions: 5, deletions: 0 }),
     ],
     filesTotal: 3,
@@ -568,10 +568,10 @@ describe("任务审阅组件", () => {
     const onStageFiles = vi.fn();
     const onUnstageFiles = vi.fn();
     const onCopyPaths = vi.fn();
-    const stageSideFor = (path: string) => path === "src/app.ts" ? "unstaged" as const : path === "docs/gone.md" ? "staged" as const : "none" as const;
+    const stageSideFor = (path: string) => path === "src/app.ts" ? "unstaged" as const : path === "src/b-gone.md" ? "staged" as const : "none" as const;
     render(TaskReview, { props: reviewProps({ onToggleReview, onStageFiles, onUnstageFiles, onCopyPaths, stageSideFor }) });
     const list = await screen.findByRole("listbox", { name: "任务文件" });
-    await fireEvent.click(within(list).getByRole("option", { name: "docs/gone.md" }), { ctrlKey: true });
+    await fireEvent.click(within(list).getByRole("option", { name: "src/b-gone.md" }), { ctrlKey: true });
     const selected = within(list).getByRole("option", { name: "src/app.ts" });
     await fireEvent.contextMenu(selected);
     const menu = await screen.findByRole("menu", { name: "已选 2 个文件的操作" });
@@ -581,10 +581,10 @@ describe("任务审阅组件", () => {
 
     await fireEvent.contextMenu(selected);
     await fireEvent.click(screen.getByRole("menuitem", { name: "取消暂存 1 个文件" }));
-    expect(onUnstageFiles).toHaveBeenCalledWith(["docs/gone.md"]);
+    expect(onUnstageFiles).toHaveBeenCalledWith(["src/b-gone.md"]);
     await fireEvent.contextMenu(selected);
     await fireEvent.click(screen.getByRole("menuitem", { name: "复制所选相对路径" }));
-    expect(onCopyPaths).toHaveBeenCalledWith(["src/app.ts", "docs/gone.md"]);
+    expect(onCopyPaths).toHaveBeenCalledWith(["src/app.ts", "src/b-gone.md"]);
 
     const toolbar = document.querySelector<HTMLElement>(".multi-stack .diff-toolbar")!;
     await fireEvent.click(within(toolbar).getByRole("button", { name: "标记 2 个文件为已审阅" }));
@@ -697,7 +697,10 @@ describe("任务审阅的队列与写入边界（T3）", () => {
     render(TaskReview, { props: reviewProps() });
     await screen.findByRole("listbox", { name: "任务文件" });
     expect(screen.queryByRole("button", { name: "换起点" })).toBeNull();
-    expect(screen.getByRole("button", { name: "回到改动视图提交" })).toBeTruthy();
+    // 低频的离开动作收进头部「更多」菜单。
+    await fireEvent.click(screen.getByRole("button", { name: "更多审查操作" }));
+    const menu = await screen.findByRole("menu", { name: "更多审查操作" });
+    expect(within(menu).getByRole("menuitem", { name: /回到提交区/ })).toBeTruthy();
   });
 
   it("不再在任务页重复说明暂存范围；只读标记仍在", async () => {
@@ -731,7 +734,9 @@ describe("任务审阅的队列与写入边界（T3）", () => {
     await fireEvent.click(within(list).getByRole("button", { name: "暂存 src/app.ts 到索引" }));
     expect(onStageFile).toHaveBeenCalledWith("src/app.ts");
 
-    await fireEvent.click(screen.getByRole("button", { name: "在未提交差异里按块/行暂存 src/app.ts" }));
+    await fireEvent.click(screen.getByRole("button", { name: "更多审查操作" }));
+    const menu = await screen.findByRole("menu", { name: "更多审查操作" });
+    await fireEvent.click(within(menu).getByRole("menuitem", { name: /在未提交差异里按块\/行暂存/ }));
     expect(onOpenUnstaged).toHaveBeenCalledWith("src/app.ts");
     // 任务页自己不做任何部分补丁：组件内没有按块/按行写入接口。
     for (const name of ["stageFiles", "stageHunks", "stageLines", "commitChanges"]) {
@@ -761,7 +766,7 @@ describe("任务审阅的队列与写入边界（T3）", () => {
 
     // 队列按钮在工具条里（列表之外），与命令面板读同一份状态。
     await fireEvent.click(screen.getByRole("button", { name: "下一个未审阅文件" }));
-    await waitFor(() => expect(onSelection).toHaveBeenLastCalledWith("docs/gone.md"));
+    await waitFor(() => expect(onSelection).toHaveBeenLastCalledWith("src/b-gone.md"));
   });
 });
 /* ------------------------------------------------------------------ *
@@ -773,7 +778,7 @@ describe("任务列表的键盘写入与隐藏（T3）", () => {
     const onStageFile = vi.fn();
     const onHideReviewed = vi.fn();
     render(TaskReview, {
-      props: reviewProps({ onStageFile, onHideReviewed, reviewed: new Set(["docs/gone.md"]), hideReviewed: true }),
+      props: reviewProps({ onStageFile, onHideReviewed, reviewed: new Set(["src/b-gone.md"]), hideReviewed: true }),
     });
     const list = await screen.findByRole("listbox", { name: "任务文件" });
     // 隐藏只影响显示：任务文件总数与已审阅数不变。
@@ -794,14 +799,14 @@ describe("任务列表的键盘写入与隐藏（T3）", () => {
     const onUnstageFile = vi.fn();
     // 任务行本身只有净结果，方向必须来自真实 Git 状态：这里三条路径各代表一侧。
     const stageSideFor = (path: string) =>
-      path === "docs/gone.md" ? "staged" : path === "src/app.ts" ? "unstaged" : "none";
+      path === "src/b-gone.md" ? "staged" : path === "src/app.ts" ? "unstaged" : "none";
     const { rerender } = render(TaskReview, { props: reviewProps({ onStageFile, onUnstageFile, stageSideFor }) });
     const list = await screen.findByRole("listbox", { name: "任务文件" });
 
     // 真实状态只有已暂存一侧：按钮不能再宣称「暂存」。
-    expect(within(list).queryByRole("button", { name: "暂存 docs/gone.md 到索引" })).toBeNull();
-    await fireEvent.click(within(list).getByRole("button", { name: "取消暂存 docs/gone.md" }));
-    expect(onUnstageFile).toHaveBeenCalledWith("docs/gone.md");
+    expect(within(list).queryByRole("button", { name: "暂存 src/b-gone.md 到索引" })).toBeNull();
+    await fireEvent.click(within(list).getByRole("button", { name: "取消暂存 src/b-gone.md" }));
+    expect(onUnstageFile).toHaveBeenCalledWith("src/b-gone.md");
     expect(onStageFile).not.toHaveBeenCalled();
 
     // 真实状态两侧都没有改动（任务净差异来自提交）：按钮禁用并说明原因。
@@ -810,7 +815,7 @@ describe("任务列表的键盘写入与隐藏（T3）", () => {
 
     // 空格与按钮同一方向：选中已暂存行按空格也是取消暂存。
     const row = [...list.querySelectorAll<HTMLElement>(".file-row")].find(
-      (item) => item.getAttribute("title") === "docs/gone.md",
+      (item) => item.getAttribute("title") === "src/b-gone.md",
     )!;
     await fireEvent.click(row);
     list.focus();
@@ -821,7 +826,7 @@ describe("任务列表的键盘写入与隐藏（T3）", () => {
     // 写入中：整文件按钮禁用，空格也不再写入。
     await rerender(reviewProps({ onStageFile, onUnstageFile, stageSideFor, writeLocked: true }));
     const busy = await waitFor(() => {
-      const node = within(list).getByRole("button", { name: "取消暂存 docs/gone.md" });
+      const node = within(list).getByRole("button", { name: "取消暂存 src/b-gone.md" });
       expect(node.hasAttribute("disabled")).toBe(true);
       return node;
     });
@@ -870,7 +875,7 @@ describe("任务列表的键盘写入与隐藏（T3）", () => {
     // 未审阅跳转收在审阅辅助条里：先展开工具，再点「下一个」。
     await fireEvent.click(screen.getByRole("button", { name: "审阅工具" }));
     await fireEvent.click(screen.getByRole("button", { name: "下一个未审阅文件" }));
-    await waitFor(() => expect(onSelection).toHaveBeenLastCalledWith("docs/gone.md"));
+    await waitFor(() => expect(onSelection).toHaveBeenLastCalledWith("src/b-gone.md"));
   });
 });
 
@@ -905,7 +910,7 @@ describe("任务净差异的轻量编辑入口（T2）", () => {
     await fireEvent.click(gone!);
     await waitFor(() =>
       expect(mocks.api.loadTaskDiff).toHaveBeenLastCalledWith(
-        WORKTREE, BASE, HEAD, "docs/gone.md", 4, expect.any(Number), null, 0, 0, undefined, false,
+        WORKTREE, BASE, HEAD, "src/b-gone.md", 4, expect.any(Number), null, 0, 0, undefined, false,
       ),
     );
     await waitFor(() => expect(screen.queryByRole("button", { name: "编辑工作区文件" })).toBeNull());
@@ -1082,5 +1087,60 @@ describe("任务审阅的行意见（feedback-v1 准备侧）", () => {
     expect(notice.getAttribute("role")).toBe("status");
     await fireEvent.click(screen.getByRole("button", { name: "查看意见列表" }));
     expect(within(await screen.findByLabelText("意见列表")).getByText("还没有意见。点块标题上的「评论此块」一次说一整块，或用行尾气泡说某一行。")).toBeTruthy();
+  });
+});
+
+describe("审查队列的排序与内容搜索", () => {
+  it("任务文件按目录再按文件名排序：平铺顺序与目录分组顺序一致", async () => {
+    mocks.api.taskReview.mockResolvedValue(
+      taskFixture({
+        files: [
+          taskFile("src/z.ts", "modified"),
+          taskFile("src/lib/a.ts", "modified"),
+          taskFile("README.md", "modified"),
+          taskFile("src/b.ts", "modified"),
+        ],
+        filesTotal: 4,
+      }),
+    );
+    render(TaskReview, { props: reviewProps() });
+    const list = await screen.findByRole("listbox", { name: "任务文件" });
+    await waitFor(() => expect(within(list).getAllByRole("option").length).toBe(4));
+    expect(within(list).getAllByRole("option").map((row) => row.getAttribute("aria-label"))).toEqual([
+      "README.md",
+      "src/b.ts",
+      "src/z.ts",
+      "src/lib/a.ts",
+    ]);
+  });
+
+  it("切到内容搜索后按文件内容筛出命中文件、标出命中数，并只读取不写入", async () => {
+    mocks.api.repositoryContentSearch.mockImplementation((_repo: string, query: string, scope: { path: string }) =>
+      Promise.resolve({
+        generation: 4,
+        query,
+        scope: "file",
+        scopePath: scope.path,
+        matches: scope.path === "src/fresh.ts" ? [{ path: scope.path, line: 1, column: 1, text: query }, { path: scope.path, line: 3, column: 1, text: query }] : [],
+        filesScanned: 1,
+        skipped: [],
+        skippedFiles: 0,
+        truncated: false,
+        textTruncated: false,
+      }),
+    );
+    render(TaskReview, { props: reviewProps() });
+    const list = await screen.findByRole("listbox", { name: "任务文件" });
+    await fireEvent.click(screen.getByRole("button", { name: "按文件内容搜索" }));
+    const input = screen.getByRole("textbox", { name: "搜索任务文件内容" });
+    await fireEvent.input(input, { target: { value: "needle" } });
+    await waitFor(() => expect(within(list).getAllByRole("option").map((row) => row.getAttribute("aria-label"))).toEqual(["src/fresh.ts"]), { timeout: 2000 });
+    expect(within(list).getByText("2 处")).toBeTruthy();
+    // 已删除的文件没有当前内容：不参与搜索。
+    const searched = mocks.api.repositoryContentSearch.mock.calls.map((call) => (call[2] as { path: string }).path);
+    expect(searched.sort()).toEqual(["src/app.ts", "src/fresh.ts"]);
+    for (const name of ["stageFiles", "stageHunks", "stageLines", "commitChanges"]) {
+      expect(mocks.created.get(name)?.mock.calls.length ?? 0, name).toBe(0);
+    }
   });
 });

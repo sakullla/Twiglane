@@ -164,6 +164,7 @@ fn main() {
             "commit_detail",
             "commit_file_diff",
             "file_history",
+            "file_blame",
             "cherry_pick_commits",
             "revert_commits",
             "checkout_commit",

@@ -124,8 +124,10 @@
 .review-body > .review-drawer { flex: 0 0 320px; max-height: none; min-height: 0; border-top: 0; border-left: 1px solid var(--border); background: var(--surface); }
 
 /* 左栏收起：来源卡与队列整体让位，组件保活（选择、滚动与搜索都不丢）。 */
-.review-layout.queue-hidden { grid-template-columns: 0 0 minmax(0, 1fr); }
+/* display:none 的网格项不占格：主区必须显式跨满整行，否则会被排进宽度为 0 的第一列，整个主区被挤成一条竖线。 */
+.review-layout.queue-hidden { grid-template-columns: minmax(0, 1fr); }
 .review-layout.queue-hidden > .review-side, .review-layout.queue-hidden > .resizer { display: none; }
+.review-layout.queue-hidden > .review-main { grid-column: 1 / -1; }
 
 /* 中档 720–1100：意见抽屉覆盖在差异右侧。 */
 .review-layout[data-tier="medium"] .review-body > .review-drawer,
@@ -238,3 +240,19 @@
 @media (prefers-reduced-motion: reduce) {
   .review-comment-card, .inline-comment-editor, .inline-comment-thread { transition: none; }
 }
+
+/* ---------- 审查队列：内容搜索 ----------
+   搜索框尾部的模式切换（文件名 ↔ 内容），按下时用强调色；命中行数是行尾的小标签。 */
+.field-mode { flex: none; display: grid; place-items: center; width: 22px; height: 20px; margin-right: -2px; border-radius: var(--radius-xs); color: var(--fg-subtle); }
+.field-mode:hover { color: var(--fg); background: var(--hover); }
+.field-mode[aria-pressed="true"] { color: var(--accent-text); background: var(--accent-soft); }
+.field-mode:focus-visible { outline: 2px solid var(--focus); outline-offset: -1px; }
+.field-spinner { flex: none; width: 12px; height: 12px; }
+.file-tag.hits { flex: none; background: var(--accent-softer); color: var(--accent-text); font-variant-numeric: tabular-nums; }
+
+/* 头部「更多」：低频动作收进菜单，主行只留阅读与审阅动作。 */
+.review-more-btn[aria-expanded="true"] { background: var(--active); color: var(--fg); }
+.review-queue-toggle[aria-expanded="false"] { color: var(--accent-text); }
+.task-link { padding: 0 2px; margin: 0 -2px; border-radius: var(--radius-xs); color: inherit; text-decoration: underline; text-decoration-color: var(--border-strong); text-underline-offset: 3px; }
+.task-link:hover { color: var(--accent-text); text-decoration-color: currentColor; }
+.task-link:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }

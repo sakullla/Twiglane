@@ -687,6 +687,44 @@ pub struct ContainingBranch {
     pub current: bool,
 }
 
+/// 逐行追溯里的一个提交。未提交的行归到 `uncommitted` 的虚拟提交上。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BlameCommit {
+    pub oid: String,
+    pub author: String,
+    /// 作者时间（Unix 秒）。
+    pub author_time: i64,
+    pub summary: String,
+    pub uncommitted: bool,
+    /// 追溯到了浅克隆或范围边界：更早的历史不在本地。
+    pub boundary: bool,
+    /// 这些行在该提交里所在的旧路径（改名前）。
+    pub previous_path: Option<String>,
+}
+
+/// 连续归属同一提交的一段行：`start` 是当前文件里 1 起算的行号。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BlameRange {
+    pub start: u32,
+    pub count: u32,
+    /// `commits` 里的下标。
+    pub commit: u32,
+    /// 在该提交版本里的起始行号。
+    pub orig_start: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FileBlame {
+    pub generation: u64,
+    pub path: String,
+    pub lines: u32,
+    pub commits: Vec<BlameCommit>,
+    pub ranges: Vec<BlameRange>,
+}
+
 /// 包含某个提交的分支：回答「这个提交在哪些分支上生效」。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

@@ -15,6 +15,7 @@
   import { effectiveLanguage } from "../syntax/prefs.svelte";
   import { lineSegments } from "../syntax/segments";
   import { commentLineKey } from "../review-comments.svelte";
+  import { findSeed, selectedText } from "../find-seed";
   import ContextMenu, { type ContextMenuEntry, type ContextMenuRequest } from "./ContextMenu.svelte";
   import BinaryPreview from "./BinaryPreview.svelte";
   import FileNav from "./FileNav.svelte";
@@ -141,6 +142,13 @@
      * 差异本身仍然只读，保存只在文件视图的编辑器里发生。
      */
     onEdit?: (line: number | null) => void;
+    /**
+     * 外部请求打开差异内查找并带入关键词（如审查队列的内容搜索）：nonce 变化时生效一次，
+     * 不抢焦点，用户仍可在文件列表里继续用键盘切换。
+     */
+    findRequest?: { query: string; nonce: number | string } | null;
+    /** 逐行追溯这个文件的工作区版本（右键菜单入口）；删除的文件不传。 */
+    onBlame?: (path: string) => void;
   }
 
   /**
@@ -190,6 +198,8 @@
     inlineComment = null,
     inlinePanel,
     onInlinePlaced,
+    findRequest = null,
+    onBlame,
   }: Props = $props();
   let menu = $state<ContextMenuRequest | null>(null);
   /**
@@ -1156,6 +1166,9 @@
     if (onFileHistory) {
       entries.push({ id: "history", label: "查看文件历史", icon: "history", run: () => onFileHistory?.(selection.path) });
     }
+    if (onBlame) {
+      entries.push({ id: "blame", label: "逐行追溯（Blame）", icon: "user", run: () => onBlame?.(selection.path) });
+    }
     if (!readOnly) {
       const reason = fullFile
         ? "完整文件视图不能按块暂存，先切回「只看改动部分」"
@@ -1449,6 +1462,193 @@
     if (scroller) scroller.scrollTop = next;
   }
 
+  /* ---------- 差异内查找（⌘/Ctrl+F） ----------
+     差异是虚拟滚动的，浏览器自带查找看不到没渲染的行：这里按已读到的行文本查找，
+     命中行整体标出、当前一处加强；支持 CSS Highlight API 时再把可见行里的命中文字标出来。
+     只读不写：不影响行选、意见与暂存。 */
+  let findOpen = $state(false);
+  let findQuery = $state("");
+  let findCase = $state(false);
+  let findCursor = $state(-1);
+  let findInput = $state<HTMLInputElement | null>(null);
+  function findable(index: number | undefined): string | null {
+    if (index === undefined) return null;
+    const line = lines[index];
+    if (!line || (line.kind !== "add" && line.kind !== "del" && line.kind !== "context")) return null;
+    return codeOf(line);
+  }
+  /** 命中的行：当前布局下的行号（统一视图是 lines 下标，并排视图是 sideRows 下标）。 */
+  let findRows = $derived.by<number[]>(() => {
+    if (!findOpen || !findQuery) return [];
+    const needle = findCase ? findQuery : findQuery.toLowerCase();
+    const hit = (index: number | undefined) => {
+      const text = findable(index);
+      return text !== null && (findCase ? text : text.toLowerCase()).includes(needle);
+    };
+    const out: number[] = [];
+    if (renderMode === "split") {
+      sideRows.forEach((row, at) => {
+        if (!row.span && (hit(row.left?.index) || hit(row.right?.index))) out.push(at);
+      });
+    } else {
+      for (let at = 0; at < lines.length; at += 1) if (hit(at)) out.push(at);
+    }
+    return out;
+  });
+  let findSet = $derived(new Set(findRows));
+  let findCurrentRow = $derived(findCursor >= 0 ? (findRows[findCursor] ?? null) : null);
+
+  function lastIndexWhere<T>(items: readonly T[], test: (item: T) => boolean): number {
+    for (let index = items.length - 1; index >= 0; index -= 1) if (test(items[index])) return index;
+    return -1;
+  }
+
+  function openFind(seed: string | null = null, focus = true) {
+    const picked = seed ?? findSeed(selectedText(root));
+    if (picked) findQuery = picked;
+    findOpen = true;
+    if (focus) {
+      void tick().then(() => {
+        findInput?.focus();
+        findInput?.select();
+      });
+    }
+  }
+
+  function closeFind() {
+    findOpen = false;
+    findCursor = -1;
+    scroller?.focus({ preventScroll: true });
+  }
+
+  function revealFind(at: number) {
+    const row = findRows[at];
+    if (row === undefined) return;
+    findCursor = at;
+    const height = viewport > 0 ? viewport : (scroller?.clientHeight ?? 0);
+    const top = rowTop(row);
+    if (top < scrollTop || top + ROW_HEIGHT > scrollTop + height) {
+      applyScroll(Math.max(0, top - Math.floor(height / 3)));
+    }
+  }
+
+  function stepFind(direction: 1 | -1) {
+    const count = findRows.length;
+    if (count === 0) return;
+    let next: number;
+    if (findCursor < 0) {
+      // 第一次从当前阅读位置往下（或往上）找，而不是抽回文件开头。
+      if (direction > 0) next = findRows.findIndex((row) => rowTop(row) >= scrollTop);
+      else next = lastIndexWhere(findRows, (row) => rowTop(row) <= scrollTop);
+      if (next < 0) next = direction > 0 ? 0 : count - 1;
+    } else {
+      next = (findCursor + direction + count) % count;
+    }
+    revealFind(next);
+  }
+
+  // 关键词、大小写、布局或文件变化：从当前位置重新定位到下一处。
+  let findKey = "";
+  $effect(() => {
+    const key = `${selectionKey}\0${findOpen}\0${findQuery}\0${findCase}\0${renderMode}\0${lines.length > 0}`;
+    untrack(() => {
+      if (key === findKey) return;
+      findKey = key;
+      findCursor = -1;
+      if (findOpen && findQuery && findRows.length > 0) stepFind(1);
+    });
+  });
+
+  let findNonce: number | string | null = null;
+  $effect(() => {
+    const request = findRequest;
+    untrack(() => {
+      if (!request || request.nonce === findNonce) return;
+      findNonce = request.nonce;
+      if (request.query.trim()) openFind(request.query, false);
+    });
+  });
+
+  /* 可见行里的命中文字：用 CSS Custom Highlight，不改 DOM，也不打断语法高亮的分段。 */
+  const HIGHLIGHT_NAME = "diff-find";
+  const HIGHLIGHT_CURRENT = "diff-find-current";
+  function highlightsApi(): { set: (name: string, value: unknown) => void; delete: (name: string) => void } | null {
+    const css = (globalThis as { CSS?: { highlights?: unknown } }).CSS;
+    const registry = css?.highlights as { set: (name: string, value: unknown) => void; delete: (name: string) => void } | undefined;
+    const ctor = (globalThis as { Highlight?: unknown }).Highlight;
+    return registry && typeof ctor === "function" ? registry : null;
+  }
+  $effect(() => {
+    const registry = highlightsApi();
+    if (!registry) return;
+    const needle = findOpen ? findQuery : "";
+    const sensitive = findCase;
+    void range.start;
+    void range.end;
+    void findCurrentRow;
+    void renderMode;
+    void scroller;
+    const frame = requestAnimationFrame(() => {
+      const host = scroller;
+      if (!host || !needle) {
+        registry.delete(HIGHLIGHT_NAME);
+        registry.delete(HIGHLIGHT_CURRENT);
+        return;
+      }
+      const HighlightCtor = (globalThis as unknown as { Highlight: new (...ranges: Range[]) => unknown }).Highlight;
+      const all: Range[] = [];
+      const current: Range[] = [];
+      const query = sensitive ? needle : needle.toLowerCase();
+      for (const code of host.querySelectorAll<HTMLElement>(".code-in")) {
+        const row = code.closest<HTMLElement>("[data-diff-row]");
+        const isCurrent = row?.classList.contains("find-current") ?? false;
+        const walker = document.createTreeWalker(code, NodeFilter.SHOW_TEXT);
+        let text = "";
+        const nodes: { node: Text; start: number }[] = [];
+        for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+          nodes.push({ node: node as Text, start: text.length });
+          text += (node as Text).data;
+        }
+        const haystack = sensitive ? text : text.toLowerCase();
+        let at = haystack.indexOf(query);
+        while (at >= 0 && query.length > 0) {
+          const end = at + query.length;
+          const startNode = nodes[lastIndexWhere(nodes, (item) => item.start <= at)];
+          const endNode = nodes[lastIndexWhere(nodes, (item) => item.start < end)];
+          if (startNode && endNode) {
+            const r = document.createRange();
+            r.setStart(startNode.node, at - startNode.start);
+            r.setEnd(endNode.node, end - endNode.start);
+            (isCurrent ? current : all).push(r);
+          }
+          at = haystack.indexOf(query, end);
+        }
+      }
+      registry.set(HIGHLIGHT_NAME, new HighlightCtor(...all));
+      registry.set(HIGHLIGHT_CURRENT, new HighlightCtor(...current));
+    });
+    return () => cancelAnimationFrame(frame);
+  });
+  onDestroy(() => {
+    const registry = highlightsApi();
+    registry?.delete(HIGHLIGHT_NAME);
+    registry?.delete(HIGHLIGHT_CURRENT);
+  });
+
+  function onSectionKey(event: KeyboardEvent) {
+    if (embedded) return;
+    const mod = event.metaKey || event.ctrlKey;
+    if (!mod || event.altKey || event.shiftKey) return;
+    if (event.key.toLowerCase() !== "f" && event.code !== "KeyF") return;
+    if (!currentDiff || currentDiff.binary || currentDiff.preview) return;
+    const target = event.target as HTMLElement | null;
+    // 意见编辑器等文本控件里不拦：那里的 ⌘F 属于控件本身。
+    if (target && target !== findInput && target.closest("textarea, [contenteditable='true']")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openFind();
+  }
+
   /** 按下时再算一次：滚动可能刚发生，不能用上报那一刻的行号。 */
   function jump(direction: -1 | 1) {
     const state = hunkJump(hunkIndexes, rowSpace(scrollTop), ROW_HEIGHT, hunkMax);
@@ -1574,7 +1774,8 @@
   }
 </script>
 
-<section class="diff dense" class:embedded aria-label="差异详情" tabindex="-1" bind:this={root} title={cramped ? "窗口太窄，暂时使用统一视图" : undefined}>
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+<section class="diff dense" class:embedded aria-label="差异详情" tabindex="-1" bind:this={root} title={cramped ? "窗口太窄，暂时使用统一视图" : undefined} onkeydown={onSectionKey}>
   {#if !embedded}
   <!-- 工具条分三段：文件位置/身份 → 能对这个文件做什么 → 怎么显示。同段靠在一起，
        段与段之间一条装饰竖线，扫视顺序与操作顺序一致（先认出文件，再选动作，最后是布局）。
@@ -1814,6 +2015,18 @@
             onclick={clearDiffFilterRules}
           ><Icon name="filter" size={11} /><span>{activeFilterSummary}</span><Icon name="x" size={10} /></button>
         {/if}
+        {#if currentDiff && !currentDiff.binary && !currentDiff.preview && currentDiff.lines.length > 0}
+          <button
+            type="button"
+            class="icon-btn sm diff-find-btn"
+            aria-pressed={findOpen}
+            aria-label="在差异中查找"
+            title={`在差异中查找（${MODIFIER_LABEL} F）`}
+            onclick={() => (findOpen ? closeFind() : openFind())}
+          >
+            <Icon name="search" size={14} />
+          </button>
+        {/if}
         <button
           type="button"
           class="icon-btn sm diff-more-btn"
@@ -1954,6 +2167,58 @@
       <p>{selection.path}</p>
     </div>
   {:else}
+    {#if findOpen && !embedded}
+      <div class="file-findbar diff-findbar" role="search" aria-label="在差异中查找">
+        <div class="field sm">
+          <Icon name="search" size={13} />
+          <input
+            bind:this={findInput}
+            aria-label="差异内查找关键词"
+            placeholder="在差异中查找"
+            title="只在当前文件已读到的差异行里查找（含上下文）"
+            autocomplete="off"
+            spellcheck="false"
+            bind:value={findQuery}
+            onkeydown={(event) => {
+              if (event.isComposing) return;
+              if (event.key === "Escape") {
+                event.preventDefault();
+                event.stopPropagation();
+                closeFind();
+              } else if (event.key === "Enter") {
+                event.preventDefault();
+                stepFind(event.shiftKey ? -1 : 1);
+              }
+            }}
+          />
+          {#if findQuery}
+            <span class="find-count" class:none={findRows.length === 0} role="status">
+              {findRows.length === 0 ? "没有匹配" : `${findCursor >= 0 ? `${findCursor + 1}/` : ""}${findRows.length} 行`}
+            </span>
+          {/if}
+        </div>
+        <button
+          type="button"
+          class="icon-btn sm diff-find-case"
+          aria-pressed={findCase}
+          aria-label="区分大小写"
+          title="区分大小写"
+          onclick={() => (findCase = !findCase)}
+        >Aa</button>
+        <button type="button" class="icon-btn sm" aria-label="上一处匹配" title="上一处（Shift Enter）" disabled={findRows.length === 0} onclick={() => stepFind(-1)}>
+          <Icon name="chevron-up" size={14} />
+        </button>
+        <button type="button" class="icon-btn sm" aria-label="下一处匹配" title="下一处（Enter）" disabled={findRows.length === 0} onclick={() => stepFind(1)}>
+          <Icon name="chevron-down" size={14} />
+        </button>
+        <button type="button" class="icon-btn sm" aria-label="关闭差异内查找" title="关闭（Esc）" onclick={closeFind}>
+          <Icon name="x" size={14} />
+        </button>
+      </div>
+      {#if moreToRead && findQuery}
+        <p class="diff-find-note">只在已读到的 {currentDiff.lines.length} / {currentDiff.totalLines} 行里查找；继续加载后会包含更多内容。</p>
+      {/if}
+    {/if}
     {#if asText && onViewAsText}
       <div class="infobar info" role="status" data-diff-as-text>
         <Icon name="info" size={14} />
@@ -2006,6 +2271,8 @@
               class={lineClass(line.kind)}
               class:pickable={canPick(line)}
               class:picked={canPick(line) && isPicked(line)}
+              class:find-hit={findSet.has(absolute)}
+              class:find-current={findCurrentRow === absolute}
               data-diff-row=""
               data-line={absolute}
               style={`top:${rowTop(absolute)}px;height:${ROW_HEIGHT}px`}
@@ -2085,6 +2352,8 @@
             <div
               class="side-row"
               class:span={row.span}
+              class:find-hit={findSet.has(absolute)}
+              class:find-current={findCurrentRow === absolute}
               data-diff-row=""
               data-line={row.right?.index ?? row.left?.index ?? undefined}
               style={`top:${rowTop(absolute)}px;height:${ROW_HEIGHT}px`}

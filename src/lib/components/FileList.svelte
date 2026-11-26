@@ -84,6 +84,18 @@
     filterEmpty?: { message: string; onClear: () => void } | null;
     /** 行内附注（如失效撤销的原因）：文字 + 图标，不只靠颜色。 */
     rowNotes?: ReadonlyMap<string, { label: string; reason: string }>;
+    /**
+     * 搜索框的内容搜索模式（审查队列）：开启后关键词按文件内容匹配，名称不再参与筛选，
+     * 命中范围由调用方经 visiblePaths 给出；busy 时在框内转圈，note 是一句就地说明。
+     */
+    contentSearch?: {
+      active: boolean;
+      busy: boolean;
+      note: string | null;
+      onToggle: (next: boolean) => void;
+    } | null;
+    /** 内容搜索的每个文件命中行数：行尾标出「N 处」。 */
+    rowHits?: ReadonlyMap<string, number> | null;
   }
 
   type SectionSide = DiffSide | "conflicted";
@@ -134,7 +146,11 @@
     visiblePaths = null,
     filterEmpty = null,
     rowNotes,
+    contentSearch = null,
+    rowHits = null,
   }: Props = $props();
+  /** 名称筛选用的关键词：内容搜索模式下名称不参与筛选，也不在行上标出命中。 */
+  let nameQuery = $derived(contentSearch?.active ? "" : query);
   /** 任务队列的侧别：没有判定函数时退回「未暂存」，改动队列不用这一份。 */
   function taskSide(row: FileRow): DiffSide | "none" {
     return stageSideFor?.(row.path) ?? "unstaged";
@@ -152,9 +168,9 @@
   });
   let reviewToolsShown = $derived(reviewToolsOpen);
   let groups = $derived(groupFiles(files));
-  let conflictedRows = $derived(filterRows(groups.conflicted, query));
-  let unstagedRows = $derived(filterRows(groups.unstaged, query));
-  let stagedRows = $derived(filterRows(groups.staged, query));
+  let conflictedRows = $derived(filterRows(groups.conflicted, nameQuery));
+  let unstagedRows = $derived(filterRows(groups.unstaged, nameQuery));
+  let stagedRows = $derived(filterRows(groups.staged, nameQuery));
 
   /**
    * 分组只由全部行决定：隐藏已审阅只影响显示出来的行，
@@ -169,7 +185,7 @@
     if (rows.length === 0) return [];
     const header: Item = { kind: "header", side, count: rows.length, paths };
     if (!directoryMode) return [header, ...shown.map((row) => ({ kind: "row" as const, row }))];
-    const needle = query.trim();
+    const needle = (contentSearch?.active ? query : nameQuery).trim();
     const items: Item[] = [header];
     for (const bucket of bucketByDirectory(shown)) {
       const key = `${side}:${bucket.directory}`;
@@ -321,7 +337,7 @@
 
   let revealedQuery = "";
   $effect(() => {
-    const needle = query.trim();
+    const needle = nameQuery.trim();
     const mode = directoryMode;
     const first = rows[0];
     if (!mode || !needle || !first) return;
@@ -451,21 +467,34 @@
     <Icon name="search" size={14} />
     <input
       id={searchId}
-      aria-label={taskMode ? "搜索任务文件" : "搜索改动文件"}
-      placeholder="搜索文件"
+      aria-label={contentSearch?.active ? "搜索任务文件内容" : taskMode ? "搜索任务文件" : "搜索改动文件"}
+      placeholder={contentSearch?.active ? "搜索文件内容" : "搜索文件"}
       autocomplete="off"
       spellcheck="false"
       value={query}
       oninput={(event) => onQuery((event.currentTarget as HTMLInputElement).value)}
       onkeydown={onSearchKey}
     />
+    {#if contentSearch?.busy}
+      <span class="spinner field-spinner" aria-hidden="true"></span>
+    {/if}
     {#if query}
-      {#if total > 0}
+      {#if total > 0 && !contentSearch?.busy}
         <span class="field-count" title={`当前匹配 ${rows.length} 条，共 ${total} 条`}>{rows.length}/{total}</span>
       {/if}
       <button type="button" class="field-clear" aria-label="清空筛选" onclick={() => onQuery("")}>
         <Icon name="x" size={12} />
       </button>
+    {/if}
+    {#if contentSearch}
+      <button
+        type="button"
+        class="field-mode"
+        aria-pressed={contentSearch.active}
+        aria-label="按文件内容搜索"
+        title={contentSearch.active ? "正在按文件内容搜索；点击改回按文件名搜索" : "改为按文件内容搜索（在任务文件的当前内容里找关键词）"}
+        onclick={() => contentSearch?.onToggle(!contentSearch.active)}
+      ><Icon name="code" size={13} /></button>
     {/if}
   </div>
   {#if onToggleReview || reviewTotal > 0}
@@ -552,6 +581,9 @@
       </button>
     {/if}
   </div>
+{/if}
+{#if contentSearch?.active && contentSearch.note}
+  <p class="file-tree-status" role="status">{contentSearch.note}</p>
 {/if}
 {#if reviewNote}
   <p class="file-tree-status danger" role="alert">{reviewNote}</p>
@@ -755,16 +787,19 @@
             {/if}
             <span class={`st ${mark.tone}`} title={mark.label} aria-label={mark.label}>{mark.letter}</span>
             <span class="file-name">
-              <span class="fn">{#if query.trim()}{#each matchParts(parts.name, query) as part}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}{:else}{parts.name}{/if}</span>
+              <span class="fn">{#if nameQuery.trim()}{#each matchParts(parts.name, nameQuery) as part}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}{:else}{parts.name}{/if}</span>
               {#if row.originalPath}
                 <span class="fd from" title={`重命名自 ${row.originalPath}`}>← {row.originalPath}</span>
               {:else if parts.dir}
-                <span class="fd"><bdi>{#if query.trim()}{#each matchParts(parts.dir, query) as part}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}{:else}{parts.dir}{/if}</bdi></span>
+                <span class="fd"><bdi>{#if nameQuery.trim()}{#each matchParts(parts.dir, nameQuery) as part}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}{:else}{parts.dir}{/if}</bdi></span>
               {/if}
             </span>
             {#if rowNotes?.get(row.path)}
               {@const note = rowNotes.get(row.path)!}
               <span class="file-tag revoked" title={note.reason} aria-label={`${note.label}：${note.reason}`}><Icon name="undo" size={11} />{note.label}</span>
+            {/if}
+            {#if rowHits?.get(row.path)}
+              <span class="file-tag hits" title={`当前内容里有 ${rowHits.get(row.path)} 处“${query.trim()}”`}>{rowHits.get(row.path)} 处</span>
             {/if}
             {#if row.rebuilt}
               <span class="file-tag rebuilt" title="起点里有这个路径，工作区里现在是重建后的未跟踪文件；行数只统计重建后的内容，不是纯新增">工作区重建</span>

@@ -609,3 +609,60 @@ describe("视野外的行内改动", () => {
     }
   });
 });
+
+describe("差异内查找（⌘/Ctrl+F）", () => {
+  function multiLine(): DiffResponse {
+    const texts = [" const alpha = 1;", "-const beta = 2;", "+const Beta = 3;", " const gamma = alpha + beta;"];
+    return {
+      ...diffFor("src/a.ts", "x"),
+      totalLines: texts.length,
+      lines: texts.map((text, index) => ({
+        kind: text[0] === "+" ? "add" : text[0] === "-" ? "del" : "context",
+        text,
+        oldNo: text[0] === "+" ? null : index + 1,
+        newNo: text[0] === "-" ? null : index + 1,
+        hunkIndex: 0,
+      })),
+    } as DiffResponse;
+  }
+
+  const props = () => ({
+    selection: { path: "src/a.ts", side: "unstaged" as const },
+    diff: multiLine(),
+    error: null,
+    loading: false,
+    disabled: false,
+    readOnly: true,
+    onStageHunk: () => {},
+    onLoadMore: () => {},
+    onFileHistory: () => {},
+  });
+
+  it("快捷键打开查找框，按已读到的行计数，区分大小写可切换，Esc 关闭", async () => {
+    render(DiffView, { props: props() });
+    const scroll = await waitFor(() => document.querySelector<HTMLElement>(".diff-scroll")!);
+    await fireEvent.keyDown(scroll, { key: "f", ctrlKey: true });
+    const input = await screen.findByRole("textbox", { name: "差异内查找关键词" });
+    await fireEvent.input(input, { target: { value: "beta" } });
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("3 行"));
+    await waitFor(() => expect(document.querySelectorAll(".diff-line.find-hit").length).toBe(3));
+    expect(document.querySelectorAll(".diff-line.find-current").length).toBe(1);
+
+    await fireEvent.click(screen.getByRole("button", { name: "区分大小写" }));
+    await waitFor(() => expect(document.querySelectorAll(".diff-line.find-hit").length).toBe(2));
+
+    await fireEvent.keyDown(input, { key: "Enter" });
+    expect(document.querySelectorAll(".diff-line.find-current").length).toBe(1);
+    await fireEvent.keyDown(input, { key: "Escape" });
+    expect(screen.queryByRole("textbox", { name: "差异内查找关键词" })).toBeNull();
+    expect(document.querySelectorAll(".diff-line.find-hit").length).toBe(0);
+  });
+
+  it("外部带入关键词时打开查找但不抢焦点", async () => {
+    render(DiffView, { props: { ...props(), findRequest: { query: "gamma", nonce: "a" } } });
+    const input = await screen.findByRole("textbox", { name: "差异内查找关键词" });
+    expect((input as HTMLInputElement).value).toBe("gamma");
+    expect(document.activeElement).not.toBe(input);
+    await waitFor(() => expect(document.querySelectorAll(".diff-line.find-hit").length).toBe(1));
+  });
+});

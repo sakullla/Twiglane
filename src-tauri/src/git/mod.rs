@@ -23,6 +23,7 @@ macro_rules! settle_read {
 }
 
 pub mod advice;
+pub mod blame;
 pub mod changes;
 pub mod command;
 pub mod credential;

@@ -64,6 +64,7 @@ import type {
   CommitResult,
   DiffResponse,
   FileHistoryPage,
+  FileBlame,
   GitInfo,
   GitLabInstanceEntry,
   CherryPickOutcome,
@@ -1637,6 +1638,9 @@ const apiBase = {
       requestId,
       ...historyFilterPayload(filters, true),
     }),
+  /** 逐行追溯：只读，追溯当前工作区里这个文件的每一行最后由哪个提交写入。 */
+  fileBlame: (path: string, relative: string, generation: number, requestId: number) =>
+    invoke<FileBlame>("file_blame", { path, relative, generation, requestId }),
   cherryPickCommits: async (path: string, oids: string[], generation: number, requestId: number) => {
     const reviewId = captureClioraReview(path);
     const result = await invoke<CherryPickOutcome>("cherry_pick_commits", { path, oids, generation, requestId, ...(reviewId ? { reviewId } : {}) });
@@ -3039,6 +3043,11 @@ const remoteOverrides: Record<string, unknown> = {
     });
     const page = bridgeField<FileHistoryPage>(result, "page");
     return { ...page, generation: session.generation };
+  },
+
+  async fileBlame(path: string, relative: string, generation: number, requestId: number): Promise<FileBlame> {
+    if (!isRemoteRepositoryKey(path)) return apiBase.fileBlame(path, relative, generation, requestId);
+    throw remoteError("remote_unsupported", "SSH 远端仓库暂不支持逐行追溯，可在远端终端里运行 git blame。");
   },
 
   async commitDetail(

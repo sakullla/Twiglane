@@ -1204,7 +1204,8 @@ describe("连续审阅队列与真实写入边界（R2、R4、R6）", () => {
     await waitFor(() => expect(within(taskView).getAllByRole("button", { name: "撤销 src/App.svelte 的已审阅标记" }).length).toBeGreaterThan(0));
 
     // 按块/行入口转到真实未提交差异：本身不写 Git，也不扩大暂存范围。
-    await fireEvent.click(within(taskView).getByRole("button", { name: "在未提交差异里按块/行暂存 src/App.svelte" }));
+    await fireEvent.click(within(taskView).getByRole("button", { name: "更多审查操作" }));
+    await fireEvent.click(within(await screen.findByRole("menu", { name: "更多审查操作" })).getByRole("menuitem", { name: /在未提交差异里按块\/行暂存/ }));
     await waitFor(() => expect(activeView()).toBe("changes"));
     expect(selectedPath()).toBe("src/App.svelte");
     expect(mocks.stageFiles).not.toHaveBeenCalled();

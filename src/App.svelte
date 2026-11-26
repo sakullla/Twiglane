@@ -426,6 +426,7 @@
     reveal: (path: string, line?: number | null) => Promise<boolean>;
     focusSearch: (mode: "path" | "content", seed?: string) => Promise<void>;
     afterEntry: (action: FileEntryAction, path: string, target: string) => Promise<boolean>;
+    openBlame: (path: string) => Promise<boolean>;
   } | null>(null);
   /** 批量写入里单个文件遇到 stale 的重试上限，与后端 settle_read 一致。 */
   const BATCH_STALE_RETRIES = 6;
@@ -2355,6 +2356,23 @@
     // 等文件视图真的成为可见视图再定位：隐藏的视图不发起读取。
     await tick();
     await filesView?.reveal(path, line);
+  }
+
+  /** 逐行追溯：切到文件视图打开这个文件，并在代码左侧标出每一行最后由哪个提交写入。 */
+  async function blameInFiles(path: string) {
+    if (!filesViewEnabled) {
+      notice("文件视图已在设置里关闭，打开后才能逐行追溯。", "warn");
+      return;
+    }
+    if (remoteKey !== null) {
+      notice("SSH 远端仓库暂不支持逐行追溯。", "warn");
+      return;
+    }
+    closeTask();
+    showFiles();
+    await tick();
+    const placed = await filesView?.openBlame(path);
+    if (placed === false) notice(`没能在文件树里定位 ${path}，文件可能已被删除或移动。`, "warn");
   }
 
   /** 文件到改动：切回改动视图并定位到这个文件的对应一侧。 */
@@ -4595,6 +4613,10 @@
       },
     });
     entries.push({ id: "history", label: "查看文件历史", icon: "history", run: () => openFileHistory(row.path) });
+    if (filesViewEnabled && remoteKey === null) {
+      const gone = row.unstaged === "deleted" || (row.unstaged === "none" && row.staged === "deleted");
+      entries.push({ id: "blame", label: "逐行追溯（Blame）", icon: "user", disabledReason: gone ? "文件已删除，工作区里没有它" : undefined, run: () => void blameInFiles(row.path) });
+    }
     if (filesViewEnabled) {
       entries.push({
         id: "files",
@@ -4725,7 +4747,7 @@
     }
   }
 
-  function repoContextMenu(repo: RecentRepo, point: { x: number; y: number }, head: RepoHead | null = null) {
+  function repoContextMenu(repo: RecentRepo, point: { x: number; y: number }, head: RepoHead | null = null, probe = false) {
     const current = repo.path === opened?.summary.path;
     const entries: ContextMenuEntry[] = [
       {
@@ -4758,6 +4780,16 @@
       },
       { id: "copy", label: "复制完整路径", icon: "copy", run: () => void copyPath(repo.path) },
     ];
+    // 直接看这个仓库的 Git 状态：切过去（当前仓库就地）并落到对应视图。
+    const blocked = !current && switchBlocked(commandState) ? switchBlockedReason(commandState) : undefined;
+    const openThen = (show: () => void) => async () => {
+      closeSwitcher();
+      if (!current) await openRecent(repo.path);
+      if (opened?.summary.path === repo.path) show();
+    };
+    entries.push({ separator: true });
+    entries.push({ id: "git-changes", label: "查看改动", icon: "file-diff", disabledReason: blocked, run: openThen(() => { closeTask(); showChanges(); }) });
+    entries.push({ id: "git-history", label: "查看提交历史", icon: "history", disabledReason: blocked, run: openThen(() => { closeTask(); showHistory(); }) });
     // 「从列表移除」只对最近列表里的仓库有意义：总览也会列出枚举出来的附属工作区。
     if (recent.some((item) => item.path === repo.path)) {
       entries.push({ separator: true });
@@ -4771,6 +4803,31 @@
         danger: true,
         disabledReason: current ? "当前打开的工作区不能删除，先切到其他仓库" : undefined,
         run: () => askRemoveWorktree(repo, head),
+      });
+    } else if (probe && !head && !isRemoteRepositoryKey(repo.path)) {
+      // 状态还没读到（行上显示「?」）：先把入口给出来，点击时再确认它是不是附属工作区。
+      entries.push({
+        id: "remove-worktree",
+        label: "删除工作区…",
+        icon: "trash",
+        danger: true,
+        disabledReason: current ? "当前打开的工作区不能删除，先切到其他仓库" : undefined,
+        run: async () => {
+          try {
+            const [probed] = await api.repoHeads([repo.path]);
+            if (!probed || probed.missing) {
+              notice(`${repo.name} 的目录已不存在或不再是 Git 仓库，可以直接从最近列表移除。`, "warn");
+              return;
+            }
+            if (!probed.worktree) {
+              notice(`${repo.name} 是主仓库，不是 git worktree 建出的工作区，不能在这里删除。`, "warn");
+              return;
+            }
+            askRemoveWorktree(repo, probed);
+          } catch (error) {
+            showError(normalizeError(error));
+          }
+        },
       });
     }
     contextMenu = { x: point.x, y: point.y, entries, label: `${repo.name} 的操作` };
@@ -5657,7 +5714,7 @@
       onForget={forget}
       onCopyPath={copyPath}
       onRemoveWorktree={askRemoveWorktree}
-      onContextMenu={repoContextMenu}
+      onContextMenu={(repo, point, head) => repoContextMenu(repo, point, head, true)}
       onCommand={runFromSwitcher}
       onClose={closeSwitcher}
     />
@@ -5943,6 +6000,7 @@
                   hunksStageableReason={diff?.hunksStageableReason ?? null}
                   onLoadMore={loadMoreDiff}
                   onFileHistory={openFileHistory}
+                  onBlame={remoteKey === null && filesViewEnabled && selected && filesByPath.get(selected.path)?.unstaged !== "deleted" && !(selected.side === "staged" && filesByPath.get(selected.path)?.staged === "deleted") ? (path) => void blameInFiles(path) : undefined}
                   onReadDocument={openDocument}
                   fullFile={diffFullFile}
                   onFullFile={setFullFile}
@@ -5989,6 +6047,7 @@
               onResizeCommit={persistWidths}
               onGeneration={adoptGeneration}
               onFileHistory={openFileHistory}
+              onOpenCommit={openCommitSearch}
               onOpenDiff={(path, side) => openFileDiff(path, side)}
               remote={remoteKey !== null}
               onReveal={(path, directory) => void revealInFolder(path, directory)}
@@ -6075,6 +6134,7 @@
                 onNotice={notice}
                 onFailure={announceTaskFailure}
                 onFileHistory={openFileHistory}
+                onBlameFile={remoteKey === null && filesViewEnabled ? (path) => void blameInFiles(path) : undefined}
                 onReadDocument={openDocument}
                 onFileNav={(nav) => (taskNav = nav)}
                 onHunkNav={reportTaskHunk}

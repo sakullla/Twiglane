@@ -654,7 +654,7 @@
   });
   type FileItem =
     | { kind: "dir"; directory: string; label: string; count: number; collapsed: boolean }
-    | { kind: "file"; file: (typeof filteredFiles)[number] };
+    | { kind: "file"; file: (typeof filteredFiles)[number]; pos?: number };
   let fileItems = $derived.by(() => {
     if (!directoryMode) return filteredFiles.map((file) => ({ kind: "file" as const, file }));
     const needle = fileFilter.trim();
@@ -692,9 +692,10 @@
   let unionFiles = $derived(filterRows(multiFiles, unionFilter));
   let unionBuckets = $derived(directoryMode ? bucketByDirectory(unionFiles) : []);
   let unionItems = $derived.by(() => {
-    if (!directoryMode) return unionFiles.map((file) => ({ kind: "file" as const, file }));
+    if (!directoryMode) return unionFiles.map((file, idx) => ({ kind: "file" as const, file, pos: idx + 1 }));
     const needle = unionFilter.trim();
     const items: FileItem[] = [];
+    let pos = 0;
     for (const bucket of unionBuckets) {
       const collapsed = unionCollapsedDirs.has(bucket.directory) && needle === "";
       items.push({
@@ -705,11 +706,17 @@
         collapsed,
       });
       if (!collapsed) {
-        for (const file of bucket.rows) items.push({ kind: "file", file });
+        for (const file of bucket.rows) {
+          pos += 1;
+          items.push({ kind: "file", file, pos });
+        }
       }
     }
     return items;
   });
+  let unionOptionCount = $derived(
+    directoryMode ? unionItems.reduce((acc, item) => acc + (item.kind === "file" ? 1 : 0), 0) : unionFiles.length,
+  );
   /** 净结果的合计：两点之间的净行数，中间改了又改回的行不计入。 */
   let unionLineTotals = $derived(multiLoading ? null : commitLineTotals(multiFiles));
   let unionActive = $derived(unionFiles.find((file) => file.path === multiFocus) ?? unionFiles[0] ?? null);
@@ -2459,6 +2466,8 @@
                         class="file-row"
                         role="option"
                         aria-selected={unionActive?.path === file.path}
+                        aria-posinset={item.pos ?? unionRange.start + index + 1}
+                        aria-setsize={unionOptionCount}
                         style={`position:absolute;top:${(unionRange.start + index) * UNION_ROW_HEIGHT + 1}px;height:${UNION_ROW_HEIGHT - 2}px;margin:0`}
                         title={fileTitle(file)}
                         onclick={() => {

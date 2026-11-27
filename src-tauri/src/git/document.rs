@@ -303,21 +303,20 @@ async fn bind_source(
         }
         source.snapshot = Some(snapshot);
     } else if source.revision != "worktree" {
-        let target = format!("{}^{{commit}}", source.revision);
-        let output = git_read(
-            backend,
-            root,
-            git,
-            &["rev-parse", "--verify", &target],
-            generation,
-            1024,
-        )
-        .await?;
+        // A task's comparison side can be an imported-only tree built by merge-tree.
+        // Keep commit IDs intact for callers that bind a document to its commit.
+        let mut output = git_read(
+            backend, root, git, &["rev-parse", "--verify", &format!("{}^{{commit}}", source.revision)],
+            generation, 1024,
+        ).await?;
         if output.exit_code != 0 {
-            return Err(AppError::new(
-                "document_revision",
-                "该提交已不存在或尚无提交。",
-            ));
+            output = git_read(
+                backend, root, git, &["rev-parse", "--verify", &format!("{}^{{tree}}", source.revision)],
+                generation, 1024,
+            ).await?;
+        }
+        if output.exit_code != 0 {
+            return Err(AppError::new("document_revision", "该文档版本已不存在。"));
         }
         let revision = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         if !matches!(revision.len(), 40 | 64) || !revision.bytes().all(|b| b.is_ascii_hexdigit()) {

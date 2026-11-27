@@ -1487,14 +1487,9 @@ pub fn read_object_hash_command(
     (git.to_path_buf(), args)
 }
 
-/// 范围内提交数（`rev-list --count`）：只读，不为此翻页。
-pub fn rev_list_count_command(git: &Path, root: &Path, revision: &str) -> (PathBuf, Vec<OsString>) {
+pub(super) fn task_scope_command(git: &Path, root: &Path, arguments: &[&str]) -> (PathBuf, Vec<OsString>) {
     let mut args = repo_prefix(root, true);
-    args.extend([
-        OsString::from("rev-list"),
-        OsString::from("--count"),
-        OsString::from(revision),
-    ]);
+    args.extend(arguments.iter().map(OsString::from));
     (git.to_path_buf(), args)
 }
 

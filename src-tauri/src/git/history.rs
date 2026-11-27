@@ -1054,7 +1054,7 @@ struct ResolvedHistory {
     unpushed: bool,
     unpushed_tips_equal: bool,
     /// 任务范围：`<起点>..HEAD`。起点是已校验的完整提交标识，不是分支名，不走分支存在性校验。
-    range: bool,
+    task_commits: Option<HashSet<String>>,
     exclude_remotes: bool,
     author: Option<String>,
     path: Option<PathBuf>,
@@ -1097,7 +1097,7 @@ fn resolve_history(request: &HistoryRequest, file_path: Option<PathBuf>) -> Resu
         head_scope,
         unpushed,
         unpushed_tips_equal: false,
-        range: range_base.is_some(),
+        task_commits: None,
         exclude_remotes: false,
         author: if author.is_empty() { None } else { Some(author) },
         path,
@@ -1157,9 +1157,14 @@ fn in_date(at: i64, since: Option<i64>, until: Option<i64>) -> bool {
     true
 }
 
+fn matches_history(hit: &Hit, resolved: &ResolvedHistory) -> bool {
+    in_date(hit.at, resolved.since, resolved.until)
+        && resolved.task_commits.as_ref().is_none_or(|ids| ids.contains(&hit.oid))
+}
+
 fn filter_hits(hits: Vec<Hit>, resolved: &ResolvedHistory) -> Vec<Hit> {
     hits.into_iter()
-        .filter(|hit| in_date(hit.at, resolved.since, resolved.until))
+        .filter(|hit| matches_history(hit, resolved))
         .collect()
 }
 
@@ -1196,7 +1201,10 @@ async fn ensure_scope(
         }
         return Ok(generation);
     }
-    if resolved.range {
+    if let Some(base) = resolved.scope_label.strip_prefix("range:") {
+        let (head, commits, generation) = super::task::history_scope(backend, root, git, base, generation, request_id).await?;
+        resolved.revision = Some(format!("{base}..{head}"));
+        resolved.task_commits = Some(commits);
         return Ok(generation);
     }
     let Some(revision) = &resolved.revision else {
@@ -1229,14 +1237,14 @@ async fn load_history_page(
     follow: bool,
     generation: u64,
 ) -> Result<(Vec<HistoryCommit>, bool, u64), AppError> {
-    if resolved.unpushed_tips_equal {
+    if resolved.unpushed_tips_equal || resolved.task_commits.as_ref().is_some_and(HashSet::is_empty) {
         return Ok((Vec::new(), false, generation));
     }
     let prefix = is_oid_prefix(&resolved.query);
     let dated = resolved.since.is_some() || resolved.until.is_some();
     // 无日期、非文件历史仍是一条带 --skip 和 --max-count 的日志。文件历史不能走这条，
     // 因为 --follow 和 --skip 不能同时使用。
-    if !prefix && !dated && !follow {
+    if !prefix && !dated && !follow && resolved.task_commits.is_none() {
         let limit = HISTORY_PAGE_SIZE.saturating_add(1);
         let grep = if resolved.query.is_empty() {
             None
@@ -1385,7 +1393,7 @@ async fn collect_bounded_hits(
             let produced = hits.len();
             matched = hits
                 .into_iter()
-                .filter(|hit| in_date(hit.at, resolved.since, resolved.until))
+                .filter(|hit| matches_history(hit, resolved))
                 .collect();
             if matched.len() >= want || produced < limit as usize {
                 break;
@@ -1420,7 +1428,7 @@ async fn collect_bounded_hits(
             let hits = parse_hits(&bytes)?;
             let produced = hits.len();
             for hit in hits {
-                if in_date(hit.at, resolved.since, resolved.until) {
+                if matches_history(&hit, resolved) {
                     matched.push(hit);
                 }
             }
@@ -2381,7 +2389,7 @@ fn merge_hits(groups: &[Vec<Hit>]) -> Vec<Hit> {
     hits
 }
 
-fn order_commits(
+pub(super) fn order_commits(
     oids: &[String],
     commits: Vec<HistoryCommit>,
 ) -> Result<Vec<HistoryCommit>, AppError> {

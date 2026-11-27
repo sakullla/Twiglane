@@ -4,7 +4,11 @@
 //! 后续读取单文件差异时还要带上快照里的 HEAD。所有命令都走仓库调度器，复用请求 id、
 //! 代次、取消域与错误脱敏；本模块不写 HEAD、索引或工作区。
 
+mod scope;
+
 use std::collections::HashSet;
+use scope::TaskScope;
+pub(super) use scope::history_scope;
 use std::ffi::OsString;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -14,11 +18,11 @@ use sha2::{Digest, Sha256};
 use crate::error::AppError;
 use crate::git::changes::{diff_is_binary, response_from_diff};
 use crate::git::command::{
-    ancestor_command, file_diff_command, history_log_command,
+    ancestor_command, file_diff_command, history_details_command,
     ls_files_command, ls_tree_entry_command, path_status_command, read_object_hash_command,
-    rev_list_count_command, rev_parse_command, status_command, task_diff_command,
+    rev_parse_command, status_command, task_diff_command,
     task_name_status_command,
-    task_numstat_command, HistoryLog,
+    task_numstat_command,
 };
 use crate::git::files::review_path;
 use crate::git::history::{parse_history_records, parse_name_status};
@@ -38,7 +42,7 @@ use crate::model::{
     StatusSnapshot, TaskFileChange, TaskReview, TaskReviewToken,
 };
 
-/// 范围内提交只返回第一页；完整数量由 rev-list --count 给出。
+/// 范围内提交只返回第一页。
 const MAX_TASK_COMMITS: u32 = 100;
 /// 文件队列上限：超过就明确标记截断，不把部分列表当成完整任务。
 const MAX_TASK_FILES: usize = 20_000;
@@ -110,6 +114,7 @@ struct TaskRange {
     baseline_oid: String,
     head_oid: String,
     snapshot: StatusSnapshot,
+    scope: TaskScope,
 }
 
 fn is_full_oid(value: &str) -> bool {
@@ -211,6 +216,37 @@ async fn resolve_commit(
         Err(version_unconfirmed())
     }
 }
+async fn confirm_ancestor(
+    reads: &mut TaskReads<'_>,
+    root: &Path,
+    git: &Path,
+    baseline_oid: &str,
+    head_oid: &str,
+) -> Result<(), AppError> {
+    let ancestor = reads
+        .step(
+            ancestor_command(git, root, baseline_oid, head_oid),
+            false,
+            None,
+        )
+        .await?;
+    if ancestor.exit_code != 0 {
+        if ancestor.exit_code == 1 {
+            return Err(AppError::new(
+                "task_baseline_not_ancestor",
+                "所选起点不是当前 HEAD 的祖先：它可能来自别的分支或另一个仓库。请重新选择起点。",
+            )
+            .with_generation(reads.generation));
+        }
+        return Err(git_failure(
+            "task_range_failed",
+            &ancestor,
+            "无法确认起点与当前 HEAD 的关系，未修改仓库。",
+        ));
+    }
+    Ok(())
+}
+
 /// 解析并校验任务范围。
 ///
 /// 顺序固定：先读状态（同时校验 generation 并拿到分支与 HEAD），再解析起点，最后确认
@@ -277,28 +313,10 @@ async fn resolve_range(
             .with_generation(reads.generation));
         }
     }
-    let ancestor = reads
-        .step(
-            ancestor_command(git, root, &baseline_oid, &head_oid),
-            false,
-            None,
-        )
-        .await?;
-    if ancestor.exit_code != 0 {
-        if ancestor.exit_code == 1 {
-            return Err(AppError::new(
-                "task_baseline_not_ancestor",
-                "所选起点不是当前 HEAD 的祖先：它可能来自别的分支或另一个仓库。请重新选择起点。",
-            )
-            .with_generation(reads.generation));
-        }
-        return Err(git_failure(
-            "task_range_failed",
-            &ancestor,
-            "无法确认起点与当前 HEAD 的关系，未修改仓库。",
-        ));
-    }
+    confirm_ancestor(reads, root, git, &baseline_oid, &head_oid).await?;
+    let scope = scope::resolve(reads, root, git, &baseline_oid, &head_oid, snapshot.branch.name.as_deref()).await?;
     Ok(TaskRange {
+        scope,
         baseline_ref,
         baseline_oid,
         head_oid,
@@ -315,7 +333,7 @@ async fn net_files(
 ) -> Result<(Vec<TaskFileChange>, bool), AppError> {
     let status_output = reads
         .step(
-            task_name_status_command(git, root, &range.baseline_oid, &[]),
+            task_name_status_command(git, root, &range.scope.diff_base, &[]),
             false,
             None,
         )
@@ -332,7 +350,7 @@ async fn net_files(
         .map_err(|_| AppError::new("task_parse", "无法解析任务范围内的文件，未修改仓库。"))?;
     let stats_output = reads
         .step(
-            task_numstat_command(git, root, &range.baseline_oid, &[]),
+            task_numstat_command(git, root, &range.scope.diff_base, &[]),
             false,
             None,
         )
@@ -434,7 +452,7 @@ async fn net_files(
             rebuilt: removed_in_range.contains(&file.path),
         });
     }
-    apply_binary_sizes(reads, root, git, &range.baseline_oid, &mut files).await;
+    apply_binary_sizes(reads, root, git, &range.scope.diff_base, &mut files).await;
     Ok((files, truncated))
 }
 
@@ -470,50 +488,26 @@ async fn apply_binary_sizes(
     }
 }
 
-/// 范围内提交：完整数量用 rev-list --count，列表只取第一页。
+/// 本地任务提交按拓扑顺序列出第一页。
 async fn range_commits(
     reads: &mut TaskReads<'_>,
     root: &Path,
     git: &Path,
     range: &TaskRange,
 ) -> Result<(Vec<HistoryCommit>, u64, bool), AppError> {
-    let revision = format!("{}..{}", range.baseline_oid, range.head_oid);
-    let count_output = reads
-        .step(rev_list_count_command(git, root, &revision), false, None)
-        .await
-        .map_err(limit_error)?;
-    if count_output.exit_code != 0 {
-        return Err(git_failure(
-            "task_range_failed",
-            &count_output,
-            "无法读取任务范围内的提交数量，未修改仓库。",
-        ));
+    let ids = &range.scope.commits;
+    if ids.is_empty() {
+        return Ok((Vec::new(), 0, false));
     }
-    let commit_count = String::from_utf8_lossy(&count_output.stdout)
-        .trim()
-        .parse::<u64>()
-        .map_err(|_| AppError::new("task_parse", "无法解析任务范围内的提交数量，未修改仓库。"))?;
-    let log = HistoryLog {
-        revision: Some(revision),
-        max_count: Some(MAX_TASK_COMMITS.saturating_add(1)),
-        ..HistoryLog::default()
-    };
-    let log_output = reads
-        .step(history_log_command(git, root, &log), false, None)
-        .await
-        .map_err(limit_error)?;
-    if log_output.exit_code != 0 {
-        return Err(git_failure(
-            "task_range_failed",
-            &log_output,
-            "无法读取任务范围内的提交，未修改仓库。",
-        ));
+    let page_len = ids.len().min(MAX_TASK_COMMITS as usize);
+    let output = reads.step(history_details_command(git, root, &ids[..page_len]), false, None)
+        .await.map_err(limit_error)?;
+    if output.exit_code != 0 {
+        return Err(git_failure("task_range_failed", &output, "无法读取任务提交。"));
     }
-    let mut commits = parse_history_records(&log_output.stdout)
-        .map_err(|_| AppError::new("task_parse", "无法解析任务范围内的提交，未修改仓库。"))?;
-    let truncated = commits.len() > MAX_TASK_COMMITS as usize;
-    commits.truncate(MAX_TASK_COMMITS as usize);
-    Ok((commits, commit_count, truncated))
+    let commits = parse_history_records(&output.stdout)?;
+    let ordered = crate::git::history::order_commits(&ids[..page_len], commits)?;
+    Ok((ordered, ids.len() as u64, page_len < ids.len()))
 }
 
 /// 范围版本：绑定 worktree、起点、HEAD 与当前未提交状态，供后续失效判断。
@@ -521,12 +515,15 @@ fn range_version(
     root: &Path,
     baseline_oid: &str,
     head_oid: &str,
+    diff_base: &str,
     snapshot: &StatusSnapshot,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(repo_key(root).as_bytes());
     hasher.update([0]);
     hasher.update(baseline_oid.as_bytes());
+    hasher.update([0]);
+    hasher.update(diff_base.as_bytes());
     hasher.update([0]);
     hasher.update(head_oid.as_bytes());
     hasher.update([0]);
@@ -583,7 +580,7 @@ pub async fn task_review(
             "文件数超过 {MAX_TASK_FILES} 条上限，这里只列出前 {MAX_TASK_FILES} 条，不能当作完整任务范围。"
         )
     } else if empty {
-        "读取成功：起点之后没有提交，也没有未提交改动。".to_string()
+        "本次任务没有提交，也没有需要审查的工作区改动。".to_string()
     } else if files.is_empty() {
         format!("读取成功：起点之后有 {commit_count} 个提交，但它们没有改变文件内容。")
     } else {
@@ -617,6 +614,7 @@ pub async fn task_review(
             &root,
             &range.baseline_oid,
             &range.head_oid,
+            &range.scope.diff_base,
             &range.snapshot,
         ),
         message,
@@ -654,7 +652,7 @@ pub async fn load_task_diff(
     let (program, args) = task_diff_command(
         &git,
         &root,
-        &range.baseline_oid,
+        &range.scope.diff_base,
         &paths,
         untracked,
         context,
@@ -683,7 +681,7 @@ pub async fn load_task_diff(
             &mut reads,
             &root,
             &git,
-            &range.baseline_oid,
+            &range.scope.diff_base,
             &paths,
             untracked,
         )
@@ -696,7 +694,7 @@ pub async fn load_task_diff(
             &mut reads,
             &root,
             &git,
-            &range.baseline_oid,
+            &range.scope.diff_base,
             &relative_path,
             original_path.as_deref(),
             untracked,
@@ -733,7 +731,7 @@ pub async fn load_task_diff(
         response.preview = Some(crate::git::preview::PreviewSources {
             repository: root.to_string_lossy().into_owned(),
             old: (!added).then(|| crate::git::preview::PreviewSource {
-                revision: range.baseline_oid.clone(),
+                revision: range.scope.diff_base.clone(),
                 path: old_path.into(),
             }),
             new: (!deleted).then(|| crate::git::preview::PreviewSource {
@@ -748,7 +746,7 @@ pub async fn load_task_diff(
         response.document = Some(crate::git::preview::PreviewSources {
             repository: root.to_string_lossy().into_owned(),
             old: (!added).then(|| crate::git::preview::PreviewSource {
-                revision: range.baseline_oid.clone(),
+                revision: range.scope.diff_base.clone(),
                 path: old_path.into(),
             }),
             new: (!deleted).then(|| crate::git::preview::PreviewSource {
@@ -860,7 +858,7 @@ pub async fn task_review_token(
             ls_tree_entry_command(
                 &git,
                 &root,
-                &range.baseline_oid,
+                &range.scope.diff_base,
                 original_path.as_deref().unwrap_or(&relative_path),
             ),
             false,
@@ -877,7 +875,7 @@ pub async fn task_review_token(
     let (program, args) = task_diff_command(
         &git,
         &root,
-        &range.baseline_oid,
+        &range.scope.diff_base,
         &paths,
         untracked,
         3,
@@ -1217,6 +1215,105 @@ mod tests {
         assert_eq!((diff.additions, diff.deletions), (1, 1));
         let token = task_review_token(&backend, &path, &head, &head, "target.txt", generation, 101).await.unwrap();
         assert!(token.token.is_some());
+    }
+
+    #[tokio::test]
+    async fn task_scope_excludes_fast_forward_pull_but_keeps_subsequent_edits() {
+        let fixture = crate::test_support::git_fixture("task-pull");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["commit", "--allow-empty", "-m", "start"]);
+        let base = git_stdout(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["switch", "-c", "incoming"]);
+        fs::write(repo.join("upstream.txt"), "imported\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "upstream"]);
+        git(&repo, &["switch", "main"]);
+        git(&repo, &["pull", "--ff-only", ".", "incoming"]);
+        let (path, generation) = open_repo(&backend, &repo).await;
+        let review = task_review(&backend, &path, &base, generation, 2).await.unwrap();
+        assert!(review.empty);
+        assert_eq!((review.commit_count, review.files_total), (0, 0));
+        let token = task_review_token(&backend, &path, &base, &review.head_oid, "upstream.txt", generation, 3).await.unwrap();
+        assert_eq!(token.state, RepositoryReviewState::Unchanged);
+        fs::write(repo.join("upstream.txt"), "imported\nmy line\n").unwrap();
+        let changed = task_review(&backend, &path, &base, generation, 4).await.unwrap();
+        assert_eq!((changed.files_total, changed.additions, changed.deletions), (1, 1, 0));
+        let diff = load_task_diff(&backend, &path, &base, &review.head_oid, "upstream.txt", None, generation, 5, 0, 0, 3, false).await.unwrap();
+        assert_eq!((diff.additions, diff.deletions), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn task_scope_keeps_only_local_commit_replayed_by_pull() {
+        let fixture = crate::test_support::git_fixture("task-pull-rebase");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["commit", "--allow-empty", "-m", "start"]);
+        let base = git_stdout(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["switch", "-c", "incoming"]);
+        fs::write(repo.join("incoming.txt"), "incoming\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "external"]);
+        git(&repo, &["switch", "main"]);
+        fs::write(repo.join("mine.txt"), "local\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "local"]);
+        git(&repo, &["pull", "--rebase", ".", "incoming"]);
+        let (path, generation) = open_repo(&backend, &repo).await;
+        let review = task_review(&backend, &path, &base, generation, 2).await.unwrap();
+        assert_eq!((review.commit_count, review.files_total), (1, 1));
+        assert_eq!(review.commits[0].summary, "local");
+        assert_eq!(review.files[0].path, "mine.txt");
+    }
+
+    #[tokio::test]
+    async fn task_scope_keeps_local_commits_across_imports_and_filters_history() {
+        let fixture = crate::test_support::git_fixture("task-mixed-imports");
+        let backend = fixture.backend();
+        let repo = fixture.repo("demo");
+        git(&repo, &["init", "-b", "main"]);
+        fs::write(repo.join("shared.md"), "one\n2\n3\n4\n5\n6\nseven\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "start"]);
+        let base = git_stdout(&repo, &["rev-parse", "HEAD"]);
+        fs::write(repo.join("shared.md"), "LOCAL\n2\n3\n4\n5\n6\nseven\n").unwrap();
+        git(&repo, &["commit", "-am", "first local"]);
+        // The fast-forward tip already contains 'first local'.
+        git(&repo, &["switch", "-c", "incoming"]);
+        fs::write(repo.join("shared.md"), "LOCAL\n2\n3\n4\n5\n6\nREMOTE\n").unwrap();
+        git(&repo, &["commit", "-am", "incoming line"]);
+        git(&repo, &["switch", "main"]);
+        git(&repo, &["merge", "--ff-only", "incoming"]);
+        fs::write(repo.join("mine.txt"), "mine\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "second local"]);
+        git(&repo, &["switch", "incoming"]);
+        fs::write(repo.join("remote.txt"), "remote\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "incoming file"]);
+        git(&repo, &["switch", "main"]);
+        git(&repo, &["merge", "--no-ff", "--no-edit", "incoming"]);
+
+        let (path, generation) = open_repo(&backend, &repo).await;
+        let review = task_review(&backend, &path, &base, generation, 2).await.unwrap();
+        assert_eq!(review.baseline_oid, base);
+        assert_eq!((review.commit_count, review.files_total, review.additions, review.deletions), (2, 2, 2, 1));
+        assert!(review.files.iter().all(|f| f.path != "remote.txt"));
+        let diff = load_task_diff(&backend, &path, &base, &review.head_oid, "shared.md", None, generation, 3, 0, 0, 3, false).await.unwrap();
+        assert_eq!((diff.additions, diff.deletions), (1, 1));
+        let before = diff.document.unwrap().old.unwrap();
+        let doc = crate::git::document::repository_document(&backend, &path,
+            &crate::git::document::DocumentSource {
+                revision: before.revision, path: before.path, snapshot: None, repository: None,
+            }, generation, 6, "document", 0, None, None).await.unwrap();
+        assert_eq!(doc.text.as_deref(), Some("one\n2\n3\n4\n5\n6\nREMOTE\n"));
+        let history = crate::git::history::history_page(&backend, &path,
+            &crate::git::history::HistoryRequest { scope: format!("range:{base}"), ..Default::default() },
+            generation, 4).await.unwrap();
+        let messages: Vec<_> = history.commits.iter().map(|c| c.summary.as_str()).collect();
+        assert_eq!(messages, ["second local", "first local"]);
     }
 
     /// 仅提交、提交后再改同一路径、暂存 + 未暂存、删除与未跟踪文件合并成一份净结果。
@@ -1880,6 +1977,8 @@ mod tests {
         let baseline = git_stdout(&repo, &["rev-parse", "HEAD"]);
         git(&repo, &["checkout", "-q", "-b", "side"]);
         fs::write(repo.join("c.txt"), "side\n").unwrap();
+        fs::write(repo.join("side-only.txt"), "imported\n").unwrap();
+        git(&repo, &["add", "side-only.txt"]);
         git(&repo, &["commit", "-q", "-a", "-m", "side"]);
         git(&repo, &["checkout", "-q", "main"]);
         fs::write(repo.join("c.txt"), "main\n").unwrap();
@@ -1903,6 +2002,7 @@ mod tests {
             .await
             .unwrap();
         assert!(task.conflicted);
+        assert!(task.files.iter().all(|f| f.path != "side-only.txt"));
         assert!(task.dirty);
         let conflict = file(&task.files, "c.txt");
         assert!(conflict.unmerged);

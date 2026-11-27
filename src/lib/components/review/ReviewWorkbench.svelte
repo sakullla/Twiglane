@@ -277,6 +277,7 @@
     "task_head_unborn",
     "task_head_changed",
     "task_version_unconfirmed",
+    "task_scope_unconfirmed",
     "not_repository",
   ]);
 
@@ -1607,7 +1608,7 @@
           <div class="commit-head-main">
             <h2 class="commit-title">任务净差异</h2>
             <div class="commit-byline task-byline" role="group" aria-label="任务范围">
-              <span class="task-range" title={task ? `起点 ${task.baselineOid}\nHEAD ${task.headOid}` : (request?.baseline ?? "")}>
+              <span class="task-range" title={task ? `起点 ${task.baselineOid}\nHEAD ${task.headOid}\n按本地 Git 操作记录统计任务提交和工作区改动，排除拉取或合并带入的内容。` : (request?.baseline ?? "")}>
                 <span class="task-kicker">起点</span>
                 <code class="task-oid">{baselineLabel || "未选择"}</code>
                 <Icon name="arrow-right" size={12} />
@@ -1622,7 +1623,7 @@
               {#if task}
                 <span class="task-stats">
                   {#if onShowCommits && task.commitCount > 0}
-                    <button type="button" class="task-value task-link" title="转到历史，只看起点之后的提交" onclick={onShowCommits}>{task.commitCount} 个提交</button>
+                    <button type="button" class="task-value task-link" title="转到历史，查看本地任务提交" onclick={onShowCommits}>{task.commitCount} 个提交</button>
                   {:else}
                     <span class="task-value">{task.commitCount} 个提交</span>
                   {/if}

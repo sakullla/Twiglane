@@ -1377,7 +1377,7 @@ export const api: Record<string, (...args: never[]) => Promise<unknown>> = {
       { path: "src/lib/review-progress.svelte.ts", originalPath: null, status: "modified", additions: 7, deletions: 3 },
       { path: "docs/guide/task-review.md", originalPath: "docs/task-review.md", status: "renamed", additions: 12, deletions: 4 },
       { path: "src/lib/legacy-panel.ts", originalPath: null, status: "deleted", additions: 0, deletions: 58 },
-      { path: "assets/screenshot.png", originalPath: null, status: "modified", additions: null, deletions: null, binary: true, oldSize: 81_920, newSize: 146_752 },
+      { path: "src/assets/screenshot.png", originalPath: null, status: "modified", additions: null, deletions: null, binary: true, oldSize: 81_920, newSize: 146_752 },
       { path: "src/lib/scratch.ts", originalPath: null, status: "added", additions: 9, deletions: 0, untracked: true },
     ];
     return ok({

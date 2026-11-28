@@ -643,10 +643,13 @@
                     </span>
                   </div>
                 </button>
+                <!-- 每条记录的动作都用次级按钮：弹窗里唯一的实心主按钮留给「临时保存」，
+                     列表里逐行重复的高亮按钮会互相抢视线。 -->
                 <div class="stash-record-actions">
                   <button
                     type="button"
-                    class="btn btn-primary btn-sm"
+                    class="btn btn-secondary btn-sm"
+                    data-stash-pop
                     title={isRemoteRepo ? REMOTE_STASH_EXTENDED_UNSUPPORTED_REASON : disabled || busy ? BUSY_REASON : "恢复到工作区；若无冲突则自动删除此记录，发生冲突时保留记录"}
                     disabled={disabled || busy || isRemoteRepo}
                     onclick={() => pop(record.oid)}

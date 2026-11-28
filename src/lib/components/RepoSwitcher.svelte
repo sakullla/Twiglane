@@ -677,7 +677,7 @@
                     <span class="sr-only" data-worktree-remote={view.liveRemoteChecked ? "live" : view.remoteCheckedAtMs !== null ? "stale" : "none"}></span>
                     {#if view.stale}<span class="rs-chip muted" data-worktree-stale={view.path} aria-hidden="true">过期</span>{/if}
                     {#if view.state === "unknown"}
-                      <span class="rs-chip muted" aria-hidden="true">?</span>
+                      <span class="rs-chip muted" aria-hidden="true">未知</span>
                     {:else if view.state === "ready"}
                       {#if (view.conflicted ?? 0) > 0}<span class="rs-chip danger" aria-hidden="true"><Icon name="alert" size={11} />{view.conflicted}</span>{/if}
                       {#if view.dirty}

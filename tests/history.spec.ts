@@ -2540,6 +2540,16 @@ describe("历史分栏", () => {
       expect(entry()).toBeNull();
     });
 
+    it("折叠预览去掉列表符号、用分隔点连接，展开后保留原文排版", async () => {
+      overflow = { scrollWidth: 500, clientWidth: 300 };
+      await renderBody("概要\n\n这次重新组织了主界面：\n- 顶栏集中同步操作\n* 改动列表分组\n1. 提交区记住草稿");
+      const clamped = document.querySelector(".commit-body.clamped");
+      expect(clamped?.textContent).toBe("这次重新组织了主界面： 顶栏集中同步操作 · 改动列表分组 · 提交区记住草稿");
+      expect(clamped?.getAttribute("title")).toContain("- 顶栏集中同步操作");
+      await fireEvent.click(entry()!);
+      expect(document.querySelector(".commit-body")?.textContent).toBe("这次重新组织了主界面：\n- 顶栏集中同步操作\n* 改动列表分组\n1. 提交区记住草稿");
+    });
+
     it("两行说明放不下时给入口", async () => {
       overflow = { scrollWidth: 500, clientWidth: 300 };
       await renderBody("概要\n\n第一行\n第二行");
@@ -3183,8 +3193,9 @@ describe("历史里的 cliora 任务范围（审查工作台「范围内提交�
     });
 
     render(HistoryPanel, { props: { ...panelProps(), taskRange: null } });
-    const copyMsgBtn = await screen.findByRole("button", { name: "复制提交说明" });
-    await fireEvent.click(copyMsgBtn);
+    // 复制格式收在哈希芯片旁的菜单里：完整说明（摘要 + 正文）是其中一项。
+    await fireEvent.click(await screen.findByRole("button", { name: "更多复制格式" }));
+    await fireEvent.click(await screen.findByRole("menuitem", { name: "复制完整提交说明" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(`${rows[0].summary}\n\n详细背景第一段\n详细背景第二段`));
 
     await fireEvent.click(screen.getByRole("option", { name: /commit-1/ }), { shiftKey: true });
@@ -3306,10 +3317,19 @@ describe("历史多提交目录分组、高亮筛选、父提交跳转与短 Has
     render(HistoryPanel, { props: { ...panelProps(), searchQuery: "feature" } });
     await screen.findByRole("heading", { name: "feature work" });
 
-    // 复制短 Hash + 摘要
-    const copyShort = screen.getByRole("button", { name: "复制短哈希与摘要" });
-    await fireEvent.click(copyShort);
+    // 复制短 Hash + 摘要：从哈希芯片旁的复制格式菜单里选
+    const more = screen.getByRole("button", { name: "更多复制格式" });
+    expect(more.getAttribute("aria-haspopup")).toBe("menu");
+    await fireEvent.click(more);
+    expect(more.getAttribute("aria-expanded")).toBe("true");
+    const formats = screen.getAllByRole("menuitem").map((item) => item.textContent?.trim());
+    expect(formats).toEqual(["复制完整哈希", `复制短哈希（${childCommit.oid.slice(0, 7)}）`, "复制短哈希 + 摘要", "复制提交摘要"]);
+    await fireEvent.click(screen.getByRole("menuitem", { name: "复制短哈希 + 摘要" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(`${childCommit.oid.slice(0, 7)} feature work`));
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    // 详情头只剩一处「复制完整提交标识」直达按钮，不再并排多枚长得一样的复制按钮
+    expect(screen.queryByRole("button", { name: "复制短哈希与摘要" })).toBeNull();
+    expect(screen.getAllByRole("button", { name: "复制完整提交标识" })).toHaveLength(1);
 
     // 当前处于搜索筛选，父提交不在列表中：点击父提交给出内联提示与「清除筛选并定位」
     const parentBtn = screen.getByRole("button", { name: new RegExp(`跳转到父提交 ${parentCommit.oid.slice(0, 7)}`) });

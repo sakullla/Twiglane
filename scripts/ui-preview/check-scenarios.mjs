@@ -388,18 +388,19 @@ const REVIEW_SCENARIOS = [
       await d.until("document.activeElement?.closest('.review-queue') !== null", "焦点进入文件队列");
       await d.evaluate(`window.__listFocus = (${FOCUS_PROBE})(document.activeElement) || Boolean(document.querySelector('.review-queue .file-row[aria-selected=true]')); true`);
       const selectedIs = (name) => `(document.querySelector('.review-queue .file-row[aria-selected=true]')?.textContent || '').includes(${JSON.stringify(name)})`;
-      // 搜索框里按 ↓：焦点进列表并前进一行（App.svelte → FileList.svelte）。
-      await d.until(selectedIs("FileList"), "↓ 选中下一个文件");
+      // 队列按目录 → 文件名排序：docs/guide/task-review.md、src/App.svelte、src/assets/screenshot.png、
+      // src/lib/legacy-panel.ts …。搜索框里按 ↓：焦点进列表并前进一行（task-review.md → App.svelte）。
+      await d.until(selectedIs("App.svelte"), "↓ 选中下一个文件");
       await d.press("m", ["Alt"]);
       await d.until("document.querySelectorAll('.review-queue .review-toggle.on').length === 1", "Alt+M 标记当前文件已审阅");
-      // 当前文件已审阅时 Alt+Shift+→ 去队列里第一个未审阅文件（App.svelte）。
+      // 当前文件已审阅时 Alt+Shift+→ 去队列里第一个未审阅文件（task-review.md）。
       await d.press("ArrowRight", ["Alt", "Shift"]);
-      await d.until(selectedIs("App.svelte"), "Alt+Shift+→ 到未审阅文件");
+      await d.until(selectedIs("task-review"), "Alt+Shift+→ 到未审阅文件");
       await d.press("m", ["Alt", "Shift"]);
       await d.until("document.querySelectorAll('.review-queue .review-toggle.on').length === 2", "Alt+Shift+M 标记并继续");
-      await d.until(selectedIs("TaskReview"), "标记后前往下一个未审阅");
+      await d.until(selectedIs("screenshot.png"), "标记后前往下一个未审阅");
       // 回到 App.svelte 按空格：只写真实索引（整文件暂存），任务净差异与队列都还在。
-      for (let step = 0; step < 2; step += 1) await d.press("ArrowUp");
+      await d.press("ArrowUp");
       await d.until(selectedIs("App.svelte"), "↑ 回到 App.svelte");
       await d.press(" ");
       await d.pause(700);
@@ -452,8 +453,7 @@ const REVIEW_SCENARIOS = [
       // 键盘在文件队列里按空格：真实索引变化让任务按新代次重读，旧意见不映射到新行号。
       await d.evaluate("document.getElementById('task-file-search').focus(); true");
       await d.press("ArrowDown");
-      await d.press("ArrowUp");
-      await d.until("(document.querySelector('.review-queue .file-row[aria-selected=true]')?.textContent || '').includes('App.svelte') && document.activeElement?.closest('.review-queue') !== null", "键盘回到 App.svelte");
+      await d.until("(document.querySelector('.review-queue .file-row[aria-selected=true]')?.textContent || '').includes('App.svelte') && document.activeElement?.closest('.review-queue') !== null", "键盘移到 App.svelte");
       await d.press(" ");
       await d.until("(document.querySelector('.review-completion')?.innerText || '').includes('已失效')", "完成栏标出失效意见");
       await d.click(`${REVIEW_ACTIVE} .review-comments-toggle`);
@@ -513,7 +513,10 @@ const REVIEW_SCENARIOS = [
     viewport: { width: 1280, height: 840 },
     steps: async (d) => {
       await openReview(d);
-      await d.click('[aria-label="回到改动视图提交"]');
+      // 「回到提交区」收在审查头部的「更多」菜单里（低频、会离开审查视图）。
+      await d.click(`${REVIEW_ACTIVE} [aria-label="更多审查操作"]`);
+      await d.until("Boolean(document.querySelector('[role=\"menu\"]'))", "更多审查操作菜单");
+      await clickMenuItem(d, "回到提交区");
       await d.until("Boolean(document.querySelector('.workbench-view[data-active=\"true\"] .composer textarea'))", "提交区");
       await d.typeInto('.workbench-view[data-active="true"] .composer textarea', "审阅任务范围并提交");
       await d.click('.workbench-view[data-active="true"] .composer-commit');

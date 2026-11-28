@@ -1192,7 +1192,7 @@ textarea.full-value.editable:focus { border-color: var(--accent); box-shadow: va
 .callout .callout-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
 
 /* ---------- 列表 ---------- */
-.list-box { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: var(--radius); overflow: auto; max-height: 300px; background: var(--surface); flex: none; }
+.list-box { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; border: 1px solid var(--border); border-radius: var(--radius); overflow: auto; max-height: 300px; background: var(--surface); flex: none; }
 .list-box > *, .stash-list > *, .conflict-files > *, .modal-body > * { flex-shrink: 0; }
 .list-row { display: flex; align-items: center; gap: 10px; padding: var(--space-8) 9px var(--space-8) 11px; border-bottom: 1px solid var(--border); min-height: 44px; transition: background var(--duration-fast) var(--ease); }
 .list-row:last-child { border-bottom: 0; }
@@ -1380,6 +1380,21 @@ label.list-row .checkbox { margin-top: 2px; }
 .oid-chip > .icon { color: var(--fg-subtle); }
 .oid-chip button { display: grid; place-items: center; width: 22px; height: 22px; border-radius: var(--radius-xs); color: var(--fg-muted); }
 .oid-chip button:hover { background: var(--hover); color: var(--fg); }
+/* 复制格式展开入口紧贴复制按钮：同一枚芯片里「一键复制完整哈希 + 其余格式」，窄一些，不和主按钮抢视线。 */
+.oid-chip .oid-chip-more { width: 18px; margin-left: -4px; }
+.oid-chip .oid-chip-more[aria-expanded="true"] { background: var(--active); color: var(--fg); }
+
+/* 单提交详情头：标题与操作同一行，说明、作者、父提交与所在分支用满整行。
+   之前这些行只占标题那一栏，右侧操作一宽就把「父提交」「所在分支」挤到单独一行。 */
+.detail-head > .commit-head-main { display: contents; }
+.detail-head .commit-title { grid-column: 1; grid-row: 1; align-self: center; }
+.detail-head > .commit-facts { grid-column: 2; grid-row: 1; }
+.detail-head > .commit-head-main > :not(.commit-title) { grid-column: 1 / -1; }
+/* 很窄时标题让出整行：操作换到标题下面一行，标题不被压成两三个字加省略号。 */
+@container history-detail (max-width: 600px) {
+  .detail-head .commit-title { grid-column: 1 / -1; }
+  .detail-head > .commit-facts { grid-column: 1 / -1; grid-row: 2; flex-wrap: wrap; }
+}
 
 /* 变更文件栏与差异区之间是可拖动的分隔条（PaneResizer），栏宽由 --commit-files 给出。 */
 .commit-split { flex: 1; min-height: 0; display: grid; grid-template-columns: var(--commit-files, 248px) 1px minmax(0, 1fr); }
@@ -1512,13 +1527,13 @@ label.list-row .checkbox { margin-top: 2px; }
 .stash-save-row .btn { flex: none; }
 .stash-records-empty { color: var(--fg-muted); font-size: var(--text-sm); }
 .stash-records-filter { width: 220px; max-width: 100%; }
-.stash-records-empty-filter { display: flex; align-items: center; justify-content: space-between; gap: var(--space-8); padding: var(--space-10) var(--space-12); border-radius: var(--radius); background: var(--surface-2); color: var(--fg-muted); font-size: var(--text-sm); }
+.stash-records-empty-filter { display: flex; align-items: center; justify-content: space-between; gap: var(--space-8); padding: var(--space-12) var(--space-12); border-radius: var(--radius); background: var(--surface-2); color: var(--fg-muted); font-size: var(--text-sm); }
 .stash-list { display: flex; flex-direction: column; border-radius: var(--radius); background: var(--surface-2); overflow: hidden; }
 .stash-record-wrap { display: flex; flex-direction: column; border-bottom: 1px solid var(--border); }
 .stash-record-wrap:last-child { border-bottom: 0; }
 .stash-record { display: flex; align-items: center; gap: var(--space-8); padding: var(--space-6) var(--space-8); flex-wrap: wrap; transition: background var(--duration-fast) var(--ease); }
 .stash-record:hover { background: var(--hover); }
-.stash-record-toggle { flex: 1; min-width: 200px; display: flex; align-items: center; gap: var(--space-10); padding: var(--space-4); border-radius: var(--radius-sm); text-align: left; color: inherit; }
+.stash-record-toggle { flex: 1; min-width: 200px; display: flex; align-items: center; gap: var(--space-8); padding: var(--space-4); border-radius: var(--radius-sm); text-align: left; color: inherit; }
 .stash-record-toggle:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .stash-record-toggle .sr-chevron { display: grid; place-items: center; color: var(--fg-subtle); flex: none; }
 .stash-record-toggle .sr-chevron > .icon { transition: transform var(--duration-fast) var(--ease); }
@@ -1527,8 +1542,8 @@ label.list-row .checkbox { margin-top: 2px; }
 .stash-record .sr-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .stash-record .sr-main strong { font-weight: var(--weight-medium); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .stash-record .sr-main strong.untitled { color: var(--fg-subtle); font-weight: var(--weight-medium); }
-.stash-preview-panel { padding: 0 var(--space-10) var(--space-10); display: flex; flex-direction: column; gap: var(--space-8); min-width: 0; }
-.stash-preview-state { display: flex; align-items: center; gap: var(--space-8); padding: var(--space-10) var(--space-12); border-radius: var(--radius-sm); background: var(--surface); color: var(--fg-muted); font-size: var(--text-sm); }
+.stash-preview-panel { padding: 0 var(--space-12) var(--space-12); display: flex; flex-direction: column; gap: var(--space-8); min-width: 0; }
+.stash-preview-state { display: flex; align-items: center; gap: var(--space-8); padding: var(--space-12) var(--space-12); border-radius: var(--radius-sm); background: var(--surface); color: var(--fg-muted); font-size: var(--text-sm); }
 .stash-preview-split { display: grid; grid-template-columns: minmax(180px, 240px) minmax(0, 1fr); gap: var(--space-8); min-width: 0; }
 @media (max-width: 720px) { .stash-preview-split { grid-template-columns: minmax(0, 1fr); } }
 .stash-preview-files { margin: 0; padding: var(--space-4); list-style: none; max-height: 300px; overflow: auto; border-radius: var(--radius-sm); background: var(--surface); border: 1px solid var(--border); display: flex; flex-direction: column; gap: 2px; min-width: 0; }
@@ -2955,14 +2970,18 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 
 /* ---------- 全局快捷键一览（ShortcutHelpModal） ---------- */
 .shortcut-help { display: flex; flex-direction: column; gap: var(--space-12); min-height: 0; }
-.shortcut-help-search { display: flex; align-items: center; gap: var(--space-10); }
+.shortcut-help-search { display: flex; align-items: center; gap: var(--space-12); }
 .shortcut-help-search .field { flex: 1 1 auto; min-width: 0; }
 .shortcut-help-count { flex: none; font-size: var(--text-xs); color: var(--fg-subtle); font-variant-numeric: tabular-nums; }
-.shortcut-sections { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: var(--space-16); max-height: 56vh; overflow-y: auto; padding-right: var(--space-4); }
-.shortcut-section { display: flex; flex-direction: column; gap: var(--space-6); min-width: 0; }
-.shortcut-section-title { margin: 0; padding-bottom: var(--space-4); border-bottom: 1px solid var(--border); font-size: var(--text-xs); font-weight: var(--weight-semibold); color: var(--fg-muted); letter-spacing: 0.02em; }
-.shortcut-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-4); }
-.shortcut-row { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-10); padding: var(--space-6) var(--space-8); border-radius: var(--radius-sm); background: var(--surface-2); border: 1px solid var(--border); }
+/* 分组按多栏流式排布：长分组可以接着排到下一栏，短分组不再独占一栏留下大片空白；
+   单条快捷键不跨栏断开，分组标题不和第一条分开。 */
+.shortcut-sections { columns: 2 300px; column-gap: var(--space-24); max-height: 56vh; overflow-y: auto; padding-right: var(--space-4); }
+.shortcut-section { min-width: 0; margin-bottom: var(--space-16); }
+.shortcut-section-title { margin: 0 0 var(--space-4); padding-bottom: var(--space-4); border-bottom: 1px solid var(--border); font-size: var(--text-xs); font-weight: var(--weight-semibold); color: var(--fg-muted); letter-spacing: 0.02em; break-after: avoid; }
+.shortcut-list { list-style: none; margin: 0; padding: 0; }
+/* 行是可扫读的清单而不是一张张卡片：去掉逐行描边，悬停给浅底，按键靠右对齐成一列。 */
+.shortcut-row { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-12); padding: var(--space-6) var(--space-8); border-radius: var(--radius-sm); break-inside: avoid; transition: var(--transition-colors); }
+.shortcut-row:hover { background: var(--hover); }
 .shortcut-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .shortcut-title { font-size: var(--text-sm); font-weight: var(--weight-medium); color: var(--fg); line-height: 1.35; }
 .shortcut-hint { font-size: var(--text-xs); color: var(--fg-muted); line-height: 1.35; }
@@ -2972,12 +2991,11 @@ button.merge-message-preview:hover:not(:disabled) > .icon { color: var(--accent-
 
 /* ---------- 提交详情父提交跳转与短 Hash 复制 ---------- */
 .commit-parents { display: inline-flex; align-items: center; flex-wrap: wrap; gap: var(--space-4); }
-.commit-parent-link { display: inline-flex; align-items: center; gap: 3px; height: 20px; padding: 0 var(--space-6); border: 1px solid var(--control-border); border-radius: var(--radius-xs); background: var(--surface-2); color: var(--accent-text); font-size: var(--text-xs); cursor: pointer; transition: background var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard); }
+.commit-parent-link { display: inline-flex; align-items: center; gap: 3px; height: 20px; padding: 0 var(--space-6); border: 1px solid var(--control-border); border-radius: var(--radius-xs); background: var(--surface-2); color: var(--accent-text); font-size: var(--text-xs); cursor: pointer; transition: var(--transition-colors); }
 .commit-parent-link:hover { background: var(--accent-soft); border-color: var(--accent); }
 .commit-parent-link code { font-family: var(--mono); font-size: var(--text-xs); color: inherit; }
 .commit-parent-link .parent-ord { color: var(--fg-muted); font-size: var(--text-2xs, 11px); }
-.commit-parent-notice { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8); margin-top: var(--space-6); padding: var(--space-6) var(--space-10); border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--surface-2); color: var(--fg-muted); font-size: var(--text-xs); }
+.commit-parent-notice { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8); margin-top: var(--space-6); padding: var(--space-6) var(--space-12); border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--surface-2); color: var(--fg-muted); font-size: var(--text-xs); }
 .commit-parent-notice code { font-family: var(--mono); color: var(--fg); }
-.commit-copy-short { gap: var(--space-4); }
 .history-files .fn mark, .history-files .fd mark, .history-files .dir-name mark { background: var(--warning-soft); color: var(--fg); border-radius: 2px; padding: 0 1px; }
 .file-return-btn { flex: none; gap: var(--space-4); }

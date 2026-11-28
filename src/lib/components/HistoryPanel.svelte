@@ -642,6 +642,17 @@
   /** 整次提交的增删行数：只加文本文件，二进制和没有统计的文件不计入，全都没有统计时不显示。 */
   let lineTotals = $derived(commitLineTotals(detail?.files ?? []));
   let bodyRest = $derived(detail ? commitBodyRest(detail.body, detail.commit.summary) : "");
+  /**
+   * 折叠态的一行预览：逐行去掉列表符号再用「·」连起来，而不是让换行被空白折叠成「主界面: - 顶栏 - 列表」。
+   * 以冒号结尾的引导句后面只接一个空格，读起来仍是一句话；展开后照原文排版。
+   */
+  let bodyPreview = $derived(
+    bodyRest
+      .split(/\r?\n/)
+      .map((line) => line.trim().replace(/^(?:[-*+•]|\d+[.)])\s+/, ""))
+      .filter(Boolean)
+      .reduce((text, line) => (text ? `${text}${/[:：]$/.test(text) ? " " : " · "}${line}` : line), ""),
+  );
   /** 从合并提交说明中提取来源与目标分支名（如 Merge branch 'feature' into main）。 */
   let mergeSides = $derived.by(() => {
     if (!detail?.merge) return null;
@@ -1769,8 +1780,6 @@
   }
 
   let copiedOid = $state<string | null>(null);
-  let copiedMessage = $state<string | null>(null);
-  let copiedShortSummary = $state<string | null>(null);
   let parentJumpNotice = $state<{ oid: string; hasFilters: boolean } | null>(null);
   let pendingJumpOid = $state<string | null>(null);
 
@@ -1812,8 +1821,6 @@
     try {
       await navigator.clipboard.writeText(oid);
       copiedOid = oid;
-      copiedMessage = null;
-      copiedShortSummary = null;
       setTimeout(() => {
         if (copiedOid === oid) copiedOid = null;
       }, 1500);
@@ -1822,37 +1829,22 @@
     }
   }
 
-  async function copyShortSummary(oid: string, summary: string) {
-    const text = `${shortOid(oid)} ${summary}`.trim();
-    if (!text) return;
-    try {
-      await navigator.clipboard.writeText(text);
-      copiedShortSummary = oid;
-      copiedOid = null;
-      copiedMessage = null;
-      onNotice?.("已复制短哈希与摘要");
-      setTimeout(() => {
-        if (copiedShortSummary === oid) copiedShortSummary = null;
-      }, 1500);
-    } catch {
-      copiedShortSummary = null;
-    }
-  }
-
-  async function copyMessage(oid: string, summary: string, body: string) {
-    const text = [summary, body].filter(Boolean).join("\n\n");
-    if (!text) return;
-    try {
-      await navigator.clipboard.writeText(text);
-      copiedMessage = oid;
-      copiedOid = null;
-      copiedShortSummary = null;
-      setTimeout(() => {
-        if (copiedMessage === oid) copiedMessage = null;
-      }, 1500);
-    } catch {
-      copiedMessage = null;
-    }
+  /** 哈希芯片旁的复制格式菜单：贴着按钮下沿展开，复制结果走统一的通知。 */
+  function copyFormatsMenu(oid: string, summary: string, body: string, anchor: HTMLElement) {
+    const rect = anchor.getBoundingClientRect();
+    const short = shortOid(oid);
+    const entries: ContextMenuEntry[] = [
+      { id: "copy-hash", label: "复制完整哈希", icon: "copy", run: () => void copyText(oid, `提交哈希 ${short}`) },
+      { id: "copy-short", label: `复制短哈希（${short}）`, icon: "copy", run: () => void copyText(short, `短哈希 ${short}`) },
+      { id: "copy-short-summary", label: "复制短哈希 + 摘要", icon: "copy", run: () => void copyText(`${short} ${summary}`.trim(), "短哈希与摘要") },
+      {
+        id: "copy-message",
+        label: body ? "复制完整提交说明" : "复制提交摘要",
+        icon: "copy",
+        run: () => void copyText([summary, body].filter(Boolean).join("\n\n"), body ? "提交说明" : "提交摘要"),
+      },
+    ];
+    menu = { x: rect.left, y: rect.bottom + 4, entries, label: `复制提交 ${short}` };
   }
 
 
@@ -2531,12 +2523,12 @@
         </div>
       {:else if detail}
         {@const pills = detailPills}
-        <header class="commit-head">
+        <header class="commit-head detail-head">
           <div class="commit-head-main">
             <h2 class="commit-title">{detail.commit.summary}</h2>
             {#if bodyRest}
               <div class="commit-body-row" class:open={bodyOpen}>
-                <pre class="commit-body" class:clamped={!bodyOpen} bind:this={bodyEl}>{bodyRest}</pre>
+                <pre class="commit-body" class:clamped={!bodyOpen} bind:this={bodyEl} title={bodyOpen ? undefined : bodyRest}>{bodyOpen ? bodyRest : bodyPreview}</pre>
                 {#if bodyOpen || bodyClipped}
                   <button type="button" class="btn btn-ghost btn-sm commit-body-toggle" onclick={() => (bodyOpen = !bodyOpen)}>
                     <Icon name="chevron-down" size={12} class={bodyOpen ? "flip" : ""} />{bodyOpen ? "收起说明" : "展开完整说明"}
@@ -2636,34 +2628,31 @@
               <button type="button" aria-pressed={viewMode === "single"} title="一次看一个文件" onclick={() => useMode("single")}><Icon name="file" size={12} />单文件</button>
               <button type="button" aria-pressed={viewMode === "multi"} title="连续查看整次提交的全部文件" onclick={() => useMode("multi")}><Icon name="layers" size={12} />全部文件</button>
             </div>
-            <button
-              type="button"
-              class="btn btn-ghost btn-sm commit-copy-short"
-              data-copy-short-summary
-              aria-label="复制短哈希与摘要"
-              title={copiedShortSummary === detail.commit.oid ? "已复制短哈希与摘要" : `复制「${shortOid(detail.commit.oid)} ${detail.commit.summary}」`}
-              onclick={() => copyShortSummary(detail?.commit.oid ?? "", detail?.commit.summary ?? "")}
-            >
-              <Icon name={copiedShortSummary === detail.commit.oid ? "check" : "copy"} size={12} />
-              <span>短 Hash+摘要</span>
-            </button>
-            <button
-              type="button"
-              class="icon-btn sm"
-              aria-label="复制提交说明"
-              title={copiedMessage === detail.commit.oid ? "已复制提交说明" : bodyRest ? "复制完整提交说明（摘要与正文）" : "复制提交摘要"}
-              onclick={() => copyMessage(detail?.commit.oid ?? "", detail?.commit.summary ?? "", bodyRest)}
-            >
-              <Icon name={copiedMessage === detail.commit.oid ? "check" : "copy"} size={13} />
-            </button>
+            <!-- 复制收成一处：哈希芯片上一键复制完整哈希（最常用），旁边的展开入口给出其余格式，
+                 不再并排三枚长得一样的复制按钮。 -->
             <span class="oid-chip" title={detail.commit.oid}>
               <Icon name="commit" size={12} />
               {shortOid(detail.commit.oid)}
               <button type="button" aria-label="复制完整提交标识" title={copiedOid === detail.commit.oid ? "已复制" : "复制完整提交标识"} onclick={() => copyOid(detail?.commit.oid ?? "")}>
                 <Icon name={copiedOid === detail.commit.oid ? "check" : "copy"} size={12} />
               </button>
+              <button
+                type="button"
+                class="oid-chip-more"
+                data-copy-menu
+                aria-label="更多复制格式"
+                aria-haspopup="menu"
+                aria-expanded={menu !== null && menu.label === `复制提交 ${shortOid(detail.commit.oid)}`}
+                title="复制短哈希、短哈希 + 摘要或完整提交说明"
+                onclick={(event) => {
+                  const current = detail;
+                  if (current) copyFormatsMenu(current.commit.oid, current.commit.summary, bodyRest, event.currentTarget);
+                }}
+              >
+                <Icon name="chevron-down" size={12} />
+              </button>
             </span>
-            <span class="sr-only" aria-live="polite">{copiedOid ? "已复制提交 " + shortOid(copiedOid) : copiedShortSummary ? "已复制短哈希与摘要" : copiedMessage ? "已复制提交说明" : ""}</span>
+            <span class="sr-only" aria-live="polite">{copiedOid ? "已复制提交 " + shortOid(copiedOid) : ""}</span>
           </div>
           {#if detail.merge}
             {@const activeParent = parentChoice ?? detail.selectedParent ?? detail.commit.parents[0]}

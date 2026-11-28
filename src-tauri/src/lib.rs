@@ -96,6 +96,8 @@ pub fn run() {
             std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
             app.manage(Arc::new(workspaces::Discovery::default()));
             let store = AppStore::open(dir.join("state.json"));
+            // 主窗口在读到已保存主题之后再创建：首帧前注入主题，避免先闪一次相反配色。
+            create_main_window(app, store.snapshot().theme)?;
             let backend = Arc::new(Backend::new(
                 store,
                 RealRunner::default(),
@@ -565,6 +567,65 @@ async fn cliora_review_return<R: Runtime>(
         worktree_state: worktree_state.as_str(),
         uncommitted: uncommitted.map(|count| u32::try_from(count).unwrap_or(u32::MAX)),
     })
+}
+
+/// 浅色 / 深色主题的底色，与 src/styles/tokens.css 的 `--bg` 保持一致。
+const LIGHT_BACKGROUND: tauri::window::Color = tauri::window::Color(0xf3, 0xf3, 0xf5, 0xff);
+const DARK_BACKGROUND: tauri::window::Color = tauri::window::Color(0x0b, 0x0b, 0x0e, 0xff);
+
+/// 首帧前写入主题的脚本：页面脚本与样式加载前就把 `data-theme` 定好，
+/// 并把用户选择交给前端作为初始值，避免 App 挂载时先回落到默认深色。
+fn theme_boot_script(theme: Theme) -> String {
+    let choice = match theme {
+        Theme::Light => "light",
+        Theme::Dark => "dark",
+        Theme::System => "system",
+    };
+    format!(
+        r#"(function () {{
+  var choice = "{choice}";
+  window.__TWIGLANE_INITIAL_THEME__ = choice;
+  var resolved = choice;
+  if (choice === "system") {{
+    try {{ resolved = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"; }}
+    catch (_) {{ resolved = "dark"; }}
+  }}
+  function apply() {{
+    var root = document.documentElement;
+    if (!root) return false;
+    root.setAttribute("data-theme", resolved);
+    return true;
+  }}
+  if (!apply()) {{
+    var observer = new MutationObserver(function () {{ if (apply()) observer.disconnect(); }});
+    observer.observe(document, {{ childList: true }});
+  }}
+}})();"#
+    )
+}
+
+/// 按 tauri.conf.json 的 main 配置（`create: false`）创建主窗口，附带主题底色与首帧脚本。
+fn create_main_window<R: Runtime>(app: &tauri::App<R>, theme: Theme) -> tauri::Result<()> {
+    let Some(config) = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == "main")
+        .cloned()
+    else {
+        return Ok(());
+    };
+    let mut builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
+        .initialization_script(theme_boot_script(theme));
+    builder = match theme {
+        Theme::Light => builder.background_color(LIGHT_BACKGROUND),
+        Theme::Dark => builder.background_color(DARK_BACKGROUND),
+        // 跟随系统：Rust 侧不解析系统外观，底色交给首帧脚本解析后的样式。
+        Theme::System => builder,
+    };
+    builder.build()?;
+    Ok(())
 }
 
 /// 通过链接唤起时把主窗口带到前台：先显示、取消最小化，再请求焦点。

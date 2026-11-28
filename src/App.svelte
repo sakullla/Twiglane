@@ -198,13 +198,19 @@
     return window.matchMedia(DARK_QUERY).matches;
   }
 
+  /** 原生侧首帧脚本注入的已保存主题；不在 Tauri 中（测试、预览）时回落到默认深色。 */
+  function initialTheme(): Theme {
+    const injected = (globalThis as { __TWIGLANE_INITIAL_THEME__?: unknown }).__TWIGLANE_INITIAL_THEME__;
+    return injected === "light" || injected === "dark" || injected === "system" ? injected : "dark";
+  }
+
   function resolveTheme(choice: Theme, systemDark: boolean): "light" | "dark" {
     if (choice === "system") return systemDark ? "dark" : "light";
     return choice;
   }
 
   let systemDark = $state(systemPrefersDark());
-  let theme = $state<Theme>("dark");
+  let theme = $state<Theme>(initialTheme());
   let pullIntegration = $state<PullIntegration>("merge");
   let branchGroups = $state(true);
   /** 设置里的「显示文件视图」：关闭后左栏只有改动与历史，文件视图不挂载。 */

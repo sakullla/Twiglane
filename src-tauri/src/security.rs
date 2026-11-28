@@ -323,9 +323,14 @@ fn window_config_is_frameless_on_windows_and_decorated_on_macos() {
             "{key} 在 base 与 macOS 覆盖中必须一致：合并会整体替换 app.windows 数组"
         );
     }
-    for window in [&windows, &macos] {
-        serde_json::from_value::<tauri::utils::config::WindowConfig>(window.clone())
+    let linux = merged_window(root, tauri::utils::platform::Target::Linux);
+    for (platform, window) in [("Windows", windows), ("macOS", macos), ("Linux", linux)] {
+        let config = serde_json::from_value::<tauri::utils::config::WindowConfig>(window)
             .expect("窗口配置必须被 Tauri 的窗口定义接受");
+        assert!(
+            !config.create,
+            "{platform} 的主窗口由 setup 创建，Tauri 不应预先创建"
+        );
     }
 }
 

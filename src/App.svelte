@@ -228,7 +228,19 @@
   let recent = $state.raw<RecentRepo[]>([]);
   let projects = $state.raw<Projects>({ hostId: "", projects: [] });
   let remoteProjectHosts = $state.raw<RemoteProjectHost[]>([]);
-  let selectedProjectId = $state<string | null>(null);
+  /** 标题栏所选业务项目跨启动保留；存储不可用时退回「全部仓库」，项目已不存在时由 loadProjects 清掉。 */
+  const SELECTED_PROJECT_KEY = "twiglane.selectedProject";
+  function readSelectedProject(): string | null {
+    try { return globalThis.localStorage?.getItem(SELECTED_PROJECT_KEY) || null; } catch { return null; }
+  }
+  let selectedProjectId = $state<string | null>(readSelectedProject());
+  $effect(() => {
+    const id = selectedProjectId;
+    try {
+      if (id) globalThis.localStorage?.setItem(SELECTED_PROJECT_KEY, id);
+      else globalThis.localStorage?.removeItem(SELECTED_PROJECT_KEY);
+    } catch { /* 存储不可用时只在本次会话内记住 */ }
+  });
   let projectManagerOpen = $state(false);
   let projectInitialPreview = $state<WorkspacePreview | null>(null);
   let projectFailure = $state<string | null>(null);

@@ -371,7 +371,12 @@
   $effect(() => {
     if (!active) return;
     const leave = (event: Event) => {
-      if (section && !section.contains(event.target as Node)) active = false;
+      const target = event.target as Node | null;
+      if (!section || !target || section.contains(target)) return;
+      // WebKit 点击不可聚焦的按钮时，焦点会落到外层可聚焦容器（提交区的祖先）上；
+      // 那仍是提交区里的点击，不能当成离开，否则说明框会在按钮 click 前收起。
+      if (event.type === "focusin" && target.contains(section)) return;
+      active = false;
     };
     window.addEventListener("pointerdown", leave);
     window.addEventListener("focusin", leave);
@@ -769,6 +774,7 @@
             disabled={disabled}
             aria-label={`插入前缀 ${prefix}`}
             title={disabled ? BUSY_REASON : `在首行插入或替换为 ${prefix}`}
+            onmousedown={(event) => event.preventDefault()}
             onclick={() => void insertPrefix(prefix)}
           >{prefix}</button>
         {/each}

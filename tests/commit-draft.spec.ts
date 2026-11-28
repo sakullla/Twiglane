@@ -637,6 +637,31 @@ describe("提交区", () => {
     expect(onInput).toHaveBeenLastCalledWith("perf: ");
   });
 
+  it("WebKit 点前缀时焦点落到外层容器也不收起说明框，前缀照常插入", async () => {
+    const host = document.createElement("div");
+    host.tabIndex = -1;
+    document.body.appendChild(host);
+    try {
+      const onInput = vi.fn();
+      render(CommitDraft, {
+        target: host,
+        props: { branch: "main", scope: "s", paths: ["a.ts"], value: "", disabled: false, onInput, onBlur: () => {}, onCommit: () => {}, onScope: () => {}, onStageAll: () => {} },
+      });
+      await fireEvent.focus(message());
+      const chip = screen.getByRole("button", { name: "插入前缀 fix:" });
+      // 按下前缀时拦下默认行为，说明框保留焦点
+      expect(await fireEvent.mouseDown(chip)).toBe(false);
+      // 模拟 WebKit：不可聚焦按钮被点时焦点转到外层可聚焦祖先
+      await fireEvent.pointerDown(chip);
+      await fireEvent.focusIn(host);
+      expect(screen.getByRole("group", { name: "快捷规范前缀" })).toBeTruthy();
+      await fireEvent.click(screen.getByRole("button", { name: "插入前缀 fix:" }));
+      expect(onInput).toHaveBeenLastCalledWith("fix: ");
+    } finally {
+      host.remove();
+    }
+  });
+
   it("满足可修订条件时提供修订最近提交快捷触发入口", async () => {
     const onAmend = vi.fn();
     const { rerender } = renderDraft({ canAmend: false, onAmend });
